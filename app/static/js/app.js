@@ -486,7 +486,19 @@ function concatFloat32(a, b) {
 
 // 队列化上传当前窗口：按"使用语言"一路上传
 function queueSegmentUpload(float32Window) {
+    const sampleRate = audioContext ? audioContext.sampleRate : 48000;
+    queueSegmentUploadWithSampleRate(float32Window, sampleRate);
+}
+
+// 带采样率参数的上传函数（用于停止时处理剩余音频）
+function queueSegmentUploadWithSampleRate(float32Window, sampleRate) {
     try {
+        // 检查 Worker 是否可用
+        if (!wavEncoderWorker) {
+            console.error('❌ Worker 未初始化，无法编码音频');
+            return;
+        }
+
         // 生成唯一 ID
         const encodingId = Date.now() + Math.random();
         
@@ -512,12 +524,13 @@ function queueSegmentUpload(float32Window) {
         wavEncoderWorker.postMessage({
             id: encodingId,
             float32Array: float32Window,
-            sampleRate: audioContext.sampleRate
+            sampleRate: sampleRate
         });
 
         console.log('📦 音频窗口已发送到 Worker 编码:', { 
             id: encodingId, 
             samples: float32Window.length,
+            durationSec: (float32Window.length / sampleRate).toFixed(2),
             pendingCount: pendingEncodings.size 
         });
     } catch (e) {
@@ -634,6 +647,24 @@ function stopRecording() {
     // 设置关闭标志，防止产生新的音频分段
     isShuttingDown = true;
     isRecording = false;
+
+    // 保存 sampleRate，因为 audioContext 即将关闭
+    const currentSampleRate = audioContext ? audioContext.sampleRate : 48000;
+
+    // 处理剩余的不完整音频段
+    if (aggregatedBuffer && aggregatedBuffer.length > 0) {
+        const remainingSamples = aggregatedBuffer.length - segmentStartIndex;
+        const minSamples = currentSampleRate * 1; // 至少 1 秒才值得处理
+        
+        if (remainingSamples >= minSamples) {
+            console.log(`📦 处理剩余音频段: ${remainingSamples} 样本 (${(remainingSamples / currentSampleRate).toFixed(2)} 秒)`);
+            const finalWindow = aggregatedBuffer.slice(segmentStartIndex);
+            // 保存当前音频上下文的采样率
+            queueSegmentUploadWithSampleRate(finalWindow, currentSampleRate);
+        } else {
+            console.log(`⏭️ 跳过过短的剩余音频段: ${remainingSamples} 样本`);
+        }
+    }
 
     if (mediaStream) {
         mediaStream.getTracks().forEach(track => track.stop());

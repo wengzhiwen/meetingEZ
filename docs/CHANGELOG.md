@@ -3,6 +3,8 @@
 - 音频采集运行在独立的 AudioWorklet 线程，不受主线程任何操作影响
 - WAV 编码移至 Web Worker 线程，主线程不再执行同步编码操作
 - 支持编码和上传并发，多个任务可同时进行，降低端到端延迟
+- **结束会议时自动处理剩余音频**：确保最后不足 8 秒的音频段也被转写
+- 在途转写和翻译任务在会议结束后继续完成，无内容丢失
 - 新增 `audio-processor.js`（AudioWorklet 处理器）
 - 新增 `wav-encoder-worker.js`（WAV 编码 Worker）
 - 新增详细架构文档 `AUDIO_ARCHITECTURE.md`
