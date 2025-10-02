@@ -230,6 +230,18 @@ body {
     border: 1px solid #bee5eb;
 }
 
+.status-message strong {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 15px;
+}
+
+.status-message br + br {
+    display: block;
+    content: "";
+    margin-top: 4px;
+}
+
 /* 会议控制 */
 .meeting-controls {
     display: flex;
@@ -509,6 +521,48 @@ body {
 .setting-item select:focus {
     outline: none;
     border-color: #667eea;
+}
+
+/* 单选按钮组样式 */
+.radio-group {
+    display: flex;
+    gap: 15px;
+    flex-wrap: wrap;
+}
+
+.radio-label {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    padding: 8px 12px;
+    border: 2px solid #e0e0e0;
+    border-radius: 6px;
+    background: white;
+    transition: all 0.3s ease;
+}
+
+.radio-label:hover {
+    border-color: #667eea;
+    background: #f8f9ff;
+}
+
+.radio-label input[type="radio"] {
+    width: 18px;
+    height: 18px;
+    margin-right: 8px;
+    accent-color: #667eea;
+    cursor: pointer;
+}
+
+.radio-label input[type="radio"]:checked + span {
+    color: #667eea;
+    font-weight: 600;
+}
+
+.radio-label span {
+    font-size: 0.95rem;
+    color: #555;
+    transition: all 0.3s ease;
 }
 
 /* 加载覆盖层 */

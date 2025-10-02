@@ -68,7 +68,12 @@ function stopRecording() {
 
 ## 音频处理
 
-## 音频捕获与编码（会议主流程 48kHz）
+### 音频输入源
+
+MeetingEZ 支持两种音频输入源：
+
+#### 1. 标准麦克风输入（getUserMedia）
+
 ```javascript
 // 获取麦克风权限
 navigator.mediaDevices.getUserMedia({
@@ -79,27 +84,73 @@ navigator.mediaDevices.getUserMedia({
     sampleRate: 48000,
     channelCount: 1,
     sampleSize: 16,
-    latency: 0.01
+    latency: 0.01,
+    deviceId: selectedDeviceId // 可选：指定设备
   }
 })
 .then(stream => {
-  const audioContext = new AudioContext({ sampleRate: 48000 });
-  const source = audioContext.createMediaStreamSource(stream);
-  const processor = audioContext.createScriptProcessor(2048, 1, 1);
-  
-  processor.onaudioprocess = (event) => {
-    const audioData = event.inputBuffer.getChannelData(0);
-    // 转换为 Int16Array 格式
-    const int16Data = new Int16Array(audioData.length);
-    for (let i = 0; i < audioData.length; i++) {
-      int16Data[i] = Math.max(-32768, Math.min(32767, audioData[i] * 32768));
-    }
-  // 使用浏览器端 WAV 封装后通过 REST 上传至 OpenAI
-  };
-  
-  source.connect(processor);
-  processor.connect(audioContext.destination);
+  // 处理音频流
 });
+```
+
+#### 2. 浏览器标签页音频捕获（getDisplayMedia）
+
+使用 `getDisplayMedia` API 捕获其他浏览器标签页的音频，适合转录远程会议（如 Google Meet）。
+
+```javascript
+// 请求共享标签页及其音频
+const displayStream = await navigator.mediaDevices.getDisplayMedia({
+  video: true,   // 需要视频轨才能触发标签页选项
+  audio: true    // 关键：让用户勾选"共享标签页音频"
+});
+
+// 提取音频轨道
+const tabAudioTrack = displayStream.getAudioTracks()[0];
+
+// 检查是否成功获取音频
+if (!tabAudioTrack) {
+  throw new Error('未能获取标签页音频，请确保选择了"共享标签页音频"选项');
+}
+
+// 创建仅包含音频的 MediaStream
+const audioOnlyStream = new MediaStream([tabAudioTrack]);
+
+// 后续处理与麦克风输入相同
+const audioContext = new AudioContext({ sampleRate: 48000 });
+const source = audioContext.createMediaStreamSource(audioOnlyStream);
+// ...
+```
+
+**重要说明**：
+- 用户必须在浏览器弹窗中选择"Chrome 标签页"（或对应选项）
+- 必须勾选"共享标签页音频"或"共享该标签页音频"
+- Chrome/Edge 80+ 完整支持，Firefox 和 Safari 支持有限
+- 视频轨道仅用于触发 UI，可在获取音频后立即停止：
+  ```javascript
+  displayStream.getVideoTracks().forEach(track => track.stop());
+  ```
+
+#### 音频捕获与编码（会议主流程 48kHz）
+
+无论使用哪种输入源，音频处理流程相同：
+
+```javascript
+const audioContext = new AudioContext({ sampleRate: 48000 });
+const source = audioContext.createMediaStreamSource(stream); // stream 可以是麦克风或标签页
+const processor = audioContext.createScriptProcessor(2048, 1, 1);
+
+processor.onaudioprocess = (event) => {
+  const audioData = event.inputBuffer.getChannelData(0);
+  // 转换为 Int16Array 格式
+  const int16Data = new Int16Array(audioData.length);
+  for (let i = 0; i < audioData.length; i++) {
+    int16Data[i] = Math.max(-32768, Math.min(32767, audioData[i] * 32768));
+  }
+  // 使用浏览器端 WAV 封装后通过 REST 上传至 OpenAI
+};
+
+source.connect(processor);
+processor.connect(audioContext.destination);
 ```
 
 ### 音频格式转换

@@ -9,6 +9,7 @@ let transcripts = [];
 let sessionId = null;
 let volumeAnimationFrame = null;
 let selectedAudioDevice = null;
+let selectedAudioSource = 'microphone'; // 'microphone' 或 'tab'
 let testStream = null;
 let testAudioContext = null;
 let isTestingMicrophone = false;
@@ -71,6 +72,18 @@ function loadSettings() {
         apiKeyInput.value = savedApiKey;
     }
     
+    // 加载音频源设置
+    const savedAudioSource = localStorage.getItem('meetingEZ_audioSource') || 'microphone';
+    selectedAudioSource = savedAudioSource;
+    const audioSourceMic = document.getElementById('audioSourceMic');
+    const audioSourceTab = document.getElementById('audioSourceTab');
+    if (savedAudioSource === 'tab') {
+        audioSourceTab.checked = true;
+    } else {
+        audioSourceMic.checked = true;
+    }
+    updateAudioInputVisibility();
+    
     // 加载语言设置
     const primaryLang = localStorage.getItem('meetingEZ_primaryLanguage');
     if (primaryLang) {
@@ -118,6 +131,19 @@ function setupEventListeners() {
     document.getElementById('autoScroll').addEventListener('click', toggleAutoScroll);
 
     document.getElementById('testMicrophone').addEventListener('click', toggleMicrophoneTest);
+
+    // 音频源选择监听器
+    document.getElementById('audioSourceMic').addEventListener('change', () => {
+        selectedAudioSource = 'microphone';
+        localStorage.setItem('meetingEZ_audioSource', 'microphone');
+        updateAudioInputVisibility();
+    });
+    
+    document.getElementById('audioSourceTab').addEventListener('change', () => {
+        selectedAudioSource = 'tab';
+        localStorage.setItem('meetingEZ_audioSource', 'tab');
+        updateAudioInputVisibility();
+    });
 
     if (navigator.mediaDevices) {
         if (typeof navigator.mediaDevices.addEventListener === 'function') {
@@ -237,30 +263,63 @@ async function startMeeting() {
     try {
         showLoading('正在初始化会议...');
 
-        // 获取麦克风权限（尽量保持原始音频）
-        const audioConstraints = {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            sampleRate: 48000,
-            channelCount: 1,
-            sampleSize: 16,
-            latency: 0.01,
-            volume: 1.0,
-            googEchoCancellation: false,
-            googAutoGainControl: false,
-            googNoiseSuppression: false,
-            googHighpassFilter: false,
-            googTypingNoiseDetection: false,
-            googAudioMirroring: false
-        };
+        // 根据选择的音频源获取音频流
+        if (selectedAudioSource === 'tab') {
+            // 使用标签页音频捕获
+            try {
+                const displayStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: true,  // 需要视频轨才能触发标签页选项
+                    audio: true   // 关键：让用户勾选"共享标签页音频"
+                });
 
-        if (selectedAudioDevice) {
-            audioConstraints.deviceId = { exact: selectedAudioDevice };
+                // 提取音频轨道
+                const tabAudioTrack = displayStream.getAudioTracks()[0];
+
+                // 检查是否成功获取音频
+                if (!tabAudioTrack) {
+                    // 停止视频轨道
+                    displayStream.getTracks().forEach(track => track.stop());
+                    throw new Error('未能获取标签页音频。请确保在弹窗中选择了"Chrome 标签页"并勾选了"共享标签页音频"选项。');
+                }
+
+                // 停止视频轨道（只需要音频）
+                displayStream.getVideoTracks().forEach(track => track.stop());
+
+                // 创建仅包含音频的 MediaStream
+                mediaStream = new MediaStream([tabAudioTrack]);
+                console.log('🎵 获取标签页音频成功');
+            } catch (error) {
+                if (error.name === 'NotAllowedError') {
+                    throw new Error('用户取消了标签页共享。请重试并选择要捕获音频的标签页。');
+                }
+                throw error;
+            }
+        } else {
+            // 使用麦克风输入（尽量保持原始音频）
+            const audioConstraints = {
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: false,
+                sampleRate: 48000,
+                channelCount: 1,
+                sampleSize: 16,
+                latency: 0.01,
+                volume: 1.0,
+                googEchoCancellation: false,
+                googAutoGainControl: false,
+                googNoiseSuppression: false,
+                googHighpassFilter: false,
+                googTypingNoiseDetection: false,
+                googAudioMirroring: false
+            };
+
+            if (selectedAudioDevice) {
+                audioConstraints.deviceId = { exact: selectedAudioDevice };
+            }
+
+            mediaStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+            console.log('🎤 获取麦克风权限成功');
         }
-
-        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
-        console.log('🎤 获取麦克风权限成功');
 
         // 启动录音与分段上传流水线
         await startRecording();
@@ -1110,6 +1169,24 @@ function updateControls() {
     // 麦克风测试按钮状态
     const testBtn = document.getElementById('testMicrophone');
     testBtn.disabled = isConnected;
+}
+
+// 更新音频输入设备选择器的可见性
+function updateAudioInputVisibility() {
+    const audioInputContainer = document.getElementById('audioInputContainer');
+    const tabAudioHint = document.getElementById('tabAudioHint');
+    
+    if (selectedAudioSource === 'microphone') {
+        audioInputContainer.style.display = 'flex';
+        if (tabAudioHint) {
+            tabAudioHint.style.display = 'none';
+        }
+    } else {
+        audioInputContainer.style.display = 'none';
+        if (tabAudioHint) {
+            tabAudioHint.style.display = 'block';
+        }
+    }
 }
 
 // 更新会议状态

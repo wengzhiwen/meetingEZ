@@ -73,8 +73,32 @@
                 <div id="connectionStatus" class="status-message"></div>
             </div>
 
-            <!-- 音频输入设备选择（移动到设置区域） -->
+            <!-- 音频输入源选择 -->
             <div class="setting-item">
+                <label>音频输入源</label>
+                <div class="radio-group">
+                    <label class="radio-label">
+                        <input type="radio" name="audioSource" value="microphone" id="audioSourceMic" checked>
+                        <span>使用麦克风</span>
+                    </label>
+                    <label class="radio-label">
+                        <input type="radio" name="audioSource" value="tab" id="audioSourceTab">
+                        <span>使用标签页音频</span>
+                    </label>
+                </div>
+            </div>
+
+            <!-- 标签页音频提示信息 -->
+            <div id="tabAudioHint" class="status-message info" style="display: none; margin-bottom: 15px;">
+                <strong>📋 标签页音频模式</strong><br>
+                点击"开始会议"后，浏览器会弹出对话框，请：<br>
+                1. 选择"Chrome 标签页"（或对应选项）<br>
+                2. 勾选"共享标签页音频"<br>
+                3. 选择要捕获音频的标签页（如 Google Meet）
+            </div>
+
+            <!-- 音频输入设备选择（仅麦克风模式显示） -->
+            <div class="setting-item" id="audioInputContainer">
                 <label for="audioInput">输入设备</label>
                 <select id="audioInput" class="device-select">
                     <option value="">加载中...</option>
