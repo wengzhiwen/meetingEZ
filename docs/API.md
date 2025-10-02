@@ -2,104 +2,47 @@
 
 ## 概述
 
-MeetingEZ 使用 OpenAI Realtime API 进行实时语音识别和翻译。本文档详细说明了 API 的使用方法、参数配置和事件处理。
+MeetingEZ 通过浏览器端将音频分段上传至 OpenAI `gpt-4o-transcribe`（接口：`/v1/audio/transcriptions`）进行转写（仅转写，不翻译）。本文档描述分段策略、请求参数与字段。
 
-## OpenAI Realtime API 集成 (WebRTC)
+## OpenAI /v1/audio/transcriptions 集成
 
-### WebRTC 连接配置
+### 单通道
 
-```javascript
-const client = new RealtimeAPIClient();
-client.setApiKey('your-openai-api-key');
+- 仅进行一路分段并发上传转写。
+- 语言来源：由“使用语言”选择器决定（主要语言或第二语言）。
+- 渲染：单栏顺序展示结果。
 
-// 请求WebRTC会话
-const sessionInfo = await client.requestWebRTCSession({
-  model: 'gpt-4o-realtime-preview-2024-10-01',
-  voice: 'alloy',
-  instructions: '你是一个专业的会议助手，负责实时转录会议内容。',
-  turn_detection: {
-    type: 'server_vad',
-    threshold: 0.5,
-    prefix_padding_ms: 300,
-    silence_duration_ms: 200
-  }
-});
-
-// 创建WebRTC PeerConnection
-await client.createPeerConnection(sessionInfo);
-```
-
-### 音频配置
+### 请求示例（浏览器端 FormData）
 
 ```javascript
-// 音频格式配置
-const audioConfig = {
-  input_audio_format: 'pcm16',
-  input_audio_transcription: {
-    model: 'whisper-1'
-  },
-  output_audio_format: 'pcm16',
-  output_audio_transcription: {
-    model: 'whisper-1'
-  }
-};
-```
+const form = new FormData();
+form.append('model', 'gpt-4o-transcribe');
+form.append('language', 'ja'); // 例：主要语言
+form.append('response_format', 'json');
+form.append('prompt', tailText); // 例：上一段尾部上下文（可选）
+form.append('file', wavBlob, 'segment.wav');
 
-## WebRTC 事件处理
-
-### 客户端事件
-
-#### 连接事件
-```javascript
-client.on('error', (error) => {
-  console.error('连接错误:', error);
-});
-
-client.on('userTranscript', (data) => {
-  console.log('用户转录:', data.text);
-  // 处理用户语音转录
-});
-
-client.on('assistantTranscript', (data) => {
-  console.log('AI转录:', data.text);
-  // 处理AI响应转录
+await fetch('https://api.openai.com/v1/audio/transcriptions', {
+  method: 'POST',
+  headers: { 'Authorization': `Bearer ${apiKey}` },
+  body: form
 });
 ```
 
-#### WebRTC消息处理
-```javascript
-// WebRTC消息通过数据通道接收
-client.dataChannel.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  
-  switch (data.type) {
-    case 'conversation.item.delta':
-      if (data.item.type === 'message' && data.item.role === 'user') {
-        // 处理用户消息增量
-        handleUserMessageDelta(data.delta);
-      }
-      break;
-    case 'session.updated':
-      // 处理会话状态更新
-      handleSessionUpdate(data.session);
-      break;
-  }
-};
-```
+### 分段与上下文策略
 
-#### 项目完成事件
-```javascript
-client.on('conversation.item.completed', ({ item }) => {
-  if (item.type === 'message' && item.role === 'user') {
-    // 用户消息完成，可以开始翻译
-    translateMessage(item.content);
-  }
-});
-```
+- 分段时长：8 秒
+- 重叠长度：1 秒（滑动步长 7 秒）
+- 上下文：将上一段的文本尾巴（约 200 字符）作为 `prompt` 传入，帮助模型延续上下文
+- 并发：允许多个分段同时上传，降低等待时间
+
+## （提示）已移除 Realtime API / WebRTC
+
+本项目已不再使用 OpenAI Realtime API 与 WebRTC。所有语音数据通过浏览器端分段编码后，使用 REST 接口 `/v1/audio/transcriptions` 上传并获取转写结果。
 
 ## 音频处理
 
-### WebRTC音频捕获
+## 音频捕获与编码
 ```javascript
 // 获取麦克风权限
 navigator.mediaDevices.getUserMedia({ 
@@ -123,8 +66,7 @@ navigator.mediaDevices.getUserMedia({
     for (let i = 0; i < audioData.length; i++) {
       int16Data[i] = Math.max(-32768, Math.min(32767, audioData[i] * 32768));
     }
-    // 通过WebRTC数据通道发送到 OpenAI API
-    client.sendAudio(int16Data);
+  // 使用浏览器端 WAV 封装后通过 REST 上传至 OpenAI
   };
   
   source.connect(processor);
@@ -146,7 +88,9 @@ function convertFloat32ToInt16(float32Array) {
 
 ## 翻译功能
 
-### 语言检测
+本版本不提供翻译流程。仅做原文识别并以单栏渲染。
+
+### 语言检测（用于渲染归类）
 ```javascript
 async function detectLanguage(text) {
   const response = await fetch('/api/detect-language', {

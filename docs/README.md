@@ -2,13 +2,13 @@
 
 ## 项目概述
 
-MeetingEZ 是一个基于 OpenAI Realtime API 的智能会议助手工具，专注于实时语音转录功能。该工具通过浏览器直接连接 OpenAI API，实现最小延迟的高质量语音识别服务。
+MeetingEZ 是一个基于 OpenAI gpt-4o-transcribe 的智能会议助手工具，专注于实时语音转录功能（仅转写，不翻译）。该工具通过浏览器将音频按 8 秒分段（1 秒重叠）并行上传到 OpenAI 转写接口，实现低延迟的高质量语音识别服务。
 
 ## 核心功能
 
 ### 1. 实时语音转录
 - 通过浏览器麦克风捕获会议语音
-- 使用 OpenAI Realtime API 进行实时语音识别
+- 使用 OpenAI `/v1/audio/transcriptions`（模型：gpt-4o-transcribe）进行转写
 - 将识别结果以字幕形式显示在网页上
 - 支持自动滚动显示最新内容
 - 优化音频质量设置，提升识别准确度
@@ -16,7 +16,7 @@ MeetingEZ 是一个基于 OpenAI Realtime API 的智能会议助手工具，专�
 ### 2. 多语言支持
 - 支持中文、英文、日文、韩文等多种语言
 - 用户可选择主要语言，提高识别准确性
-- 智能语言过滤，避免幻觉内容
+- 不进行翻译，仅呈现实时转录原文
 
 ### 3. 数据持久化
 - 所有字幕存储在浏览器本地存储中
@@ -34,7 +34,7 @@ MeetingEZ 是一个基于 OpenAI Realtime API 的智能会议助手工具，专�
 - **CSS3**: 样式设计，响应式布局
 - **JavaScript (ES6+)**: 核心逻辑实现
 - **Web Audio API**: 音频捕获和处理
-- **WebRTC**: 与 OpenAI Realtime API 实时通信
+- **Fetch/FormData**: 直接调用 OpenAI `/v1/audio/transcriptions`
 - **Local Storage**: 数据持久化
 
 ### 后端技术栈
@@ -42,7 +42,7 @@ MeetingEZ 是一个基于 OpenAI Realtime API 的智能会议助手工具，专�
 - **Python 3.8+**: 后端服务
 
 ### 外部服务
-- **OpenAI Realtime API**: 语音识别服务
+- **OpenAI Audio Transcriptions**: 语音识别服务（模型：gpt-4o-transcribe）
 
 ## 项目结构
 
@@ -90,7 +90,6 @@ meetingEZ/
 
 ### 必需功能
 - Web Audio API
-- WebRTC 支持
 - Local Storage
 - MediaDevices API
 
@@ -109,8 +108,8 @@ meetingEZ/
 - 内存使用管理
 
 ### 网络优化
-- WebRTC 连接复用
-- 音频数据流式传输
+- 分段并行上传
+- 音频编码与上传节流
 - 错误重连机制
 
 ## 最新更新 (v0.2.0)

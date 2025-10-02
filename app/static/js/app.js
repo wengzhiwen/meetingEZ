@@ -77,8 +77,14 @@ function loadSettings() {
     if (secSelect) {
         secSelect.value = secondaryLang;
     }
-    // 根据二语言状态初始化分屏视图
-    enableSplitView(!!secondaryLang);
+    // 使用语言模式
+    const activeMode = localStorage.getItem('meetingEZ_activeLanguageMode') || 'primary';
+    const activeModeSelect = document.getElementById('activeLanguageMode');
+    if (activeModeSelect) {
+        activeModeSelect.value = activeMode;
+    }
+    // 固定单栏显示
+    enableSplitView(false);
 }
 
 // 设置事件监听器
@@ -130,8 +136,14 @@ function setupEventListeners() {
         secSelect.addEventListener('change', (e) => {
             const value = (e.target.value || '').trim();
             localStorage.setItem('meetingEZ_secondaryLanguage', value);
-            // 仅切换视图并保存偏好；会议中的通道保持不变
-            enableSplitView(!!value);
+        });
+    }
+
+    const activeModeSelect = document.getElementById('activeLanguageMode');
+    if (activeModeSelect) {
+        activeModeSelect.addEventListener('change', (e) => {
+            const value = (e.target.value || 'primary');
+            localStorage.setItem('meetingEZ_activeLanguageMode', value);
         });
     }
 
@@ -256,9 +268,8 @@ async function startMeeting() {
         hideLoading();
         showStatus('会议已开始', 'success');
 
-        // 按当前设置切换分屏
-        const secondaryLang = (document.getElementById('secondaryLanguage')?.value || '').trim();
-        enableSplitView(!!secondaryLang);
+        // 固定单栏显示
+        enableSplitView(false);
     } catch (error) {
         console.error('开始会议失败:', error);
         hideLoading();
@@ -419,21 +430,21 @@ function writeString(dataview, offset, string) {
     }
 }
 
-// 队列化上传当前窗口：并行调用两路语言
+// 队列化上传当前窗口：按“使用语言”一路上传
 function queueSegmentUpload(float32Window) {
     try {
         const wavBlob = encodeWav(float32Window, audioContext.sampleRate);
         const apiKey = localStorage.getItem('meetingEZ_apiKey') || apiKeyInput.value.trim();
+        const activeMode = (document.getElementById('activeLanguageMode')?.value || 'primary');
         const primaryLang = document.getElementById('primaryLanguage').value || 'en';
         const secondaryLang = (document.getElementById('secondaryLanguage')?.value || '').trim();
+        const chosenLang = activeMode === 'secondary' ? (secondaryLang || primaryLang) : primaryLang;
 
-        // 主语言上传
-        transcribeBlob(wavBlob, apiKey, primaryLang, 'primary', channelContextTail.primary);
+        const promptTail = (activeMode === 'secondary')
+          ? (channelContextTail.secondary || '')
+          : (channelContextTail.primary || '');
 
-        // 次语言（可选）上传
-        if (secondaryLang) {
-            transcribeBlob(wavBlob, apiKey, secondaryLang, 'secondary', channelContextTail.secondary);
-        }
+        transcribeBlob(wavBlob, apiKey, chosenLang, 'single', promptTail);
     } catch (e) {
         console.error('❌ 队列分段上传失败:', e);
     }
@@ -451,7 +462,7 @@ async function transcribeBlob(blob, apiKey, language, channel, promptTail) {
     activeUploadControllers.add(controller);
 
     try {
-        console.log('📤 上传分段:', { channel, language, sizeKB: Math.round(blob.size / 1024), inflight: activeUploadControllers.size });
+        console.log('📤 上传分段(单通道):', { language, sizeKB: Math.round(blob.size / 1024), inflight: activeUploadControllers.size });
         const resp = await fetch('https://api.openai.com/v1/audio/transcriptions', {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${apiKey}` },
@@ -464,18 +475,18 @@ async function transcribeBlob(blob, apiKey, language, channel, promptTail) {
         }
         const data = await resp.json();
         const text = (data && (data.text || data.transcript || data.result)) || '';
-        console.log('📥 收到转写:', { channel, language, length: text.length });
+        console.log('📥 收到转写(单通道):', { language, length: text.length });
         if (text && text.trim()) {
-            addTranscript(text, true, channel);
+            addTranscript(text, true, 'single');
             // 更新上下文尾巴（截取最后200字符）
             const tail = text.trim();
             channelContextTail[channel] = tail.length > 200 ? tail.slice(-200) : tail;
         }
     } catch (e) {
         if (controller.signal.aborted) {
-            console.warn('上传已中断:', channel);
+            console.warn('上传已中断');
         } else {
-            console.error('❌ 转写请求失败:', { channel, language, error: e });
+            console.error('❌ 转写请求失败:', { language, error: e });
         }
     } finally {
         activeUploadControllers.delete(controller);
@@ -621,12 +632,12 @@ function isHallucinationText(text) {
 // 右边通道 (secondary) 的结果显示在右边
 // OpenAI 的语言配置会确保各自只处理指定语言，无需前端过滤
 
-// 更新流式转录
-function updateStreamingTranscript(delta, channel = 'primary') {
+// 更新流式转录（单通道）
+function updateStreamingTranscript(delta, channel = 'single') {
     if (!delta) return;
     
     // 累积文本
-    currentStreamingTextMap[channel] += delta;
+    currentStreamingTextMap[channel] = (currentStreamingTextMap[channel] || '') + delta;
     console.log('📝 流式累积文本:', channel, currentStreamingTextMap[channel]);
     
     // 检查是否为幻觉内容（只检查完整文本，不阻止流式显示）
@@ -644,8 +655,8 @@ function updateStreamingTranscript(delta, channel = 'primary') {
     }
 }
 
-// 提交当前的流式转录
-function commitCurrentTranscript(channel = 'primary') {
+// 提交当前的流式转录（单通道）
+function commitCurrentTranscript(channel = 'single') {
     const text = currentStreamingTextMap[channel];
     if (text && text.trim() !== '') {
         console.log('✅ 提交转录:', channel, text);
@@ -842,7 +853,7 @@ function updateDisplay(channel = 'primary') {
     transcriptLeft = transcriptLeft || document.getElementById('transcriptLeft');
     transcriptRight = transcriptRight || document.getElementById('transcriptRight');
     
-    if (transcripts.length === 0 && !currentStreamingTextMap.primary && !currentStreamingTextMap.secondary) {
+    if (transcripts.length === 0 && !currentStreamingTextMap.primary && !currentStreamingTextMap.secondary && !currentStreamingTextMap.single) {
         transcriptContent.innerHTML = `
             <div class="welcome-message">
                 <p>欢迎使用 MeetingEZ！</p>
@@ -1077,6 +1088,7 @@ function disableSettings() {
         document.getElementById('audioInput'),
         document.getElementById('primaryLanguage'),
         document.getElementById('secondaryLanguage'),
+        document.getElementById('activeLanguageMode'),
         document.getElementById('fontSize')
     ];
     
@@ -1102,6 +1114,7 @@ function enableSettings() {
         document.getElementById('audioInput'),
         document.getElementById('primaryLanguage'),
         document.getElementById('secondaryLanguage'),
+        document.getElementById('activeLanguageMode'),
         document.getElementById('fontSize')
     ];
     
