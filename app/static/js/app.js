@@ -39,6 +39,7 @@ async function init() {
     setupEventListeners();
     await loadAudioDevices();
     updateControls();
+    initializeAutoScroll();
 }
 
 // 加载设置
@@ -84,8 +85,27 @@ function setupEventListeners() {
     document.getElementById('downloadTranscript').addEventListener('click', downloadTranscript);
     document.getElementById('clearTranscript').addEventListener('click', clearTranscript);
 
+    // 字幕控制
+    document.getElementById('autoScroll').addEventListener('click', toggleAutoScroll);
+    document.getElementById('clearScreen').addEventListener('click', clearScreen);
+
     // 麦克风测试
     document.getElementById('testMicrophone').addEventListener('click', toggleMicrophoneTest);
+
+    // 监听系统设备变更（插拔耳机等）
+    if (navigator.mediaDevices) {
+        if (typeof navigator.mediaDevices.addEventListener === 'function') {
+            navigator.mediaDevices.addEventListener('devicechange', async () => {
+                console.log('🔁 检测到音频设备变更，重新加载列表');
+                await loadAudioDevices();
+            });
+        } else if ('ondevicechange' in navigator.mediaDevices) {
+            navigator.mediaDevices.ondevicechange = async () => {
+                console.log('🔁 检测到音频设备变更，重新加载列表');
+                await loadAudioDevices();
+            };
+        }
+    }
 
     // 设置
     document.getElementById('primaryLanguage').addEventListener('change', (e) => {
@@ -935,7 +955,11 @@ function updateStreamingDisplay() {
         streamingElement.textContent = `${currentStreamingText} [${timestamp}]`;
         
         transcriptContent.appendChild(streamingElement);
-        scrollToBottom();
+        
+        // 确保自动滚动到底部
+        if (document.getElementById('autoScroll').classList.contains('btn-primary')) {
+            scrollToBottom();
+        }
         
         console.log('🔄 流式显示更新:', currentStreamingText);
     }
@@ -963,7 +987,10 @@ function updateDisplay() {
         return `${transcript.text} [${time}]`;
     }).join('\n');
     
-    scrollToBottom();
+    // 自动滚动到底部
+    if (document.getElementById('autoScroll').classList.contains('btn-primary')) {
+        scrollToBottom();
+    }
 }
 
 // 获取语言标签
@@ -992,7 +1019,12 @@ function escapeHtml(text) {
 
 // 滚动到底部
 function scrollToBottom() {
-    transcriptContent.scrollTop = transcriptContent.scrollHeight;
+    if (transcriptContent) {
+        // 使用 requestAnimationFrame 确保 DOM 更新后再滚动
+        requestAnimationFrame(() => {
+            transcriptContent.scrollTop = transcriptContent.scrollHeight;
+        });
+    }
 }
 
 // 更新计数
@@ -1129,12 +1161,43 @@ function hideLoading() {
 // 加载音频设备列表
 async function loadAudioDevices() {
     try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const audioInputs = devices.filter(device => device.kind === 'audioinput');
-        
         const audioInputSelect = document.getElementById('audioInput');
+
+        // 非安全上下文（HTTP 非 localhost）在 Android 上会禁止麦克风权限与设备枚举
+        if (!window.isSecureContext) {
+            console.warn('⚠️ 非安全上下文：Android 浏览器需要 HTTPS 或 localhost 才能访问麦克风');
+            if (audioInputSelect) {
+                audioInputSelect.innerHTML = '<option value="">需要在 HTTPS 或 localhost 下使用</option>';
+            }
+            showStatus('Android 需 HTTPS/localhost 才能加载输入设备与弹出权限框', 'error');
+            return;
+        }
+
+        let devices = await navigator.mediaDevices.enumerateDevices();
+        let audioInputs = devices.filter(device => device.kind === 'audioinput');
+        const labelsMissing = audioInputs.some(d => !d.label);
         audioInputSelect.innerHTML = '';
         
+        // 权限预热：若没有设备或设备 label 为空，多数是未授权，需要先请求一次最小权限
+        if (audioInputs.length === 0 || labelsMissing) {
+            try {
+                console.log('🟡 权限预热：请求最小麦克风权限以解锁设备列表与标签');
+                const prewarm = await navigator.mediaDevices.getUserMedia({ audio: true });
+                // 立即释放
+                prewarm.getTracks().forEach(t => t.stop());
+                // 重新枚举
+                devices = await navigator.mediaDevices.enumerateDevices();
+                audioInputs = devices.filter(device => device.kind === 'audioinput');
+            } catch (e) {
+                console.warn('🔒 权限预热失败：', e);
+                if (audioInputSelect) {
+                    audioInputSelect.innerHTML = '<option value="">未授权麦克风或被浏览器阻止</option>';
+                }
+                showStatus('请允许麦克风权限后重试', 'error');
+                return;
+            }
+        }
+
         if (audioInputs.length === 0) {
             audioInputSelect.innerHTML = '<option value="">无可用设备</option>';
             return;
@@ -1149,11 +1212,12 @@ async function loadAudioDevices() {
         
         // 加载保存的设备选择
         const savedDevice = localStorage.getItem('meetingEZ_audioDevice');
-        if (savedDevice) {
+        if (savedDevice && audioInputs.some(d => d.deviceId === savedDevice)) {
             audioInputSelect.value = savedDevice;
             selectedAudioDevice = savedDevice;
         } else {
             selectedAudioDevice = audioInputs[0].deviceId;
+            audioInputSelect.value = selectedAudioDevice;
         }
         
         // 监听设备变化
@@ -1287,6 +1351,70 @@ function stopMicrophoneTest() {
     
     // 重置音量指示器
     updateVolumeIndicator(0);
+}
+
+// 切换自动滚动
+function toggleAutoScroll() {
+    const autoScrollBtn = document.getElementById('autoScroll');
+    const isActive = autoScrollBtn.classList.contains('btn-primary');
+    
+    if (isActive) {
+        // 关闭自动滚动
+        autoScrollBtn.classList.remove('btn-primary');
+        autoScrollBtn.classList.add('btn-outline');
+        autoScrollBtn.textContent = '滚';
+        localStorage.setItem('meetingEZ_autoScroll', 'false');
+        console.log('📜 自动滚动已关闭');
+    } else {
+        // 开启自动滚动
+        autoScrollBtn.classList.remove('btn-outline');
+        autoScrollBtn.classList.add('btn-primary');
+        autoScrollBtn.textContent = '滚✓';
+        localStorage.setItem('meetingEZ_autoScroll', 'true');
+        // 立即滚动到底部
+        scrollToBottom();
+        console.log('📜 自动滚动已开启');
+    }
+}
+
+// 清屏功能
+function clearScreen() {
+    const transcriptContent = document.getElementById('transcriptContent');
+    
+    // 只清空显示，不影响本地存储的数据
+    if (transcripts.length === 0 && !currentStreamingText) {
+        transcriptContent.innerHTML = `
+            <div class="welcome-message">
+                <p>欢迎使用 MeetingEZ！</p>
+                <p>请先配置 OpenAI API Key，然后点击"开始会议"开始使用。</p>
+            </div>
+        `;
+    } else {
+        transcriptContent.innerHTML = '';
+    }
+    
+    console.log('🧹 屏幕已清空（数据保留）');
+}
+
+// 初始化自动滚动状态
+function initializeAutoScroll() {
+    const autoScrollBtn = document.getElementById('autoScroll');
+    const savedAutoScroll = localStorage.getItem('meetingEZ_autoScroll');
+    
+    // 默认开启自动滚动
+    const shouldAutoScroll = savedAutoScroll !== 'false';
+    
+    if (shouldAutoScroll) {
+        autoScrollBtn.classList.remove('btn-outline');
+        autoScrollBtn.classList.add('btn-primary');
+        autoScrollBtn.textContent = '滚✓';
+    } else {
+        autoScrollBtn.classList.remove('btn-primary');
+        autoScrollBtn.classList.add('btn-outline');
+        autoScrollBtn.textContent = '滚';
+    }
+    
+    console.log('📜 自动滚动状态已初始化:', shouldAutoScroll ? '开启' : '关闭');
 }
 
 // 页面加载完成后初始化
