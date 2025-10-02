@@ -44,6 +44,11 @@ let channelContextTail = { primary: '', secondary: '' }; // 每路保留上一�
 let lastAcceptedTextMap = { primary: '', secondary: '' }; // 每路最近一次接受的文本
 let lastAcceptedAtMap = { primary: 0, secondary: 0 }; // 每路最近一次接受的时间戳
 
+// AudioWorklet 与 Worker 相关
+let audioWorkletNode = null;
+let wavEncoderWorker = null;
+let pendingEncodings = new Map(); // 待完成的编码任务
+
 const apiKeyInput = document.getElementById('apiKey');
 const toggleBtn = document.getElementById('toggleApiKey');
 const testBtn = document.getElementById('testConnection');
@@ -383,16 +388,6 @@ async function startRecording() {
         audioContext = new AudioContext({ sampleRate: 48000 });
         const source = audioContext.createMediaStreamSource(mediaStream);
 
-        // 音量分析器
-        const analyser = audioContext.createAnalyser();
-        analyser.fftSize = 256;
-        source.connect(analyser);
-
-        // 使用 ScriptProcessorNode 收集 PCM 数据
-        const processor = audioContext.createScriptProcessor(2048, 1, 1);
-        source.connect(processor);
-        processor.connect(audioContext.destination);
-
         // 初始化分段参数
         segmentSamples = Math.round(SEGMENT_DURATION_SEC * audioContext.sampleRate);
         overlapSamples = Math.round(OVERLAP_DURATION_SEC * audioContext.sampleRate);
@@ -401,62 +396,76 @@ async function startRecording() {
         segmentStartIndex = 0;
         channelContextTail = { primary: '', secondary: '' };
 
-        processor.onaudioprocess = (event) => {
+        // 初始化 WAV 编码 Worker
+        if (!wavEncoderWorker) {
+            wavEncoderWorker = new Worker('/static/js/wav-encoder-worker.js');
+            wavEncoderWorker.onmessage = handleWorkerMessage;
+            wavEncoderWorker.onerror = (error) => {
+                console.error('❌ Worker 错误:', error);
+            };
+        }
+
+        // 加载并创建 AudioWorklet
+        await audioContext.audioWorklet.addModule('/static/js/audio-processor.js');
+        audioWorkletNode = new AudioWorkletNode(audioContext, 'audio-capture-processor');
+
+        // 连接音频流
+        source.connect(audioWorkletNode);
+        audioWorkletNode.connect(audioContext.destination);
+
+        // 监听来自 AudioWorklet 的消息
+        audioWorkletNode.port.onmessage = (event) => {
             if (!isRecording) return;
 
-            const audioData = event.inputBuffer.getChannelData(0);
+            const { type, data, rms } = event.data;
 
-            // 更新音量指示器（RMS）
-            let sum = 0;
-            for (let i = 0; i < audioData.length; i++) {
-                const s = audioData[i];
-                sum += s * s;
-            }
-            const rms = Math.sqrt(sum / audioData.length);
-            const volume = Math.min(1, rms * 10);
-            updateVolumeIndicator(volume);
+            if (type === 'audio') {
+                // 更新音量指示器
+                const volume = Math.min(1, rms * 10);
+                updateVolumeIndicator(volume);
 
-            // 如果正在关闭，不再产生新的上传
-            if (isShuttingDown) {
-                return;
-            }
-
-            // VAD：检测是否有语音活动
-            const hasVoice = rms > vadThreshold;
-            if (hasVoice) {
-                silenceFrames = 0;
-                isSpeaking = true;
-            } else {
-                silenceFrames++;
-            }
-
-            // 只在检测到语音或最近有语音活动时才追加音频
-            if (isSpeaking || silenceFrames < SILENCE_THRESHOLD) {
-                // 追加到累积缓冲
-                aggregatedBuffer = concatFloat32(aggregatedBuffer, audioData);
-
-                // 生成尽可能多的窗口（允许并发上传）
-                while (aggregatedBuffer.length >= segmentStartIndex + segmentSamples) {
-                    const windowData = aggregatedBuffer.slice(segmentStartIndex, segmentStartIndex + segmentSamples);
-                    queueSegmentUpload(windowData);
-                    segmentStartIndex += stepSamples;
-
-                    // 适度清理缓冲，避免无限增长
-                    if (segmentStartIndex > segmentSamples * 2) {
-                        const pruneAt = segmentStartIndex - overlapSamples; // 保留一段重叠的尾巴
-                        aggregatedBuffer = aggregatedBuffer.slice(pruneAt);
-                        segmentStartIndex -= pruneAt;
-                    }
+                // 如果正在关闭，不再产生新的上传
+                if (isShuttingDown) {
+                    return;
                 }
-            } else if (silenceFrames === SILENCE_THRESHOLD) {
-                // 刚检测到持续静音，标记为非说话状态
-                isSpeaking = false;
-                console.log('🔇 检测到持续静音，停止上传音频段');
+
+                // VAD：检测是否有语音活动
+                const hasVoice = rms > vadThreshold;
+                if (hasVoice) {
+                    silenceFrames = 0;
+                    isSpeaking = true;
+                } else {
+                    silenceFrames++;
+                }
+
+                // 只在检测到语音或最近有语音活动时才追加音频
+                if (isSpeaking || silenceFrames < SILENCE_THRESHOLD) {
+                    // 追加到累积缓冲
+                    aggregatedBuffer = concatFloat32(aggregatedBuffer, data);
+
+                    // 生成尽可能多的窗口（允许并发上传）
+                    while (aggregatedBuffer.length >= segmentStartIndex + segmentSamples) {
+                        const windowData = aggregatedBuffer.slice(segmentStartIndex, segmentStartIndex + segmentSamples);
+                        queueSegmentUpload(windowData);
+                        segmentStartIndex += stepSamples;
+
+                        // 适度清理缓冲，避免无限增长
+                        if (segmentStartIndex > segmentSamples * 2) {
+                            const pruneAt = segmentStartIndex - overlapSamples;
+                            aggregatedBuffer = aggregatedBuffer.slice(pruneAt);
+                            segmentStartIndex -= pruneAt;
+                        }
+                    }
+                } else if (silenceFrames === SILENCE_THRESHOLD) {
+                    // 刚检测到持续静音，标记为非说话状态
+                    isSpeaking = false;
+                    console.log('🔇 检测到持续静音，停止上传音频段');
+                }
             }
         };
 
         isRecording = true;
-        console.log('🎙️ 开始录音并启动分段流水线');
+        console.log('🎙️ 开始录音并启动分段流水线（AudioWorklet + Worker 架构）');
     } catch (error) {
         console.error('❌ 开始录音失败:', error);
         throw error;
@@ -472,71 +481,78 @@ function concatFloat32(a, b) {
     return out;
 }
 
-// 将 Float32 PCM 编码为 WAV (PCM16 LE)
-function encodeWav(float32Array, sampleRate) {
-    // 转换为 Int16 PCM
-    const bufferLength = float32Array.length;
-    const pcm16 = new Int16Array(bufferLength);
-    for (let i = 0; i < bufferLength; i++) {
-        const s = Math.max(-1, Math.min(1, float32Array[i]));
-        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-    }
+// 注意：encodeWav 函数已移至 wav-encoder-worker.js
+// WAV 编码现在在独立的 Worker 线程中进行，不再阻塞主线程
 
-    const wavBuffer = new ArrayBuffer(44 + pcm16.length * 2);
-    const view = new DataView(wavBuffer);
-
-    // RIFF header
-    writeString(view, 0, 'RIFF');
-    view.setUint32(4, 36 + pcm16.length * 2, true);
-    writeString(view, 8, 'WAVE');
-
-    // fmt chunk
-    writeString(view, 12, 'fmt ');
-    view.setUint32(16, 16, true); // PCM chunk size
-    view.setUint16(20, 1, true); // audio format = PCM
-    view.setUint16(22, 1, true); // channels = 1
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true); // byte rate (sampleRate * blockAlign)
-    view.setUint16(32, 2, true); // block align (channels * bytesPerSample)
-    view.setUint16(34, 16, true); // bits per sample
-
-    // data chunk
-    writeString(view, 36, 'data');
-    view.setUint32(40, pcm16.length * 2, true);
-
-    // PCM samples
-    let offset = 44;
-    for (let i = 0; i < pcm16.length; i++, offset += 2) {
-        view.setInt16(offset, pcm16[i], true);
-    }
-
-    return new Blob([view], { type: 'audio/wav' });
-}
-
-function writeString(dataview, offset, string) {
-    for (let i = 0; i < string.length; i++) {
-        dataview.setUint8(offset + i, string.charCodeAt(i));
-    }
-}
-
-// 队列化上传当前窗口：按“使用语言”一路上传
+// 队列化上传当前窗口：按"使用语言"一路上传
 function queueSegmentUpload(float32Window) {
     try {
-        const wavBlob = encodeWav(float32Window, audioContext.sampleRate);
+        // 生成唯一 ID
+        const encodingId = Date.now() + Math.random();
+        
+        // 获取配置
         const apiKey = localStorage.getItem('meetingEZ_apiKey') || apiKeyInput.value.trim();
         const activeMode = (document.getElementById('activeLanguageMode')?.value || 'primary');
         const primaryLang = document.getElementById('primaryLanguage').value || 'en';
         const secondaryLang = (document.getElementById('secondaryLanguage')?.value || '').trim();
         const chosenLang = activeMode === 'secondary' ? (secondaryLang || primaryLang) : primaryLang;
-
         const promptTail = (activeMode === 'secondary')
           ? (channelContextTail.secondary || '')
           : (channelContextTail.primary || '');
 
-        transcribeBlob(wavBlob, apiKey, chosenLang, 'single', promptTail);
+        // 保存待编码任务信息
+        pendingEncodings.set(encodingId, {
+            apiKey,
+            language: chosenLang,
+            channel: 'single',
+            promptTail
+        });
+
+        // 发送到 Worker 进行编码（主线程立即返回，不阻塞）
+        wavEncoderWorker.postMessage({
+            id: encodingId,
+            float32Array: float32Window,
+            sampleRate: audioContext.sampleRate
+        });
+
+        console.log('📦 音频窗口已发送到 Worker 编码:', { 
+            id: encodingId, 
+            samples: float32Window.length,
+            pendingCount: pendingEncodings.size 
+        });
     } catch (e) {
         console.error('❌ 队列分段上传失败:', e);
     }
+}
+
+// 处理 Worker 返回的编码结果
+function handleWorkerMessage(event) {
+    const { id, success, blob, error } = event.data;
+
+    if (!success) {
+        console.error('❌ Worker 编码失败:', error);
+        pendingEncodings.delete(id);
+        return;
+    }
+
+    // 获取待上传任务信息
+    const task = pendingEncodings.get(id);
+    if (!task) {
+        console.warn('⚠️ 未找到对应的编码任务:', id);
+        return;
+    }
+
+    // 清理任务
+    pendingEncodings.delete(id);
+
+    console.log('✅ Worker 编码完成，开始上传:', { 
+        id, 
+        blobSize: blob.size,
+        remainingTasks: pendingEncodings.size 
+    });
+
+    // 上传 Blob
+    transcribeBlob(blob, task.apiKey, task.language, task.channel, task.promptTail);
 }
 
 async function transcribeBlob(blob, apiKey, language, channel, promptTail) {
@@ -624,16 +640,25 @@ function stopRecording() {
         mediaStream = null;
     }
 
+    // 断开 AudioWorklet
+    if (audioWorkletNode) {
+        audioWorkletNode.disconnect();
+        audioWorkletNode = null;
+    }
+
     if (audioContext) {
         audioContext.close();
         audioContext = null;
     }
     
-    // 不再中断在途上传，让它们自然完成
-    // 包括后续的翻译处理也会继续进行
+    // 不再中断在途上传和编码，让它们自然完成
     const inflightCount = activeUploadControllers.size;
-    if (inflightCount > 0) {
-        console.log(`📊 停止录音，但保留 ${inflightCount} 个在途请求继续处理`);
+    const pendingCount = pendingEncodings.size;
+    if (inflightCount > 0 || pendingCount > 0) {
+        console.log(`📊 停止录音，但保留处理任务继续完成:`, {
+            上传中: inflightCount,
+            编码中: pendingCount
+        });
     }
     
     // 重置音量指示器
