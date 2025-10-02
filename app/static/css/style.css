@@ -806,3 +806,13 @@ body {
     background: #fef3c7;
     color: #92400e;
 }
+
+/* 翻译文本样式 */
+.translation-text {
+    background-color: #e0f2fe;
+    font-style: italic;
+    padding: 4px 8px;
+    border-radius: 4px;
+    margin: 2px 0;
+    display: inline-block;
+}

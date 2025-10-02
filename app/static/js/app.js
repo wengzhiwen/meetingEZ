@@ -2,6 +2,7 @@
 // 全局变量
 let isConnected = false;
 let isRecording = false;
+let isShuttingDown = false;
 let audioContext = null;
 let mediaStream = null;
 let transcripts = [];
@@ -17,12 +18,17 @@ const STORAGE_KEY = 'meetingEZ_transcripts';
 const STORAGE_VERSION = 2;
 const HIDE_BEFORE_KEY = 'meetingEZ_hideBefore';
 
+// 后置处理模型（结构化纠错与翻译）
+const POST_PROCESS_MODEL = 'gpt-4.1-mini-2025-04-14';
+
 // VAD 和回填更正相关变量
-let vadThreshold = 0.01;  // 音量阈值
+let vadThreshold = 0.02;  // 音量阈值（提高以减少误触发）
 let isSpeaking = false;
 let speechBuffer = [];
 let correctionWindow = 800;  // 800ms 回填更正窗口
 let lastSpeechTime = 0;
+let silenceFrames = 0;  // 连续静音帧计数
+const SILENCE_THRESHOLD = 30;  // 连续30帧静音才认为是真正静音（约600ms）
 
 // 分段上传参数（8秒分段，1秒重叠）
 const SEGMENT_DURATION_SEC = 8;
@@ -311,6 +317,9 @@ async function stopMeeting() {
 // 开始录音
 async function startRecording() {
     try {
+        // 重置关闭标志
+        isShuttingDown = false;
+        
         // 创建音频上下文 - 使用48kHz采样率
         audioContext = new AudioContext({ sampleRate: 48000 });
         const source = audioContext.createMediaStreamSource(mediaStream);
@@ -348,21 +357,42 @@ async function startRecording() {
             const volume = Math.min(1, rms * 10);
             updateVolumeIndicator(volume);
 
-            // 追加到累积缓冲
-            aggregatedBuffer = concatFloat32(aggregatedBuffer, audioData);
+            // 如果正在关闭，不再产生新的上传
+            if (isShuttingDown) {
+                return;
+            }
 
-            // 生成尽可能多的窗口（允许并发上传）
-            while (aggregatedBuffer.length >= segmentStartIndex + segmentSamples) {
-                const windowData = aggregatedBuffer.slice(segmentStartIndex, segmentStartIndex + segmentSamples);
-                queueSegmentUpload(windowData);
-                segmentStartIndex += stepSamples;
+            // VAD：检测是否有语音活动
+            const hasVoice = rms > vadThreshold;
+            if (hasVoice) {
+                silenceFrames = 0;
+                isSpeaking = true;
+            } else {
+                silenceFrames++;
+            }
 
-                // 适度清理缓冲，避免无限增长
-                if (segmentStartIndex > segmentSamples * 2) {
-                    const pruneAt = segmentStartIndex - overlapSamples; // 保留一段重叠的尾巴
-                    aggregatedBuffer = aggregatedBuffer.slice(pruneAt);
-                    segmentStartIndex -= pruneAt;
+            // 只在检测到语音或最近有语音活动时才追加音频
+            if (isSpeaking || silenceFrames < SILENCE_THRESHOLD) {
+                // 追加到累积缓冲
+                aggregatedBuffer = concatFloat32(aggregatedBuffer, audioData);
+
+                // 生成尽可能多的窗口（允许并发上传）
+                while (aggregatedBuffer.length >= segmentStartIndex + segmentSamples) {
+                    const windowData = aggregatedBuffer.slice(segmentStartIndex, segmentStartIndex + segmentSamples);
+                    queueSegmentUpload(windowData);
+                    segmentStartIndex += stepSamples;
+
+                    // 适度清理缓冲，避免无限增长
+                    if (segmentStartIndex > segmentSamples * 2) {
+                        const pruneAt = segmentStartIndex - overlapSamples; // 保留一段重叠的尾巴
+                        aggregatedBuffer = aggregatedBuffer.slice(pruneAt);
+                        segmentStartIndex -= pruneAt;
+                    }
                 }
+            } else if (silenceFrames === SILENCE_THRESHOLD) {
+                // 刚检测到持续静音，标记为非说话状态
+                isSpeaking = false;
+                console.log('🔇 检测到持续静音，停止上传音频段');
             }
         };
 
@@ -477,7 +507,37 @@ async function transcribeBlob(blob, apiKey, language, channel, promptTail) {
         const text = (data && (data.text || data.transcript || data.result)) || '';
         console.log('📥 收到转写(单通道):', { language, length: text.length });
         if (text && text.trim()) {
-            addTranscript(text, true, 'single');
+            const primaryLang = document.getElementById('primaryLanguage')?.value || 'zh';
+            const secondaryLang = (document.getElementById('secondaryLanguage')?.value || '').trim();
+            // 将单通道结果映射到可视通道（便于分屏）：根据所用 language 判断归属
+            const visualChannel = (secondaryLang && language === secondaryLang) ? 'secondary' : 'primary';
+
+            // 先以原始转写创建一个临时记录（provisional），立即显示
+            const provisionalId = Date.now() + Math.random();
+            const provisional = {
+                id: provisionalId,
+                timestamp: new Date().toISOString(),
+                text: normalizeText(text),
+                language: language,
+                channel: visualChannel,
+                provisional: true
+            };
+            transcripts.push(provisional);
+            saveTranscripts();
+            updateDisplay(visualChannel);
+
+            // 启动异步后置处理：合理化 + 若为第二语言则生成第一语言翻译
+            try {
+                const structured = await postProcessText(text, {
+                    primaryLanguage: primaryLang || 'zh',
+                    secondaryLanguage: secondaryLang || 'ja',
+                    originalLanguageHint: language
+                });
+                applyPostProcessToTranscript(provisionalId, structured);
+            } catch (ppErr) {
+                console.warn('⚠️ 后置处理失败，保留原文:', ppErr);
+            }
+
             // 更新上下文尾巴（截取最后200字符）
             const tail = text.trim();
             channelContextTail[channel] = tail.length > 200 ? tail.slice(-200) : tail;
@@ -496,6 +556,8 @@ async function transcribeBlob(blob, apiKey, language, channel, promptTail) {
 
 // 停止录音
 function stopRecording() {
+    // 设置关闭标志，防止产生新的音频分段
+    isShuttingDown = true;
     isRecording = false;
 
     if (mediaStream) {
@@ -508,18 +570,17 @@ function stopRecording() {
         audioContext = null;
     }
     
-    // 中断在途上传
-    try {
-        activeUploadControllers.forEach(ctrl => {
-            try { ctrl.abort(); } catch (e) {}
-        });
-        activeUploadControllers.clear();
-    } catch (e) {}
+    // 不再中断在途上传，让它们自然完成
+    // 包括后续的翻译处理也会继续进行
+    const inflightCount = activeUploadControllers.size;
+    if (inflightCount > 0) {
+        console.log(`📊 停止录音，但保留 ${inflightCount} 个在途请求继续处理`);
+    }
     
     // 重置音量指示器
     updateVolumeIndicator(0);
 
-    console.log('🛑 停止录音');
+    console.log('🛑 停止录音（后续处理将继续完成）');
 }
 
 // 开始新的流式转录
@@ -706,7 +767,6 @@ function commitCurrentTranscript(channel = 'single') {
         currentTranscriptIdMap[channel] = null;
         
         updateDisplay(channel);
-        updateCount();
         
         // 自动滚动
         if (document.getElementById('autoScroll').classList.contains('btn-primary')) {
@@ -757,7 +817,6 @@ function addTranscript(text, isComplete = false, channel = 'primary') {
         lastAcceptedAtMap[channel] = Date.now();
         saveTranscripts();
         updateDisplay(channel);
-        updateCount();
     } else {
         // 增量更新，累积到当前流式转录
         updateStreamingTranscript(text, channel);
@@ -874,16 +933,17 @@ function updateDisplay(channel = 'primary') {
       .filter(t => (transcriptSplit && transcriptSplit.style.display !== 'none') ? t.channel === activeChannel : true)
       .map(transcript => {
         const time = new Date(transcript.timestamp).toLocaleTimeString();
-        return `${transcript.text} [${time}]`;
-      }).join('\n');
+        const textClass = transcript.isTranslation ? 'translation-text' : '';
+        return `<div class="${textClass}">${escapeHtml(transcript.text)} [${time}]</div>`;
+      }).join('');
     if (transcriptSplit && transcriptSplit.style.display !== 'none') {
         if (channel === 'secondary') {
-            transcriptRight.textContent = contentHtml;
+            transcriptRight.innerHTML = contentHtml;
         } else {
-            transcriptLeft.textContent = contentHtml;
+            transcriptLeft.innerHTML = contentHtml;
         }
     } else {
-        transcriptContent.textContent = contentHtml;
+        transcriptContent.innerHTML = contentHtml;
         if (document.getElementById('autoScroll').classList.contains('btn-primary')) {
             scrollToBottom();
         }
@@ -925,11 +985,6 @@ function scrollToBottom() {
     });
 }
 
-// 更新计数
-function updateCount() {
-    document.getElementById('transcriptCount').textContent = `${transcripts.length} 条记录`;
-}
-
 // 保存字幕
 function saveTranscripts() {
     const payload = { version: STORAGE_VERSION, items: transcripts };
@@ -954,7 +1009,6 @@ function loadTranscripts() {
                 transcripts = [];
             }
             updateDisplay();
-            updateCount();
         }
     } catch (error) {
         console.error('加载字幕失败:', error);
@@ -1032,9 +1086,6 @@ function clearTranscript() {
                 `;
             }
         }
-        
-        // 更新计数
-        updateCount();
         
         // 异步保存到 localStorage（不阻塞 UI）
         setTimeout(() => {
@@ -1493,7 +1544,6 @@ function mergeWithLastIfExpanding(normalized, channel, windowMs = 15000) {
         last.timestamp = new Date().toISOString();
         saveTranscripts();
         updateDisplay(channel);
-        updateCount();
         return true;
     }
     return false;
@@ -1510,4 +1560,196 @@ function shouldSkipByLastAccepted(normalized, channel) {
 
 function stripSpaces(s) {
     return (s || '').replace(/\s+/g, '');
+}
+
+// ---------------------------
+// 后置处理：结构化纠错与翻译
+// ---------------------------
+
+async function postProcessText(originalText, opts = {}) {
+    const apiKey = localStorage.getItem('meetingEZ_apiKey') || apiKeyInput.value.trim();
+    if (!apiKey) throw new Error('缺少 API Key');
+    const primaryLanguage = opts.primaryLanguage || 'zh';
+    const secondaryLanguage = opts.secondaryLanguage || 'ja';
+    const originalLanguageHint = opts.originalLanguageHint || primaryLanguage;
+    
+    console.log('🔄 开始翻译处理:', { 
+        originalText, 
+        primaryLanguage, 
+        secondaryLanguage, 
+        originalLanguageHint 
+    });
+
+    const system = [
+        '你是实时字幕的翻译助手：',
+        '1) 判断文本语言。',
+        '2) 若文本语言不是第一语言（primary_language），则提供第一语言的准确翻译；否则翻译字段为 null。',
+        '3) 输出严格的 JSON（不要包含多余说明）。',
+    ].join('\n');
+
+    const user = JSON.stringify({
+        task: 'translate_transcript',
+        primary_language: primaryLanguage,
+        secondary_language: secondaryLanguage,
+        original_language_hint: originalLanguageHint,
+        text: originalText
+    });
+
+    const jsonSchema = {
+        name: 'TranslateTranscript',
+        schema: {
+            $schema: 'http://json-schema.org/draft-07/schema#',
+            type: 'object',
+            additionalProperties: false,
+            required: ['originalLanguage', 'isNotPrimaryLanguage', 'primaryTranslation'],
+            properties: {
+                originalLanguage: { type: 'string', description: '判定的文本语言，ISO 简写，如 zh/ja/en' },
+                isNotPrimaryLanguage: { type: 'boolean', description: '文本语言是否不是第一语言（primary_language，不是的话需要翻译）' },
+                primaryTranslation: {
+                    description: '若不是第一语言，这里为第一语言（primary_language）的翻译；否则为 null',
+                    anyOf: [ { type: 'string' }, { type: 'null' } ]
+                }
+            }
+        }
+    };
+
+    const payload = {
+        model: POST_PROCESS_MODEL,
+        input: [
+            { role: 'system', content: system },
+            { role: 'user', content: user }
+        ],
+        text: {
+            format: {
+                type: 'json_schema',
+                name: jsonSchema.name,
+                schema: jsonSchema.schema,
+                strict: true
+            }
+        }
+    };
+
+    console.log('📤 发送翻译请求:', payload);
+    
+    const resp = await fetchWithRetry('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+    });
+    if (!resp.ok) {
+        const errTxt = await resp.text().catch(() => '');
+        console.error('❌ 翻译请求失败:', { status: resp.status, error: errTxt });
+        throw new Error(`HTTP ${resp.status}: ${resp.statusText} ${errTxt}`);
+    }
+    const result = await resp.json();
+    console.log('📥 收到翻译响应:', result);
+    console.log('📥 响应详细结构:', JSON.stringify(result, null, 2));
+    
+    // 优先使用 output_parsed，其次文本
+    let structured = result && result.output_parsed ? result.output_parsed : null;
+    console.log('🔍 output_parsed:', structured);
+    
+    if (!structured) {
+        // Responses API 返回格式：output 是数组，找到 type='message' 的项
+        let textOut = '';
+        if (result && result.output && Array.isArray(result.output)) {
+            const messageOutput = result.output.find(o => o.type === 'message');
+            if (messageOutput && messageOutput.content && messageOutput.content[0]) {
+                textOut = messageOutput.content[0].text || '';
+            }
+        }
+        console.log('🔍 textOut:', textOut);
+        try {
+            if (typeof textOut === 'string' && textOut) {
+                structured = JSON.parse(textOut);
+            } else if (typeof textOut === 'object' && textOut) {
+                structured = textOut;
+            }
+        } catch (e) {
+            console.error('🔍 JSON解析失败:', e);
+            structured = null;
+        }
+    }
+
+    if (!structured || !structured.originalLanguage) {
+        // 回退：若解析失败，按最小结构返回
+        console.warn('⚠️ 解析失败，使用回退结构');
+        return {
+            originalLanguage: originalLanguageHint,
+            isNotPrimaryLanguage: originalLanguageHint !== primaryLanguage,
+            primaryTranslation: null
+        };
+    }
+    // 兜底字段
+    structured.isNotPrimaryLanguage = !!structured.isNotPrimaryLanguage;
+    structured.primaryTranslation = structured.primaryTranslation || null;
+    
+    console.log('✅ 翻译处理完成:', {
+        originalLanguage: structured.originalLanguage,
+        isNotPrimaryLanguage: structured.isNotPrimaryLanguage,
+        primaryTranslation: structured.primaryTranslation
+    });
+    
+    return structured;
+}
+
+// 简单的重试封装（对429/5xx退避重试）
+async function fetchWithRetry(url, options, retries = 2, backoffMs = 800) {
+    let attempt = 0;
+    while (true) {
+        const resp = await fetch(url, options);
+        if (resp.ok) return resp;
+        const status = resp.status;
+        if (attempt >= retries || ![429, 500, 502, 503, 504].includes(status)) {
+            return resp; // 由上层抛错并显示信息
+        }
+        await new Promise(r => setTimeout(r, backoffMs * Math.pow(2, attempt)));
+        attempt += 1;
+    }
+}
+
+function applyPostProcessToTranscript(provisionalId, structured) {
+    const idx = transcripts.findIndex(t => t.id === provisionalId);
+    if (idx === -1) {
+        console.warn('⚠️ 未找到临时记录:', provisionalId);
+        return;
+    }
+    const entry = transcripts[idx];
+    
+    console.log('🔧 应用翻译结果到记录:', {
+        provisionalId,
+        originalText: entry.text,
+        detectedLanguage: structured.originalLanguage,
+        isNotPrimaryLanguage: structured.isNotPrimaryLanguage,
+        translation: structured.primaryTranslation
+    });
+    
+    // 不再覆盖文本，保留原转写结果
+    entry.language = structured.originalLanguage || entry.language;
+    delete entry.provisional;
+    entry.timestamp = new Date().toISOString();
+
+    // 若不是第一语言，插入第一语言翻译（插入在其后方）
+    if (structured.isNotPrimaryLanguage && structured.primaryTranslation) {
+        console.log('✅ 插入翻译:', structured.primaryTranslation);
+        const translationEntry = {
+            id: Date.now() + Math.random(),
+            timestamp: new Date().toISOString(),
+            text: normalizeText(structured.primaryTranslation),
+            language: 'zh', // 第一语言
+            channel: entry.channel, // 插入同一可视通道的下一行
+            meta: { translationOf: provisionalId, primaryTranslation: true },
+            isTranslation: true // 标记为翻译行
+        };
+        transcripts.splice(idx + 1, 0, translationEntry);
+    } else {
+        console.log('ℹ️ 不需要翻译（已是第一语言或无翻译结果）');
+    }
+
+    saveTranscripts();
+    // 根据通道最小刷新
+    updateDisplay(entry.channel || 'primary');
 }

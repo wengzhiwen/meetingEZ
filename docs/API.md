@@ -2,7 +2,7 @@
 
 ## 概述
 
-MeetingEZ 通过浏览器端将音频分段上传至 OpenAI `gpt-4o-transcribe`（接口：`/v1/audio/transcriptions`）进行转写（仅转写，不翻译）。本文档描述分段策略、请求参数与字段。
+MeetingEZ 通过浏览器端将音频分段上传至 OpenAI `gpt-4o-transcribe`（接口：`/v1/audio/transcriptions`）进行转写；随后在浏览器端调用文本模型对结果进行“后置处理”（纠错与按需翻译），不依赖后端中转。本文档描述分段策略、请求参数与字段。
 
 ## OpenAI /v1/audio/transcriptions 集成
 
@@ -36,28 +36,56 @@ await fetch('https://api.openai.com/v1/audio/transcriptions', {
 - 上下文：将上一段的文本尾巴（约 200 字符）作为 `prompt` 传入，帮助模型延续上下文
 - 并发：允许多个分段同时上传，降低等待时间
 
+### 会议结束处理
+
+当用户点击"结束会议"时：
+1. 立即设置关闭标志 `isShuttingDown = true`，停止产生新的音频分段
+2. 停止麦克风录音和音频上下文
+3. **保留**所有在途的转写请求继续处理（不执行 `abort()`）
+4. 允许后续的翻译和后置处理正常完成
+5. 这确保了最后一段内容不会因为过早终止而丢失
+
+```javascript
+// 停止录音时的处理
+function stopRecording() {
+    isShuttingDown = true;  // 标记关闭，不再产生新分段
+    isRecording = false;
+    
+    // 停止录音设备
+    if (mediaStream) {
+        mediaStream.getTracks().forEach(track => track.stop());
+    }
+    
+    // 不中断在途请求，让它们自然完成
+    // activeUploadControllers 中的请求会继续执行
+    console.log(`保留 ${activeUploadControllers.size} 个在途请求继续处理`);
+}
+```
+
 ## （提示）已移除 Realtime API / WebRTC
 
 本项目已不再使用 OpenAI Realtime API 与 WebRTC。所有语音数据通过浏览器端分段编码后，使用 REST 接口 `/v1/audio/transcriptions` 上传并获取转写结果。
 
 ## 音频处理
 
-## 音频捕获与编码
+## 音频捕获与编码（会议主流程 48kHz）
 ```javascript
 // 获取麦克风权限
-navigator.mediaDevices.getUserMedia({ 
+navigator.mediaDevices.getUserMedia({
   audio: {
-    sampleRate: 24000,
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    sampleRate: 48000,
     channelCount: 1,
-    echoCancellation: true,
-    noiseSuppression: true,
-    autoGainControl: true
+    sampleSize: 16,
+    latency: 0.01
   }
 })
 .then(stream => {
-  const audioContext = new AudioContext({ sampleRate: 24000 });
+  const audioContext = new AudioContext({ sampleRate: 48000 });
   const source = audioContext.createMediaStreamSource(stream);
-  const processor = audioContext.createScriptProcessor(4096, 1, 1);
+  const processor = audioContext.createScriptProcessor(2048, 1, 1);
   
   processor.onaudioprocess = (event) => {
     const audioData = event.inputBuffer.getChannelData(0);
@@ -86,33 +114,53 @@ function convertFloat32ToInt16(float32Array) {
 }
 ```
 
-## 翻译功能
+## 翻译与后置处理（结构化 JSON，浏览器直连）
 
-本版本不提供翻译流程。仅做原文识别并以单栏渲染。
+浏览器在收到 `/v1/audio/transcriptions` 的文本后，会调用 OpenAI Responses 接口 `/v1/responses`，使用 `gpt-4.1-mini-2025-04-14` 做最小化的结构化处理：
 
-### 语言检测（用于渲染归类）
+- 语言判定：`originalLanguage`
+- 是否需要第一语言翻译（非第一语言时为 true）：`isNotPrimaryLanguage`
+- 第一语言翻译（需要时提供，否则为 null）：`primaryTranslation`
+
+### 请求（浏览器 -> OpenAI /v1/responses）
 ```javascript
-async function detectLanguage(text) {
-  const response = await fetch('/api/detect-language', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text })
-  });
-  return response.json();
-}
+const payload = {
+  model: 'gpt-4.1-mini-2025-04-14',
+  input: [
+    { role: 'system', content: '...严格输出 JSON 的说明 ...' },
+    { role: 'user', content: JSON.stringify({
+        task: 'translate_transcript',
+        primary_language: 'zh',
+        secondary_language: 'ja',
+        original_language_hint: 'ja',
+        text: '原始转写文本'
+    }) }
+  ],
+  text: {
+    format: {
+      type: 'json_schema',
+      name: 'TranslateTranscript',
+      schema: {
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        additionalProperties: false,
+        required: ['originalLanguage', 'isNotPrimaryLanguage', 'primaryTranslation'],
+        properties: {
+          originalLanguage: { type: 'string' },
+          isNotPrimaryLanguage: { type: 'boolean' },
+          primaryTranslation: { anyOf: [{ type: 'string' }, { type: 'null' }] }
+        }
+      },
+      strict: true
+    }
+  }
+};
 ```
 
-### 翻译请求
-```javascript
-async function translateText(text, targetLang = 'zh-CN') {
-  const response = await fetch('/api/translate', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, target_lang: targetLang })
-  });
-  return response.json();
-}
-```
+### 渲染与存储策略
+- 首先以“原始转写”即时显示一行临时记录
+- 收到结构化结果后：保留原文；若需要翻译则紧随其后插入一行翻译（标记为 `isTranslation: true`）
+- 所有记录写入浏览器 Local Storage（键：`meetingEZ_transcripts`，含 `version` 与 `items`）
 
 ## 本地存储
 
@@ -280,23 +328,28 @@ async function testAudioDevices() {
 
 ## 配置参数
 
-### 音频参数
+### 音频参数（会议主流程）
+- **采样率**: 48000 Hz
+- **位深度**: 16-bit
+- **声道数**: 单声道
+- **格式**: PCM
+
+### 音频参数（麦克风测试）
 - **采样率**: 24000 Hz
 - **位深度**: 16-bit
 - **声道数**: 单声道
 - **格式**: PCM
 
 ### 网络参数
-- **连接超时**: 30秒
-- **重连间隔**: 5秒
-- **最大重连次数**: 5次
+- **HTTP 超时**: 由浏览器与目标服务决定（内置重试：429/5xx 指数退避次数 2）
 
-### 性能参数
-- **音频缓冲区大小**: 4096 samples
-- **发送间隔**: 100ms
-- **VAD 阈值**: 0.5
-- **静音检测**: 200ms
+### 性能参数（前端实现）
+- **分段窗口**: 8 秒
+- **重叠**: 1 秒
+- **ScriptProcessor 缓冲**: 2048 样本
+- **VAD 阈值（RMS）**: 0.02（启发式）
+- **持续静音判定**: 连续 30 帧（约 600ms）
 
 ---
 
-*最后更新: 2025年1月*
+*最后更新: 2025年10月*
