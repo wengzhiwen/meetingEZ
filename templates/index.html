@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MeetingEZ - 智能会议助手</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+</head>
+<body>
+    <div class="container">
+        <!-- 头部 -->
+        <header class="header">
+            <h1>MeetingEZ</h1>
+            <p class="subtitle">智能会议助手 - 实时语音识别</p>
+        </header>
+
+        <!-- 控制面板 -->
+        <div class="control-panel">
+            <!-- 会议控制 -->
+            <div class="meeting-controls">
+                <button id="startMeeting" class="btn btn-success" disabled>开始会议</button>
+                <button id="stopMeeting" class="btn btn-danger" disabled>结束会议</button>
+                <span id="meetingStatus" class="status-indicator">未开始</span>
+                <span id="audioStatus" class="status-indicator">未连接</span>
+            </div>
+        </div>
+
+        <!-- 字幕显示区域 -->
+        <div class="transcript-container">
+            <div class="transcript-header">
+                <h2>实时字幕</h2>
+                <div class="transcript-header-right">
+                    <div class="volume-meter compact">
+                        <div id="volumeBar" class="volume-bar"></div>
+                    </div>
+                    <button id="testMicrophone" class="btn btn-small btn-outline">测试麦克风</button>
+                    <div class="transcript-controls">
+                        <button id="autoScroll" class="btn btn-small btn-primary">自动滚动</button>
+                        <button id="clearScreen" class="btn btn-small btn-outline">清屏</button>
+                        <button id="downloadTranscript" class="btn btn-tiny btn-outline" disabled>下载</button>
+                        <button id="clearTranscript" class="btn btn-tiny btn-outline" disabled>清空</button>
+                        <span id="transcriptCount" class="transcript-count-tiny">0 条</span>
+                    </div>
+                </div>
+            </div>
+            <div id="transcriptContent" class="transcript-content">
+                <div class="welcome-message">
+                    <p>欢迎使用 MeetingEZ！</p>
+                    <p>请先配置 OpenAI API Key，然后点击"开始会议"开始使用。</p>
+                </div>
+            </div>
+        </div>
+
+
+        <!-- 设置面板 -->
+        <div class="settings-panel">
+            <h3>设置</h3>
+            <!-- API Key 配置（移动到设置区域） -->
+            <div class="setting-item">
+                <label for="apiKey">OpenAI API Key</label>
+                <div class="input-with-button">
+                    <input type="password" id="apiKey" placeholder="请输入您的 OpenAI API Key" autocomplete="off">
+                    <button type="button" id="toggleApiKey" class="toggle-btn" title="显示/隐藏">👁️</button>
+                </div>
+                <div class="button-group">
+                    <button id="testConnection" class="btn btn-secondary">测试连接</button>
+                    <button id="saveApiKey" class="btn btn-primary">保存</button>
+                </div>
+                <div id="connectionStatus" class="status-message"></div>
+            </div>
+
+            <!-- 音频输入设备选择（移动到设置区域） -->
+            <div class="setting-item">
+                <label for="audioInput">输入设备</label>
+                <select id="audioInput" class="device-select">
+                    <option value="">加载中...</option>
+                </select>
+            </div>
+            <div class="setting-item">
+                <label for="primaryLanguage">主要语言</label>
+                <select id="primaryLanguage">
+                    <option value="zh">中文 (简体)</option>
+                    <option value="zh-TW">中文 (繁體)</option>
+                    <option value="en" selected>English</option>
+                    <option value="ja">日本語</option>
+                    <option value="ko">한국어</option>
+                    <option value="es">Español</option>
+                    <option value="fr">Français</option>
+                    <option value="de">Deutsch</option>
+                    <option value="ru">Русский</option>
+                    <option value="pt">Português</option>
+                </select>
+            </div>
+            <div class="setting-item">
+                <label for="fontSize">字体大小</label>
+                <select id="fontSize">
+                    <option value="small">小</option>
+                    <option value="medium" selected>中</option>
+                    <option value="large">大</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
+    <!-- 加载提示 -->
+    <div id="loadingOverlay" class="loading-overlay" style="display: none;">
+        <div class="loading-spinner"></div>
+        <p>正在连接...</p>
+    </div>
+
+    <!-- 错误提示 -->
+    <div id="errorModal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <span class="close">&times;</span>
+            <h3>错误</h3>
+            <p id="errorMessage"></p>
+        </div>
+    </div>
+
+    <!-- 脚本 -->
+    <script type="module" src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
