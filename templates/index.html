@@ -37,7 +37,6 @@
                     <button id="testMicrophone" class="btn btn-icon btn-outline" title="测试麦克风" aria-label="测试麦克风">测</button>
                     <div class="transcript-controls">
                         <button id="autoScroll" class="btn btn-icon btn-primary" title="自动滚动" aria-label="自动滚动">滚</button>
-                        <button id="clearScreen" class="btn btn-icon btn-outline" title="清屏" aria-label="清屏">清</button>
                         <button id="downloadTranscript" class="btn btn-icon btn-outline" title="下载" aria-label="下载" disabled>下</button>
                         <button id="clearTranscript" class="btn btn-icon btn-outline" title="清空" aria-label="清空" disabled>空</button>
                         <span id="transcriptCount" class="transcript-count-tiny">0 条</span>
@@ -50,6 +49,11 @@
                     <p>请先配置 OpenAI API Key，然后点击"开始会议"开始使用。</p>
                 </div>
             </div>
+            <!-- 当选择第二语言时，将把上面的 transcriptContent 替换为以下左右分屏容器：
+            <div id="transcriptSplit" class="transcript-split" style="display:none;">
+                <div id="transcriptLeft" class="transcript-pane" aria-label="主要语言"></div>
+                <div id="transcriptRight" class="transcript-pane" aria-label="第二语言"></div>
+            </div> -->
         </div>
 
 
@@ -83,6 +87,22 @@
                     <option value="zh">中文 (简体)</option>
                     <option value="zh-TW">中文 (繁體)</option>
                     <option value="en" selected>English</option>
+                    <option value="ja">日本語</option>
+                    <option value="ko">한국어</option>
+                    <option value="es">Español</option>
+                    <option value="fr">Français</option>
+                    <option value="de">Deutsch</option>
+                    <option value="ru">Русский</option>
+                    <option value="pt">Português</option>
+                </select>
+            </div>
+            <div class="setting-item">
+                <label for="secondaryLanguage">第二语言（可选）</label>
+                <select id="secondaryLanguage">
+                    <option value="">无</option>
+                    <option value="zh">中文 (简体)</option>
+                    <option value="zh-TW">中文 (繁體)</option>
+                    <option value="en">English</option>
                     <option value="ja">日本語</option>
                     <option value="ko">한국어</option>
                     <option value="es">Español</option>

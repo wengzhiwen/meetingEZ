@@ -1,4 +1,4 @@
-// 直接使用 WebRTC 连接 OpenAI Realtime API
+// 使用分段上传调用 OpenAI Audio Transcriptions API
 // 全局变量
 let isConnected = false;
 let isRecording = false;
@@ -6,15 +6,16 @@ let audioContext = null;
 let mediaStream = null;
 let transcripts = [];
 let sessionId = null;
-let peerConnection = null;
-let dataChannel = null;
 let volumeAnimationFrame = null;
 let selectedAudioDevice = null;
 let testStream = null;
 let testAudioContext = null;
 let isTestingMicrophone = false;
-let currentStreamingText = '';
-let currentTranscriptId = null;
+let currentStreamingTextMap = { primary: '', secondary: '' };
+let currentTranscriptIdMap = { primary: null, secondary: null };
+const STORAGE_KEY = 'meetingEZ_transcripts';
+const STORAGE_VERSION = 2;
+const HIDE_BEFORE_KEY = 'meetingEZ_hideBefore';
 
 // VAD 和回填更正相关变量
 let vadThreshold = 0.01;  // 音量阈值
@@ -23,7 +24,19 @@ let speechBuffer = [];
 let correctionWindow = 800;  // 800ms 回填更正窗口
 let lastSpeechTime = 0;
 
-// DOM 元素
+// 分段上传参数（8秒分段，1秒重叠）
+const SEGMENT_DURATION_SEC = 8;
+const OVERLAP_DURATION_SEC = 1;
+let segmentSamples = 0;
+let overlapSamples = 0;
+let stepSamples = 0;
+let aggregatedBuffer = new Float32Array(0); // 累积的采样缓冲
+let segmentStartIndex = 0; // 下一段窗口的起始采样索引
+let activeUploadControllers = new Set(); // 追踪在途请求以便停止时中断
+let channelContextTail = { primary: '', secondary: '' }; // 每路保留上一段文本尾部上下文
+let lastAcceptedTextMap = { primary: '', secondary: '' }; // 每路最近一次接受的文本
+let lastAcceptedAtMap = { primary: 0, secondary: 0 }; // 每路最近一次接受的时间戳
+
 const apiKeyInput = document.getElementById('apiKey');
 const toggleBtn = document.getElementById('toggleApiKey');
 const testBtn = document.getElementById('testConnection');
@@ -32,6 +45,9 @@ const startBtn = document.getElementById('startMeeting');
 const stopBtn = document.getElementById('stopMeeting');
 const statusDiv = document.getElementById('connectionStatus');
 const transcriptContent = document.getElementById('transcriptContent');
+let transcriptSplit = null;
+let transcriptLeft = null;
+let transcriptRight = null;
 
 // 初始化
 async function init() {
@@ -55,12 +71,18 @@ function loadSettings() {
         document.getElementById('primaryLanguage').value = primaryLang;
     }
     
-    // 移除二语言与自动翻译
+    // 第二语言设置
+    const secondaryLang = localStorage.getItem('meetingEZ_secondaryLanguage') || '';
+    const secSelect = document.getElementById('secondaryLanguage');
+    if (secSelect) {
+        secSelect.value = secondaryLang;
+    }
+    // 根据二语言状态初始化分屏视图
+    enableSplitView(!!secondaryLang);
 }
 
 // 设置事件监听器
 function setupEventListeners() {
-    // API Key 显示/隐藏
     toggleBtn.addEventListener('click', () => {
         if (apiKeyInput.type === 'password') {
             apiKeyInput.type = 'text';
@@ -71,28 +93,20 @@ function setupEventListeners() {
         }
     });
 
-    // 测试连接
     testBtn.addEventListener('click', testConnection);
 
-    // 保存 API Key
     saveBtn.addEventListener('click', saveApiKey);
 
-    // 会议控制
     startBtn.addEventListener('click', startMeeting);
     stopBtn.addEventListener('click', stopMeeting);
 
-    // 数据管理
     document.getElementById('downloadTranscript').addEventListener('click', downloadTranscript);
     document.getElementById('clearTranscript').addEventListener('click', clearTranscript);
 
-    // 字幕控制
     document.getElementById('autoScroll').addEventListener('click', toggleAutoScroll);
-    document.getElementById('clearScreen').addEventListener('click', clearScreen);
 
-    // 麦克风测试
     document.getElementById('testMicrophone').addEventListener('click', toggleMicrophoneTest);
 
-    // 监听系统设备变更（插拔耳机等）
     if (navigator.mediaDevices) {
         if (typeof navigator.mediaDevices.addEventListener === 'function') {
             navigator.mediaDevices.addEventListener('devicechange', async () => {
@@ -107,24 +121,29 @@ function setupEventListeners() {
         }
     }
 
-    // 设置
     document.getElementById('primaryLanguage').addEventListener('change', (e) => {
         localStorage.setItem('meetingEZ_primaryLanguage', e.target.value);
     });
 
-    // 已移除二语言与自动翻译事件
+    const secSelect = document.getElementById('secondaryLanguage');
+    if (secSelect) {
+        secSelect.addEventListener('change', (e) => {
+            const value = (e.target.value || '').trim();
+            localStorage.setItem('meetingEZ_secondaryLanguage', value);
+            // 仅切换视图并保存偏好；会议中的通道保持不变
+            enableSplitView(!!value);
+        });
+    }
 
     document.getElementById('fontSize').addEventListener('change', (e) => {
         localStorage.setItem('meetingEZ_fontSize', e.target.value);
         updateFontSize();
     });
 
-    // 模态框关闭
     document.querySelector('.close').addEventListener('click', () => {
         document.getElementById('errorModal').style.display = 'none';
     });
 
-    // 回车键保存
     apiKeyInput.addEventListener('keypress', (e) => {
         if (e.key === 'Enter') {
             saveApiKey();
@@ -200,23 +219,16 @@ async function startMeeting() {
     try {
         showLoading('正在初始化会议...');
 
-        // 1. 获取麦克风权限 - 优化音频质量设置
+        // 获取麦克风权限（尽量保持原始音频）
         const audioConstraints = {
-            // 关键优化：关闭浏览器默认的音频处理，保持原始音频质量
-            echoCancellation: false,      // 关闭回声消除，避免细节丢失
-            noiseSuppression: false,      // 关闭降噪，保持发音细节
-            autoGainControl: false,       // 关闭自动增益，避免音量波动
-            
-            // 锁定到语音最佳参数
-            sampleRate: 48000,           // 48kHz 采样率（从24kHz提升）
-            channelCount: 1,             // 单声道
-            sampleSize: 16,              // 16位采样
-            
-            // 音频格式优化
-            latency: 0.01,               // 10ms 延迟
-            volume: 1.0,                 // 固定音量
-            
-            // 高级音频约束（Chrome 特有）
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            sampleRate: 48000,
+            channelCount: 1,
+            sampleSize: 16,
+            latency: 0.01,
+            volume: 1.0,
             googEchoCancellation: false,
             googAutoGainControl: false,
             googNoiseSuppression: false,
@@ -224,181 +236,29 @@ async function startMeeting() {
             googTypingNoiseDetection: false,
             googAudioMirroring: false
         };
-        
-        // 如果选择了特定设备，使用该设备
+
         if (selectedAudioDevice) {
             audioConstraints.deviceId = { exact: selectedAudioDevice };
         }
-        
-        mediaStream = await navigator.mediaDevices.getUserMedia({
-            audio: audioConstraints
-        });
-        
+
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
         console.log('🎤 获取麦克风权限成功');
-        
-        // 检查音频质量设置
-        const audioTracks = mediaStream.getAudioTracks();
-        if (audioTracks.length > 0) {
-            const track = audioTracks[0];
-            const settings = track.getSettings();
-            console.log('🎵 音频设置:', {
-                sampleRate: settings.sampleRate,
-                channelCount: settings.channelCount,
-                echoCancellation: settings.echoCancellation,
-                noiseSuppression: settings.noiseSuppression,
-                autoGainControl: settings.autoGainControl
-            });
-            
-            // 检查是否使用了优化设置
-            if (settings.sampleRate === 48000 && 
-                settings.echoCancellation === false && 
-                settings.noiseSuppression === false) {
-                console.log('✅ 音频质量优化已启用');
-            } else {
-                console.warn('⚠️ 音频质量可能未完全优化，建议使用耳机麦克风');
-            }
-        }
 
-        // 2. 创建 WebRTC 连接
-        peerConnection = new RTCPeerConnection({
-            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        });
+        // 启动录音与分段上传流水线
+        await startRecording();
 
-        // 3. 添加音频轨道
-        peerConnection.addTrack(mediaStream.getAudioTracks()[0]);
+        // UI 状态更新
+        isConnected = true;
+        updateControls();
+        updateMeetingStatus('进行中', 'active');
+        updateAudioStatus('已连接', 'active');
+        disableSettings();
+        hideLoading();
+        showStatus('会议已开始', 'success');
 
-        // 4. 创建数据通道
-        dataChannel = peerConnection.createDataChannel('oai-events');
-        
-        dataChannel.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                console.log('📥 收到消息:', data.type, data);
-                handleRealtimeMessage(data);
-            } catch (error) {
-                console.error('❌ 解析消息失败:', error);
-            }
-        };
-
-        dataChannel.onopen = async () => {
-            console.log('✅ DataChannel 已打开');
-            
-            // 获取用户选择的语言
-            const primaryLang = document.getElementById('primaryLanguage').value || 'en';
-            const secondaryLang = '';
-            
-            // 构建语言提示
-            const languageNames = {
-                'zh': '简体中文',
-                'zh-TW': '繁体中文',
-                'en': '英文',
-                'ja': '日文',
-                'ko': '韩文',
-                'es': '西班牙文',
-                'fr': '法文',
-                'de': '德文',
-                'ru': '俄文',
-                'pt': '葡萄牙文'
-            };
-            
-            let instructions = '你是一个专业的会议助手，负责实时转录会议内容。';
-            instructions += `主要语言是${languageNames[primaryLang]}。`;
-            if (secondaryLang) {
-                instructions += `第二语言是${languageNames[secondaryLang]}。`;
-            }
-            instructions += '请准确识别并转录用户说的话。';
-            instructions += '只转录用户的实际语音内容，不要生成任何回复或解释。';
-            instructions += '如果检测到非目标语言的内容，请忽略。';
-            
-            // 发送会话配置
-            const configMessage = {
-                type: 'session.update',
-                session: {
-                    model: 'gpt-4o-realtime-preview-2024-10-01',  // 指定 Realtime 模型
-                    instructions: instructions,
-                    voice: 'alloy',
-                    modalities: ['text', 'audio'],
-                    input_audio_format: 'pcm16',
-                    output_audio_format: 'pcm16',
-                    turn_detection: {
-                        type: 'server_vad',
-                        threshold: 0.2,  // 进一步降低阈值，提高灵敏度
-                        prefix_padding_ms: 500,  // 增加前缀填充，捕获语音开始
-                        silence_duration_ms: 800  // 增加静音时长，允许更长上下文
-                    },
-                    input_audio_transcription: {
-                        model: 'whisper-1',
-                        language: primaryLang  // 强制指定主要语言
-                        // 目前 Realtime API 只支持 whisper-1
-                    },
-                    temperature: 0.6,  // 最低允许值，减少随机性，提高准确性
-                    max_response_output_tokens: 1
-                }
-            };
-            console.log('📤 发送会话配置:', configMessage);
-            console.log('🌍 语言设置: 主要=' + primaryLang + ', 第二=' + (secondaryLang || '无'));
-            dataChannel.send(JSON.stringify(configMessage));
-            
-            // 开始录音
-            await startRecording();
-            
-            isConnected = true;
-            updateControls();
-            updateMeetingStatus('进行中', 'active');
-            updateAudioStatus('已连接', 'active');
-            hideLoading();
-            showStatus('会议已开始', 'success');
-        };
-
-        dataChannel.onerror = (error) => {
-            console.error('❌ Data channel error:', error);
-            if (error.error) {
-                console.error('错误详情:', error.error.message);
-            }
-            showError('数据通道错误: ' + (error.error?.message || error.message || '未知错误'));
-        };
-
-        dataChannel.onclose = () => {
-            console.log('⚠️ Data channel closed');
-            isConnected = false;
-            updateControls();
-            updateMeetingStatus('已结束', '');
-            updateAudioStatus('未连接', '');
-            
-            // 停止录音
-            if (isRecording) {
-                stopRecording();
-                showError('数据通道已关闭，会议已结束');
-            }
-        };
-
-        // 5. 创建 SDP offer
-        const offer = await peerConnection.createOffer();
-        await peerConnection.setLocalDescription(offer);
-
-        // 6. 发送 SDP offer 到 OpenAI
-        const baseUrl = 'https://api.openai.com/v1/realtime';
-        const model = 'gpt-4o-realtime-preview-2024-10-01';
-        const sdpResponse = await fetch(`${baseUrl}?model=${model}`, {
-            method: 'POST',
-            body: offer.sdp,
-            headers: {
-                'Authorization': `Bearer ${apiKey}`,
-                'Content-Type': 'application/sdp',
-            },
-        });
-
-        if (!sdpResponse.ok) {
-            throw new Error(`SDP exchange failed: ${sdpResponse.status}`);
-        }
-
-        // 7. 设置远程描述
-        const answer = {
-            type: 'answer',
-            sdp: await sdpResponse.text(),
-        };
-        await peerConnection.setRemoteDescription(answer);
-
+        // 按当前设置切换分屏
+        const secondaryLang = (document.getElementById('secondaryLanguage')?.value || '').trim();
+        enableSplitView(!!secondaryLang);
     } catch (error) {
         console.error('开始会议失败:', error);
         hideLoading();
@@ -415,21 +275,15 @@ async function stopMeeting() {
         // 停止录音
         stopRecording();
 
-        // 关闭 WebRTC 连接
-        if (dataChannel) {
-            dataChannel.close();
-            dataChannel = null;
-        }
-        
-        if (peerConnection) {
-            peerConnection.close();
-            peerConnection = null;
-        }
+        // 无 WebRTC 连接，略
 
         isConnected = false;
         updateControls();
         updateMeetingStatus('已结束', '');
         updateAudioStatus('未连接', '');
+        enableSettings(); // 解锁设置区
+
+        // 保持当前视图状态（不强制切回单栏）
 
         hideLoading();
         showStatus('会议已结束', 'info');
@@ -441,80 +295,7 @@ async function stopMeeting() {
     }
 }
 
-// 处理 Realtime 消息
-function handleRealtimeMessage(data) {
-    console.log('🔍 处理消息类型:', data.type, data);
-    
-    // 处理所有转录相关的事件
-    switch (data.type) {
-        case 'error':
-            console.error('❌ API 错误:', data.error);
-            showError('API 错误: ' + (data.error?.message || JSON.stringify(data.error)));
-            break;
-            
-        case 'conversation.item.input_audio_transcription.completed':
-            console.log('🎤 用户语音转录完成:', data.transcript);
-            if (data.transcript) {
-                // 直接添加完整转录（因为 delta 事件可能不可用）
-                addTranscript(data.transcript, true);
-            }
-            break;
-            
-        case 'conversation.item.input_audio_transcription.delta':
-            console.log('🎤 用户语音转录增量:', data.delta);
-            if (data.delta) {
-                // 流式更新当前转录
-                updateStreamingTranscript(data.delta);
-            }
-            break;
-            
-        case 'conversation.item.created':
-            console.log('📝 会话项创建 (忽略，只处理流式增量):', data.item);
-            // 忽略完整转录，只处理流式增量更新
-            break;
-            
-        case 'response.audio_transcript.delta':
-            console.log('🔊 AI 音频转录增量 (忽略):', data.delta);
-            // 忽略 AI 的音频转录，只处理用户语音
-            break;
-            
-        case 'response.audio_transcript.done':
-            console.log('✅ AI 音频转录完成 (忽略):', data.transcript);
-            // 忽略 AI 的音频转录，只处理用户语音
-            break;
-            
-        case 'response.text.delta':
-            console.log('💬 AI 文本增量 (忽略):', data.delta);
-            // 忽略 AI 的文本回复，只处理用户语音转录
-            break;
-            
-        case 'response.text.done':
-            console.log('✅ AI 文本完成 (忽略):', data.text);
-            // 忽略 AI 的文本回复，只处理用户语音转录
-            break;
-            
-        case 'input_audio_buffer.speech_started':
-            console.log('🎤 检测到语音开始');
-            // 开始新的流式转录
-            startNewStreamingTranscript();
-            break;
-            
-        case 'input_audio_buffer.speech_stopped':
-            console.log('🎤 检测到语音停止');
-            // 语音停止后，等待完整的转录结果
-            break;
-            
-        case 'input_audio_buffer.committed':
-            console.log('✅ 音频缓冲区已提交');
-            // 提交当前的流式转录
-            commitCurrentTranscript();
-            break;
-            
-        default:
-            // 其他消息类型仅记录
-            break;
-    }
-}
+// （已移除）Realtime 消息处理：不再使用 WebRTC
 
 // 开始录音
 async function startRecording() {
@@ -522,102 +303,183 @@ async function startRecording() {
         // 创建音频上下文 - 使用48kHz采样率
         audioContext = new AudioContext({ sampleRate: 48000 });
         const source = audioContext.createMediaStreamSource(mediaStream);
-        
-        // 创建音量分析器
+
+        // 音量分析器
         const analyser = audioContext.createAnalyser();
         analyser.fftSize = 256;
         source.connect(analyser);
-        
-        // 注意：ScriptProcessorNode 已弃用，但目前 AudioWorkletNode 需要额外设置
-        // 为了简化，继续使用 ScriptProcessorNode
+
+        // 使用 ScriptProcessorNode 收集 PCM 数据
         const processor = audioContext.createScriptProcessor(2048, 1, 1);
         source.connect(processor);
         processor.connect(audioContext.destination);
 
-        let audioChunkCount = 0;
-        let lastSendTime = Date.now();
-        const minSendInterval = 50; // 最小发送间隔（毫秒）
-        
+        // 初始化分段参数
+        segmentSamples = Math.round(SEGMENT_DURATION_SEC * audioContext.sampleRate);
+        overlapSamples = Math.round(OVERLAP_DURATION_SEC * audioContext.sampleRate);
+        stepSamples = segmentSamples - overlapSamples;
+        aggregatedBuffer = new Float32Array(0);
+        segmentStartIndex = 0;
+        channelContextTail = { primary: '', secondary: '' };
+
         processor.onaudioprocess = (event) => {
-            if (!isRecording || !dataChannel || dataChannel.readyState !== 'open') {
-                return;
-            }
-            
-            const now = Date.now();
-            if (now - lastSendTime < minSendInterval) {
-                return; // 限制发送频率
-            }
-            lastSendTime = now;
-            
+            if (!isRecording) return;
+
             const audioData = event.inputBuffer.getChannelData(0);
-            const int16Data = new Int16Array(audioData.length);
-            
-            // 计算音量和VAD检测
+
+            // 更新音量指示器（RMS）
             let sum = 0;
             for (let i = 0; i < audioData.length; i++) {
-                const sample = audioData[i];
-                int16Data[i] = Math.max(-32768, Math.min(32767, sample * 32768));
-                sum += sample * sample;
+                const s = audioData[i];
+                sum += s * s;
             }
             const rms = Math.sqrt(sum / audioData.length);
             const volume = Math.min(1, rms * 10);
-            
-            // 更新音量指示器
             updateVolumeIndicator(volume);
-            
-            // 客户端VAD检测
-            const vadNow = Date.now();
-            const wasSpeaking = isSpeaking;
-            isSpeaking = volume > vadThreshold;
-            
-            if (isSpeaking) {
-                lastSpeechTime = vadNow;
-                // 如果刚开始说话，清空之前的缓冲区
-                if (!wasSpeaking) {
-                    speechBuffer = [];
-                    console.log('🎤 检测到语音开始');
+
+            // 追加到累积缓冲
+            aggregatedBuffer = concatFloat32(aggregatedBuffer, audioData);
+
+            // 生成尽可能多的窗口（允许并发上传）
+            while (aggregatedBuffer.length >= segmentStartIndex + segmentSamples) {
+                const windowData = aggregatedBuffer.slice(segmentStartIndex, segmentStartIndex + segmentSamples);
+                queueSegmentUpload(windowData);
+                segmentStartIndex += stepSamples;
+
+                // 适度清理缓冲，避免无限增长
+                if (segmentStartIndex > segmentSamples * 2) {
+                    const pruneAt = segmentStartIndex - overlapSamples; // 保留一段重叠的尾巴
+                    aggregatedBuffer = aggregatedBuffer.slice(pruneAt);
+                    segmentStartIndex -= pruneAt;
                 }
-            } else {
-                // 如果停止说话，启动回填更正窗口
-                if (wasSpeaking && vadNow - lastSpeechTime > correctionWindow) {
-                    console.log('🔇 语音结束，启动回填更正窗口');
-                    // 这里可以添加回填更正逻辑
-                }
-            }
-            
-            // 转换为 base64 编码的字符串
-            const uint8Array = new Uint8Array(int16Data.buffer);
-            let binary = '';
-            for (let i = 0; i < uint8Array.length; i++) {
-                binary += String.fromCharCode(uint8Array[i]);
-            }
-            const base64Audio = btoa(binary);
-            
-            // 发送音频数据
-            const message = {
-                type: 'input_audio_buffer.append',
-                audio: base64Audio
-            };
-            
-            try {
-                dataChannel.send(JSON.stringify(message));
-                audioChunkCount++;
-                
-                if (audioChunkCount % 20 === 0) {
-                    console.log(`🎙️ 已发送 ${audioChunkCount} 个音频块, 当前音量: ${(volume * 100).toFixed(0)}%`);
-                }
-            } catch (error) {
-                console.error('❌ 发送音频数据失败:', error);
-                // 不立即停止录音，可能只是临时错误
             }
         };
 
         isRecording = true;
-        console.log('🎙️ 开始录音');
-
+        console.log('🎙️ 开始录音并启动分段流水线');
     } catch (error) {
         console.error('❌ 开始录音失败:', error);
         throw error;
+    }
+}
+
+// 拼接 Float32Array
+function concatFloat32(a, b) {
+    if (a.length === 0) return new Float32Array(b);
+    const out = new Float32Array(a.length + b.length);
+    out.set(a, 0);
+    out.set(b, a.length);
+    return out;
+}
+
+// 将 Float32 PCM 编码为 WAV (PCM16 LE)
+function encodeWav(float32Array, sampleRate) {
+    // 转换为 Int16 PCM
+    const bufferLength = float32Array.length;
+    const pcm16 = new Int16Array(bufferLength);
+    for (let i = 0; i < bufferLength; i++) {
+        const s = Math.max(-1, Math.min(1, float32Array[i]));
+        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+
+    const wavBuffer = new ArrayBuffer(44 + pcm16.length * 2);
+    const view = new DataView(wavBuffer);
+
+    // RIFF header
+    writeString(view, 0, 'RIFF');
+    view.setUint32(4, 36 + pcm16.length * 2, true);
+    writeString(view, 8, 'WAVE');
+
+    // fmt chunk
+    writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true); // PCM chunk size
+    view.setUint16(20, 1, true); // audio format = PCM
+    view.setUint16(22, 1, true); // channels = 1
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true); // byte rate (sampleRate * blockAlign)
+    view.setUint16(32, 2, true); // block align (channels * bytesPerSample)
+    view.setUint16(34, 16, true); // bits per sample
+
+    // data chunk
+    writeString(view, 36, 'data');
+    view.setUint32(40, pcm16.length * 2, true);
+
+    // PCM samples
+    let offset = 44;
+    for (let i = 0; i < pcm16.length; i++, offset += 2) {
+        view.setInt16(offset, pcm16[i], true);
+    }
+
+    return new Blob([view], { type: 'audio/wav' });
+}
+
+function writeString(dataview, offset, string) {
+    for (let i = 0; i < string.length; i++) {
+        dataview.setUint8(offset + i, string.charCodeAt(i));
+    }
+}
+
+// 队列化上传当前窗口：并行调用两路语言
+function queueSegmentUpload(float32Window) {
+    try {
+        const wavBlob = encodeWav(float32Window, audioContext.sampleRate);
+        const apiKey = localStorage.getItem('meetingEZ_apiKey') || apiKeyInput.value.trim();
+        const primaryLang = document.getElementById('primaryLanguage').value || 'en';
+        const secondaryLang = (document.getElementById('secondaryLanguage')?.value || '').trim();
+
+        // 主语言上传
+        transcribeBlob(wavBlob, apiKey, primaryLang, 'primary', channelContextTail.primary);
+
+        // 次语言（可选）上传
+        if (secondaryLang) {
+            transcribeBlob(wavBlob, apiKey, secondaryLang, 'secondary', channelContextTail.secondary);
+        }
+    } catch (e) {
+        console.error('❌ 队列分段上传失败:', e);
+    }
+}
+
+async function transcribeBlob(blob, apiKey, language, channel, promptTail) {
+    const form = new FormData();
+    form.append('model', 'gpt-4o-transcribe');
+    if (language) form.append('language', language);
+    if (promptTail) form.append('prompt', promptTail);
+    form.append('response_format', 'json');
+    form.append('file', blob, `segment_${Date.now()}_${channel}.wav`);
+
+    const controller = new AbortController();
+    activeUploadControllers.add(controller);
+
+    try {
+        console.log('📤 上传分段:', { channel, language, sizeKB: Math.round(blob.size / 1024), inflight: activeUploadControllers.size });
+        const resp = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${apiKey}` },
+            body: form,
+            signal: controller.signal
+        });
+        if (!resp.ok) {
+            const errTxt = await resp.text().catch(() => '');
+            throw new Error(`HTTP ${resp.status}: ${resp.statusText} ${errTxt}`);
+        }
+        const data = await resp.json();
+        const text = (data && (data.text || data.transcript || data.result)) || '';
+        console.log('📥 收到转写:', { channel, language, length: text.length });
+        if (text && text.trim()) {
+            addTranscript(text, true, channel);
+            // 更新上下文尾巴（截取最后200字符）
+            const tail = text.trim();
+            channelContextTail[channel] = tail.length > 200 ? tail.slice(-200) : tail;
+        }
+    } catch (e) {
+        if (controller.signal.aborted) {
+            console.warn('上传已中断:', channel);
+        } else {
+            console.error('❌ 转写请求失败:', { channel, language, error: e });
+        }
+    } finally {
+        activeUploadControllers.delete(controller);
+        console.log('📉 在途请求减少:', { inflight: activeUploadControllers.size });
     }
 }
 
@@ -635,6 +497,14 @@ function stopRecording() {
         audioContext = null;
     }
     
+    // 中断在途上传
+    try {
+        activeUploadControllers.forEach(ctrl => {
+            try { ctrl.abort(); } catch (e) {}
+        });
+        activeUploadControllers.clear();
+    } catch (e) {}
+    
     // 重置音量指示器
     updateVolumeIndicator(0);
 
@@ -642,10 +512,10 @@ function stopRecording() {
 }
 
 // 开始新的流式转录
-function startNewStreamingTranscript() {
-    currentStreamingText = '';
-    currentTranscriptId = Date.now() + Math.random();
-    console.log('🆕 开始新的流式转录:', currentTranscriptId);
+function startNewStreamingTranscript(channel = 'primary') {
+    currentStreamingTextMap[channel] = '';
+    currentTranscriptIdMap[channel] = Date.now() + Math.random();
+    console.log('🆕 开始新的流式转录:', channel, currentTranscriptIdMap[channel]);
 }
 
 // 检查是否为幻觉内容
@@ -746,57 +616,27 @@ function isHallucinationText(text) {
     return hallucinationPatterns.some(pattern => pattern.test(text));
 }
 
-// 检查文本是否符合预期语言
-function isExpectedLanguage(text) {
-    const primaryLang = document.getElementById('primaryLanguage')?.value || 'en';
-    const secondaryLang = '';
-    
-    const detectedLang = detectLanguage(text);
-    
-    // 如果未选择第二语言，只允许主要语言
-    if (!secondaryLang) {
-        return detectedLang === primaryLang;
-    }
-    
-    // 选择了第二语言，则两种都允许
-    if (detectedLang === primaryLang || detectedLang === secondaryLang) {
-        return true;
-    }
-
-    // 对英文的额外过滤（未包含英文时无需放行）
-    if (detectedLang === 'en' && primaryLang !== 'en' && secondaryLang !== 'en') {
-        const hasEnglishWords = /\b(the|is|are|was|were|have|has|will|can|would|should|welcome|channel|video|subscribe|thank|thanks|please|sorry|hello|hi)\b/i.test(text);
-        if (hasEnglishWords && text.length > 15) {
-            console.log('⚠️ 检测到非预期语言（英文），跳过:', text);
-            return false;
-        }
-    }
-
-    return false;  // 其他情况默认不通过
-}
+// 不再进行前端语言检测，每个通道的结果直接显示在对应位置
+// 左边通道 (primary) 的结果显示在左边
+// 右边通道 (secondary) 的结果显示在右边
+// OpenAI 的语言配置会确保各自只处理指定语言，无需前端过滤
 
 // 更新流式转录
-function updateStreamingTranscript(delta) {
+function updateStreamingTranscript(delta, channel = 'primary') {
     if (!delta) return;
     
     // 累积文本
-    currentStreamingText += delta;
-    console.log('📝 流式累积文本:', currentStreamingText);
+    currentStreamingTextMap[channel] += delta;
+    console.log('📝 流式累积文本:', channel, currentStreamingTextMap[channel]);
     
     // 检查是否为幻觉内容（只检查完整文本，不阻止流式显示）
-    if (isHallucinationText(currentStreamingText)) {
-        console.log('⚠️ 检测到幻觉内容，但继续流式显示:', currentStreamingText);
-        // 不返回，继续显示，让用户看到流式效果
-    }
-    
-    // 检查语言（只检查完整文本，不阻止流式显示）
-    if (!isExpectedLanguage(currentStreamingText)) {
-        console.log('⚠️ 检测到非预期语言，但继续流式显示:', currentStreamingText);
+    if (isHallucinationText(currentStreamingTextMap[channel])) {
+        console.log('⚠️ 检测到幻觉内容，但继续流式显示:', currentStreamingTextMap[channel]);
         // 不返回，继续显示，让用户看到流式效果
     }
     
     // 立即更新显示（实时流式效果）
-    updateStreamingDisplay();
+    updateStreamingDisplay(channel);
     
     // 自动滚动
     if (document.getElementById('autoScroll').classList.contains('btn-primary')) {
@@ -805,53 +645,56 @@ function updateStreamingTranscript(delta) {
 }
 
 // 提交当前的流式转录
-function commitCurrentTranscript() {
-    if (currentStreamingText && currentStreamingText.trim() !== '') {
-        console.log('✅ 提交转录:', currentStreamingText);
+function commitCurrentTranscript(channel = 'primary') {
+    const text = currentStreamingTextMap[channel];
+    if (text && text.trim() !== '') {
+        console.log('✅ 提交转录:', channel, text);
         
         // 最后检查是否为幻觉内容
-        if (isHallucinationText(currentStreamingText)) {
+        if (isHallucinationText(text)) {
             console.log('⚠️ 提交时检测到幻觉内容，跳过保存');
-            currentStreamingText = '';
-            currentTranscriptId = null;
-            updateDisplay();
-            return;
-        }
-        
-        // 最后检查语言
-        if (!isExpectedLanguage(currentStreamingText)) {
-            console.log('⚠️ 提交时检测到非预期语言，跳过保存');
-            currentStreamingText = '';
-            currentTranscriptId = null;
-            updateDisplay();
+            currentStreamingTextMap[channel] = '';
+            currentTranscriptIdMap[channel] = null;
+            updateDisplay(channel);
             return;
         }
         
         // 检查是否与最后一条记录重复
         const lastTranscript = transcripts[transcripts.length - 1];
-        if (lastTranscript && lastTranscript.text === currentStreamingText.trim()) {
+        if (lastTranscript && lastTranscript.text === text.trim()) {
             console.log('⚠️ 检测到重复的转录，跳过保存');
-            currentStreamingText = '';
-            currentTranscriptId = null;
-            updateDisplay();
+            currentStreamingTextMap[channel] = '';
+            currentTranscriptIdMap[channel] = null;
+            updateDisplay(channel);
             return;
         }
         
+        const normalized = normalizeText(text);
+        if (shouldSkipByLastAccepted(normalized, channel)) {
+            console.log('🚫 提交阶段检测：与最近一次结果重复/包含，跳过:', { channel, text: normalized });
+            currentStreamingTextMap[channel] = '';
+            currentTranscriptIdMap[channel] = null;
+            updateDisplay(channel);
+            return;
+        }
         const transcript = {
-            id: currentTranscriptId || Date.now() + Math.random(),
+            id: currentTranscriptIdMap[channel] || Date.now() + Math.random(),
             timestamp: new Date().toISOString(),
-            text: currentStreamingText.trim(),
-            language: detectLanguage(currentStreamingText.trim())
+            text: normalized,
+            language: detectLanguage(normalized),
+            channel
         };
         
         transcripts.push(transcript);
+        lastAcceptedTextMap[channel] = normalized;
+        lastAcceptedAtMap[channel] = Date.now();
         saveTranscripts();
         
         // 重置流式状态
-        currentStreamingText = '';
-        currentTranscriptId = null;
+        currentStreamingTextMap[channel] = '';
+        currentTranscriptIdMap[channel] = null;
         
-        updateDisplay();
+        updateDisplay(channel);
         updateCount();
         
         // 自动滚动
@@ -862,35 +705,51 @@ function commitCurrentTranscript() {
 }
 
 // 添加字幕（用于完整的转录结果）
-function addTranscript(text, isComplete = false) {
+function addTranscript(text, isComplete = false, channel = 'primary') {
     if (!text || text.trim() === '') return;
 
     console.log('➕ 添加字幕:', text.trim(), isComplete ? '(完整)' : '(增量)');
 
     if (isComplete) {
-        // 检查是否与最后一条记录或当前流式文本重复
-        const lastTranscript = transcripts[transcripts.length - 1];
-        if ((lastTranscript && lastTranscript.text === text.trim()) || 
-            (currentStreamingText && currentStreamingText.trim() === text.trim())) {
-            console.log('⚠️ 检测到重复的完整转录，跳过');
+        // 规范化文本
+        const normalized = normalizeText(text);
+
+        // 近期去重（同一通道，最近若干条内存在相同或相似文本则跳过）
+        if (isRecentDuplicate(normalized, channel, 12)) {
+            console.log('♻️ 近期重复，跳过保存:', { channel, text: normalized });
+            return;
+        }
+
+        // 若新文本是对最后一条的扩展（包含关系），在短时间窗内合并更新最后一条
+        if (mergeWithLastIfExpanding(normalized, channel, 15000)) {
+            console.log('🔁 与上一条合并更新:', { channel, text: normalized });
             return;
         }
         
+        // 横切过滤：若与最近一次接受的文本相同或包含关系，直接跳过
+        if (shouldSkipByLastAccepted(normalized, channel)) {
+            console.log('🚫 与最近一次结果重复/包含，跳过:', { channel, text: normalized });
+            return;
+        }
+
         // 完整的转录结果，直接保存
         const transcript = {
             id: Date.now() + Math.random(),
             timestamp: new Date().toISOString(),
-            text: text.trim(),
-            language: detectLanguage(text.trim())
+            text: normalized,
+            language: detectLanguage(text.trim()),
+            channel
         };
 
         transcripts.push(transcript);
+        lastAcceptedTextMap[channel] = normalized;
+        lastAcceptedAtMap[channel] = Date.now();
         saveTranscripts();
-        updateDisplay();
+        updateDisplay(channel);
         updateCount();
     } else {
         // 增量更新，累积到当前流式转录
-        updateStreamingTranscript(text);
+        updateStreamingTranscript(text, channel);
     }
 
     // 自动滚动
@@ -934,8 +793,11 @@ function detectLanguage(text) {
 }
 
 // 更新流式显示（实时显示当前正在累积的文本）
-function updateStreamingDisplay() {
+function updateStreamingDisplay(channel = 'primary') {
     const transcriptContent = document.getElementById('transcriptContent');
+    transcriptSplit = transcriptSplit || document.getElementById('transcriptSplit');
+    transcriptLeft = transcriptLeft || document.getElementById('transcriptLeft');
+    transcriptRight = transcriptRight || document.getElementById('transcriptRight');
     
     // 清除之前的流式显示
     const existingStreaming = document.getElementById('streaming-transcript');
@@ -944,32 +806,43 @@ function updateStreamingDisplay() {
     }
     
     // 显示当前流式文本
-    if (currentStreamingText && currentStreamingText.trim()) {
+    const text = currentStreamingTextMap[channel];
+    if (text && text.trim()) {
         // 创建流式显示元素
         const streamingElement = document.createElement('div');
         streamingElement.className = 'streaming-text';
-        streamingElement.id = 'streaming-transcript';
+        // 按通道使用独立 ID，防止互相覆盖
+        streamingElement.id = `streaming-transcript-${channel}`;
         
         // 添加时间戳
         const timestamp = new Date().toLocaleTimeString();
-        streamingElement.textContent = `${currentStreamingText} [${timestamp}]`;
+        streamingElement.textContent = `${text} [${timestamp}]`;
         
-        transcriptContent.appendChild(streamingElement);
+    const container = transcriptSplit && transcriptSplit.style.display !== 'none'
+        ? (channel === 'secondary' ? transcriptRight : transcriptLeft)
+        : transcriptContent;
+    // 清除当前通道的旧流式元素
+    const old = container.querySelector(`#streaming-transcript-${channel}`);
+    if (old) old.remove();
+    container.appendChild(streamingElement);
         
         // 确保自动滚动到底部
         if (document.getElementById('autoScroll').classList.contains('btn-primary')) {
             scrollToBottom();
         }
         
-        console.log('🔄 流式显示更新:', currentStreamingText);
+        console.log('🔄 流式显示更新:', channel, text);
     }
 }
 
 // 更新显示
-function updateDisplay() {
+function updateDisplay(channel = 'primary') {
     const transcriptContent = document.getElementById('transcriptContent');
+    transcriptSplit = transcriptSplit || document.getElementById('transcriptSplit');
+    transcriptLeft = transcriptLeft || document.getElementById('transcriptLeft');
+    transcriptRight = transcriptRight || document.getElementById('transcriptRight');
     
-    if (transcripts.length === 0 && !currentStreamingText) {
+    if (transcripts.length === 0 && !currentStreamingTextMap.primary && !currentStreamingTextMap.secondary) {
         transcriptContent.innerHTML = `
             <div class="welcome-message">
                 <p>欢迎使用 MeetingEZ！</p>
@@ -979,17 +852,30 @@ function updateDisplay() {
         return;
     }
 
-    const displayTranscripts = transcripts.slice(-50); // 只显示最近50条
+    const hideBefore = localStorage.getItem(HIDE_BEFORE_KEY);
+    const displayTranscripts = transcripts
+      .filter(t => !hideBefore || t.timestamp > hideBefore)
+      .slice(-50); // 只显示最近50条（过滤隐藏阈值前的记录）
     
     // 显示已保存的记录，使用简洁格式
-    transcriptContent.innerHTML = displayTranscripts.map(transcript => {
+    const activeChannel = channel;
+    const contentHtml = displayTranscripts
+      .filter(t => (transcriptSplit && transcriptSplit.style.display !== 'none') ? t.channel === activeChannel : true)
+      .map(transcript => {
         const time = new Date(transcript.timestamp).toLocaleTimeString();
         return `${transcript.text} [${time}]`;
-    }).join('\n');
-    
-    // 自动滚动到底部
-    if (document.getElementById('autoScroll').classList.contains('btn-primary')) {
-        scrollToBottom();
+      }).join('\n');
+    if (transcriptSplit && transcriptSplit.style.display !== 'none') {
+        if (channel === 'secondary') {
+            transcriptRight.textContent = contentHtml;
+        } else {
+            transcriptLeft.textContent = contentHtml;
+        }
+    } else {
+        transcriptContent.textContent = contentHtml;
+        if (document.getElementById('autoScroll').classList.contains('btn-primary')) {
+            scrollToBottom();
+        }
     }
 }
 
@@ -1019,12 +905,13 @@ function escapeHtml(text) {
 
 // 滚动到底部
 function scrollToBottom() {
-    if (transcriptContent) {
-        // 使用 requestAnimationFrame 确保 DOM 更新后再滚动
-        requestAnimationFrame(() => {
-            transcriptContent.scrollTop = transcriptContent.scrollHeight;
-        });
-    }
+    const container = (transcriptSplit && transcriptSplit.style.display !== 'none')
+        ? transcriptLeft
+        : transcriptContent;
+    if (!container) return;
+    requestAnimationFrame(() => {
+        container.scrollTop = container.scrollHeight;
+    });
 }
 
 // 更新计数
@@ -1034,15 +921,27 @@ function updateCount() {
 
 // 保存字幕
 function saveTranscripts() {
-    localStorage.setItem('meetingEZ_transcripts', JSON.stringify(transcripts));
+    const payload = { version: STORAGE_VERSION, items: transcripts };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
 }
 
 // 加载字幕
 function loadTranscripts() {
     try {
-        const stored = localStorage.getItem('meetingEZ_transcripts');
+        const stored = localStorage.getItem(STORAGE_KEY) || localStorage.getItem('meetingEZ_transcripts');
         if (stored) {
-            transcripts = JSON.parse(stored);
+            const parsed = JSON.parse(stored);
+            if (parsed && parsed.version === STORAGE_VERSION && Array.isArray(parsed.items)) {
+                transcripts = parsed.items;
+            } else if (Array.isArray(parsed)) {
+                // 旧版本迁移：无channel信息，默认归为primary
+                transcripts = parsed.map(t => ({ ...t, channel: t.channel || 'primary' }));
+                saveTranscripts();
+                // 移除旧key
+                try { localStorage.removeItem('meetingEZ_transcripts'); } catch (e) {}
+            } else {
+                transcripts = [];
+            }
             updateDisplay();
             updateCount();
         }
@@ -1084,10 +983,54 @@ function downloadTranscript() {
 // 清空记录
 function clearTranscript() {
     if (confirm('确定要清空所有记录吗？此操作不可撤销。')) {
+        console.time('⏱️ 清空记录耗时');
+        
+        // 清空本地存储的所有记录
         transcripts = [];
-        saveTranscripts();
-        updateDisplay();
+        
+        // 清空流式缓冲
+        currentStreamingTextMap.primary = '';
+        currentStreamingTextMap.secondary = '';
+        currentTranscriptIdMap.primary = null;
+        currentTranscriptIdMap.secondary = null;
+        
+        // 设置隐藏阈值
+        const nowIso = new Date().toISOString();
+        localStorage.setItem(HIDE_BEFORE_KEY, nowIso);
+        
+        // 批量 DOM 操作：先清空 UI，再保存到 localStorage（避免阻塞）
+        const transcriptContent = document.getElementById('transcriptContent');
+        const transcriptLeft = document.getElementById('transcriptLeft');
+        const transcriptRight = document.getElementById('transcriptRight');
+        const transcriptSplit = document.getElementById('transcriptSplit');
+        
+        // 直接清空 DOM，不调用 updateDisplay（避免重复渲染）
+        const secondaryLang = (document.getElementById('secondaryLanguage')?.value || '').trim();
+        if (secondaryLang && transcriptSplit && transcriptSplit.style.display !== 'none') {
+            // 分屏模式：清空左右两侧
+            if (transcriptLeft) transcriptLeft.textContent = '';
+            if (transcriptRight) transcriptRight.textContent = '';
+        } else {
+            // 单屏模式：显示欢迎消息
+            if (transcriptContent) {
+                transcriptContent.innerHTML = `
+                    <div class="welcome-message">
+                        <p>欢迎使用 MeetingEZ！</p>
+                        <p>请先配置 OpenAI API Key，然后点击"开始会议"开始使用。</p>
+                    </div>
+                `;
+            }
+        }
+        
+        // 更新计数
         updateCount();
+        
+        // 异步保存到 localStorage（不阻塞 UI）
+        setTimeout(() => {
+            saveTranscripts();
+            console.timeEnd('⏱️ 清空记录耗时');
+            console.log('✅ 已清空所有记录（包括本地存储和显示）');
+        }, 0);
     }
 }
 
@@ -1126,6 +1069,80 @@ function updateFontSize() {
     const fontSize = localStorage.getItem('meetingEZ_fontSize') || 'medium';
     transcriptContent.className = `transcript-content font-${fontSize}`;
 }
+
+// 禁用设置区（会议进行中）
+function disableSettings() {
+    const settingsInputs = [
+        document.getElementById('apiKey'),
+        document.getElementById('audioInput'),
+        document.getElementById('primaryLanguage'),
+        document.getElementById('secondaryLanguage'),
+        document.getElementById('fontSize')
+    ];
+    
+    settingsInputs.forEach(input => {
+        if (input) input.disabled = true;
+    });
+    
+    // 禁用API Key相关按钮
+    const testBtn = document.getElementById('testConnection');
+    const saveBtn = document.getElementById('saveApiKey');
+    const toggleBtn = document.getElementById('toggleApiKey');
+    if (testBtn) testBtn.disabled = true;
+    if (saveBtn) saveBtn.disabled = true;
+    if (toggleBtn) toggleBtn.disabled = true;
+    
+    console.log('🔒 设置区已锁定');
+}
+
+// 启用设置区（会议结束后）
+function enableSettings() {
+    const settingsInputs = [
+        document.getElementById('apiKey'),
+        document.getElementById('audioInput'),
+        document.getElementById('primaryLanguage'),
+        document.getElementById('secondaryLanguage'),
+        document.getElementById('fontSize')
+    ];
+    
+    settingsInputs.forEach(input => {
+        if (input) input.disabled = false;
+    });
+    
+    // 启用API Key相关按钮
+    const testBtn = document.getElementById('testConnection');
+    const saveBtn = document.getElementById('saveApiKey');
+    const toggleBtn = document.getElementById('toggleApiKey');
+    if (testBtn) testBtn.disabled = false;
+    if (saveBtn) saveBtn.disabled = false;
+    if (toggleBtn) toggleBtn.disabled = false;
+    
+    console.log('🔓 设置区已解锁');
+}
+
+// 辅助：启用/禁用左右分屏
+function enableSplitView(enabled) {
+    const content = document.getElementById('transcriptContent');
+    transcriptSplit = transcriptSplit || document.getElementById('transcriptSplit');
+    transcriptLeft = transcriptLeft || document.getElementById('transcriptLeft');
+    transcriptRight = transcriptRight || document.getElementById('transcriptRight');
+    if (!content || !transcriptSplit) {
+        console.warn('⚠️ enableSplitView: 容器未就绪，跳过');
+        return;
+    }
+    if (enabled) {
+        content.style.display = 'none';
+        transcriptSplit.style.display = 'grid';
+        // 初始化时不清空内容，保留已有数据
+        console.log('✅ 已启用左右分屏模式');
+    } else {
+        transcriptSplit.style.display = 'none';
+        content.style.display = 'block';
+        console.log('✅ 已切换到单栏模式');
+    }
+}
+
+// （已移除）第二通道逻辑：改为双语言并行上传 REST 调用
 
 // 显示状态消息
 function showStatus(message, type) {
@@ -1377,24 +1394,6 @@ function toggleAutoScroll() {
     }
 }
 
-// 清屏功能
-function clearScreen() {
-    const transcriptContent = document.getElementById('transcriptContent');
-    
-    // 只清空显示，不影响本地存储的数据
-    if (transcripts.length === 0 && !currentStreamingText) {
-        transcriptContent.innerHTML = `
-            <div class="welcome-message">
-                <p>欢迎使用 MeetingEZ！</p>
-                <p>请先配置 OpenAI API Key，然后点击"开始会议"开始使用。</p>
-            </div>
-        `;
-    } else {
-        transcriptContent.innerHTML = '';
-    }
-    
-    console.log('🧹 屏幕已清空（数据保留）');
-}
 
 // 初始化自动滚动状态
 function initializeAutoScroll() {
@@ -1419,6 +1418,83 @@ function initializeAutoScroll() {
 
 // 页面加载完成后初始化
 document.addEventListener('DOMContentLoaded', () => {
+    // 先准备分屏容器（懒创建，若模板未渲染则动态创建）
+    transcriptSplit = document.getElementById('transcriptSplit');
+    if (!transcriptSplit) {
+        transcriptSplit = document.createElement('div');
+        transcriptSplit.id = 'transcriptSplit';
+        transcriptSplit.className = 'transcript-split';
+        transcriptSplit.style.display = 'none';
+        transcriptLeft = document.createElement('div');
+        transcriptLeft.id = 'transcriptLeft';
+        transcriptLeft.className = 'transcript-pane';
+        transcriptRight = document.createElement('div');
+        transcriptRight.id = 'transcriptRight';
+        transcriptRight.className = 'transcript-pane';
+        transcriptSplit.appendChild(transcriptLeft);
+        transcriptSplit.appendChild(transcriptRight);
+        const container = document.querySelector('.transcript-container');
+        if (container) {
+            container.appendChild(transcriptSplit);
+        }
+    }
+    
+    // 然后初始化（这样 loadSettings 中的 enableSplitView 才能正常工作）
     init();
     loadTranscripts();
+    
+    // 加载完历史记录后，如果是分屏模式，需要渲染左右两侧
+    const secondaryLang = (localStorage.getItem('meetingEZ_secondaryLanguage') || '').trim();
+    if (secondaryLang && transcriptSplit && transcriptSplit.style.display !== 'none') {
+        updateDisplay('primary');
+        updateDisplay('secondary');
+    }
 });
+
+function normalizeText(text) {
+    const t = (text || '').trim();
+    // 统一句末标点（去除重复句号，保留一个）
+    return t.replace(/[。\.]{2,}$/u, (m) => m[0]);
+}
+
+function isRecentDuplicate(normalized, channel, lookbackCount = 12) {
+    const recent = transcripts
+        .filter(t => t.channel === channel)
+        .slice(-lookbackCount)
+        .map(t => normalizeText(t.text));
+    const last = recent[recent.length - 1] || '';
+    if (recent.includes(normalized)) return true;
+    // 与最后一条几乎相等（去空格）
+    if (last && stripSpaces(last) === stripSpaces(normalized)) return true;
+    return false;
+}
+
+function mergeWithLastIfExpanding(normalized, channel, windowMs = 15000) {
+    const last = transcripts.slice(-1)[0];
+    if (!last || last.channel !== channel) return false;
+    const lastTs = new Date(last.timestamp).getTime();
+    if (Date.now() - lastTs > windowMs) return false;
+    // 新文本是旧文本的扩展（包含关系且长度更长）
+    if (normalized.length > last.text.length && normalized.startsWith(last.text)) {
+        last.text = normalized;
+        last.timestamp = new Date().toISOString();
+        saveTranscripts();
+        updateDisplay(channel);
+        updateCount();
+        return true;
+    }
+    return false;
+}
+
+function shouldSkipByLastAccepted(normalized, channel) {
+    const lastText = lastAcceptedTextMap[channel] || '';
+    if (!lastText) return false;
+    if (normalized === lastText) return true;
+    // 若完全包含（例如因 1 秒重叠导致同一句被重复识别）
+    if (normalized.includes(lastText) || lastText.includes(normalized)) return true;
+    return false;
+}
+
+function stripSpaces(s) {
+    return (s || '').replace(/\s+/g, '');
+}
