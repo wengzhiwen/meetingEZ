@@ -728,13 +728,15 @@ class ActionsManager:
         self,
         meeting_dir: Path,
         project_dir: Optional[Path] = None,
+        previous_meetings: Optional[list[Path]] = None,
     ) -> Path:
         """
         为单个会议生成 action 变化文件
 
         Args:
-            meeting_dir: 会议目录
+            meeting_dir: 当前会议目录
             project_dir: 项目目录
+            previous_meetings: 之前的会议目录列表（用于确定截至当时的待办状态）
 
         Returns:
             生成的 delta 文件路径
@@ -749,46 +751,185 @@ class ActionsManager:
         # 提取待办变更
         extracted = self._extract_actions_from_minutes(content, meeting_name)
 
-        # 加载现有 actions，用于匹配
-        actions = self.load(project_dir)
+        # 获取"截至本次会议前"的待办状态
+        # 只加载之前会议的 delta 并应用，得到当时的 actions 状态
+        actions_at_this_point = self._get_actions_before_meeting(
+            project_dir, previous_meetings or []
+        )
 
         # 分析变更
-        delta = self._analyze_delta(extracted, actions, meeting_name)
+        delta = self._analyze_delta(extracted, actions_at_this_point, meeting_name)
 
         # 生成 delta 文件
         delta_file = meeting_dir / "_actions_delta.md"
-        delta_content = self._generate_delta_md(delta, meeting_name)
+        delta_content = self._generate_delta_md_v2(delta, meeting_name)
         delta_file.write_text(delta_content, encoding="utf-8")
 
         logger.info("生成 delta 文件: %s", delta_file)
         return delta_file
+
+    def _get_actions_before_meeting(
+        self,
+        project_dir: Optional[Path],
+        previous_meetings: list[Path],
+    ) -> list[ActionItem]:
+        """
+        获取"截至某次会议前"的待办状态
+
+        按时间顺序应用之前所有会议的 delta，得到当时的 actions 状态
+
+        Args:
+            project_dir: 项目目录
+            previous_meetings: 之前的会议目录列表（按时间排序）
+
+        Returns:
+            截至当时的待办列表
+        """
+        # 从空的 actions 开始
+        actions: list[ActionItem] = []
+        next_id = 1
+
+        # 按顺序应用之前会议的 delta
+        for meeting_dir in previous_meetings:
+            delta_file = meeting_dir / "_actions_delta.md"
+            if not delta_file.exists():
+                continue
+
+            # 应用该会议的 delta
+            actions, next_id = self._apply_delta_to_actions(
+                delta_file, actions, next_id, meeting_dir.name
+            )
+
+        return actions
+
+    def _apply_delta_to_actions(
+        self,
+        delta_file: Path,
+        actions: list[ActionItem],
+        next_id: int,
+        meeting_name: str,
+    ) -> tuple[list[ActionItem], int]:
+        """
+        将单个 delta 应用到 actions 列表
+
+        Returns:
+            (更新后的 actions, 下一个可用 ID)
+        """
+        content = delta_file.read_text(encoding="utf-8")
+
+        # 解析每个条目块
+        # 格式: ## 条目 #N\n**类型**: ...\n...
+        block_pattern = r"##\s*条目\s*#(\d+)\s*\n(.*?)(?=##\s*条目|$)"
+        for match in re.finditer(block_pattern, content, re.DOTALL):
+            block_content = match.group(2)
+
+            # 解析类型
+            type_match = re.search(r"\*\*类型\*\*:\s*(\S+)", block_content)
+            item_type = type_match.group(1) if type_match else "未知"
+
+            # 解析人工批注中的决策
+            annotation_match = re.search(r"\*\*人工批注\*\*:\s*\n>\s*(.+?)(?:\n|$)", block_content)
+            annotation = annotation_match.group(1).strip() if annotation_match else ""
+
+            if item_type == "新增":
+                # 解析任务信息
+                task = self._extract_field(block_content, "任务")
+                owner = self._extract_field(block_content, "负责人")
+                due_date_str = self._extract_field(block_content, "截止")
+
+                if annotation.startswith("合并到"):
+                    # 合并到现有
+                    target_id = annotation.replace("合并到", "").strip()
+                    for action in actions:
+                        if action.id == target_id:
+                            if meeting_name not in action.mentions:
+                                action.mentions.append(meeting_name)
+                            break
+                elif annotation == "忽略" or annotation == "删除":
+                    pass  # 不处理
+                else:
+                    # 新增 - 分配新 ID
+                    existing_ids = {a.id for a in actions}
+                    while f"A{next_id:03d}" in existing_ids:
+                        next_id += 1
+
+                    action_id = f"A{next_id:03d}"
+                    next_id += 1
+
+                    new_action = ActionItem(
+                        id=action_id,
+                        task=task,
+                        owner=owner,
+                        due_date=self._parse_date(due_date_str),
+                        status=ActionType.PENDING,
+                        created_at=datetime.now(),
+                        created_in_meeting=meeting_name,
+                        mentions=[meeting_name],
+                    )
+                    actions.append(new_action)
+
+            elif item_type == "完成":
+                # 解析关联ID
+                action_id = self._extract_field(block_content, "关联ID")
+
+                if annotation == "确认" or annotation == "✓":
+                    for action in actions:
+                        if action.id == action_id:
+                            action.status = ActionType.COMPLETED
+                            break
+                elif annotation.startswith("改为"):
+                    # 修改关联 ID
+                    new_id = annotation.replace("改为", "").strip()
+                    for action in actions:
+                        if action.id == new_id:
+                            action.status = ActionType.COMPLETED
+                            break
+
+            elif item_type == "提及":
+                # 记录提及
+                action_id = self._extract_field(block_content, "关联ID")
+                for action in actions:
+                    if action.id == action_id:
+                        if meeting_name not in action.mentions:
+                            action.mentions.append(meeting_name)
+                        break
+
+        return actions, next_id
+
+    def _extract_field(self, block: str, field_name: str) -> str:
+        """从条目块中提取字段值"""
+        pattern = rf"\*\*{re.escape(field_name)}\*\*:\s*(.+?)(?:\n|$)"
+        match = re.search(pattern, block)
+        return match.group(1).strip() if match else ""
 
     def _analyze_delta(
         self,
         extracted: dict,
         existing_actions: list[ActionItem],
         meeting_name: str,
-    ) -> dict:
+    ) -> list[dict]:
         """
-        分析提取的待办，与现有待办对比，生成变更记录
+        分析提取的待办，生成条目列表
 
         Returns:
-            {
-                "new": [{"temp_id": "N1", "task": ..., "owner": ..., "due_date": ..., "match_hint": ...}],
-                "completed": [{"action_id": "A001", "task": ..., "completed_desc": ...}],
-                "mentioned": [{"action_id": "A002", "task": ...}],
-                "duplicates": [{"keep_id": "A004", "dup_ids": ["A013"], "reason": ...}],
-            }
+            [
+                {
+                    "type": "新增" | "完成" | "提及",
+                    "temp_id": "N1",
+                    "task": "...",
+                    "owner": "...",
+                    "due_date": "...",
+                    "related_id": "A001",  # 关联的现有待办 ID
+                    "completed_desc": "...",  # 完成说明
+                    "match_hint": "...",  # 匹配提示
+                },
+                ...
+            ]
         """
-        delta = {
-            "new": [],
-            "completed": [],
-            "mentioned": [],
-            "duplicates": [],
-        }
+        items = []
+        new_idx = 1
 
         # 分析新增待办
-        new_idx = 1
         for action_data in extracted.get("new_actions", []):
             task = action_data.get("task", "").strip()
             if not task:
@@ -799,60 +940,202 @@ class ActionsManager:
 
             if similar:
                 # 记录为提及
-                delta["mentioned"].append({
-                    "action_id": similar.id,
-                    "task": similar.task,
-                    "new_desc": task,
-                    "owner": action_data.get("owner", ""),
-                })
-            else:
-                # 新增
-                match_hint = self._find_potential_match(task, existing_actions)
-                delta["new"].append({
+                items.append({
+                    "type": "提及",
                     "temp_id": f"N{new_idx}",
                     "task": task,
                     "owner": action_data.get("owner", ""),
                     "due_date": str(action_data["due_date"]) if action_data.get("due_date") else "-",
-                    "match_hint": match_hint,  # 可能的匹配提示
+                    "related_id": similar.id,
+                    "related_task": similar.task,
+                    "completed_desc": None,
+                    "match_hint": None,
                 })
-                new_idx += 1
+            else:
+                # 新增
+                match_hint = self._find_potential_match(task, existing_actions)
+                items.append({
+                    "type": "新增",
+                    "temp_id": f"N{new_idx}",
+                    "task": task,
+                    "owner": action_data.get("owner", ""),
+                    "due_date": str(action_data["due_date"]) if action_data.get("due_date") else "-",
+                    "related_id": None,
+                    "related_task": None,
+                    "completed_desc": None,
+                    "match_hint": match_hint,
+                })
+            new_idx += 1
 
         # 分析已完成
         for completed_text in extracted.get("completed", []):
             similar = self._find_similar_action(completed_text, existing_actions)
-            if similar:
-                delta["completed"].append({
-                    "action_id": similar.id,
-                    "task": similar.task,
-                    "completed_desc": completed_text,
-                })
-            else:
-                # 没有匹配到，可能是遗漏的完成信息
-                delta["completed"].append({
-                    "action_id": "?",  # 需要人工确认
-                    "task": "",
-                    "completed_desc": completed_text,
-                })
+            items.append({
+                "type": "完成",
+                "temp_id": None,
+                "task": None,
+                "owner": None,
+                "due_date": None,
+                "related_id": similar.id if similar else "?",
+                "related_task": similar.task if similar else None,
+                "completed_desc": completed_text,
+                "match_hint": None,
+            })
 
-        # 检测新增中的重复
-        seen_tasks = {}
-        for item in delta["new"]:
-            task = item["task"]
-            for existing in existing_actions:
-                if self._is_same_task(task, existing.task):
-                    if existing.id not in seen_tasks:
-                        seen_tasks[existing.id] = []
-                    seen_tasks[existing.id].append(item["temp_id"])
+        return items
 
-        for existing_id, dup_temp_ids in seen_tasks.items():
-            if len(dup_temp_ids) > 0:
-                delta["duplicates"].append({
-                    "keep_id": existing_id,
-                    "dup_temp_ids": dup_temp_ids,
-                    "reason": "任务描述相似",
-                })
+    def _generate_delta_md_v2(self, items: list[dict], meeting_name: str) -> str:
+        """生成新版 delta 文件格式 - 每个条目一块"""
+        lines = [
+            f"# 待办变更记录",
+            "",
+            f"> 会议：{meeting_name}",
+            f"> 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "",
+            "---",
+            "",
+        ]
 
-        return delta
+        if not items:
+            lines.append("*本次会议无待办变更*")
+            lines.append("")
+        else:
+            for idx, item in enumerate(items, 1):
+                lines.append(f"## 条目 #{idx}")
+                lines.append("")
+                lines.append(f"**类型**: {item['type']}")
+                lines.append("")
+
+                if item['type'] == "新增":
+                    lines.append(f"**任务**: {item['task']}")
+                    lines.append(f"**负责人**: {item['owner'] or '-'}")
+                    lines.append(f"**截止**: {item['due_date']}")
+                    if item['match_hint']:
+                        lines.append(f"**匹配提示**: {item['match_hint']}")
+                    lines.append("")
+                    lines.append("**人工批注**:")
+                    lines.append("> _请填写：新增 / 合并到 AXXX / 忽略_")
+                    lines.append("")
+
+                elif item['type'] == "完成":
+                    lines.append(f"**关联ID**: {item['related_id']}")
+                    if item['related_task']:
+                        lines.append(f"**原任务**: {item['related_task'][:50]}...")
+                    lines.append(f"**完成说明**: {item['completed_desc']}")
+                    lines.append("")
+                    lines.append("**人工批注**:")
+                    lines.append("> _请填写：确认 / 改为 AXXX / 忽略_")
+                    lines.append("")
+
+                elif item['type'] == "提及":
+                    lines.append(f"**关联ID**: {item['related_id']}")
+                    lines.append(f"**原任务**: {item['related_task'][:50]}...")
+                    lines.append(f"**本次提及**: {item['task']}")
+                    lines.append("")
+                    lines.append("**人工批注**:")
+                    lines.append("> _通常无需处理，系统会自动记录提及_")
+                    lines.append("")
+
+                lines.append("---")
+                lines.append("")
+
+        # 使用说明
+        lines.append("## 批注说明")
+        lines.append("")
+        lines.append("**新增类型**：")
+        lines.append("- `新增` = 创建新待办")
+        lines.append("- `合并到 AXXX` = 合并到现有待办")
+        lines.append("- `忽略` = 不处理")
+        lines.append("")
+        lines.append("**完成类型**：")
+        lines.append("- `确认` = 确认关联 ID 正确并标记完成")
+        lines.append("- `改为 AXXX` = 修改关联 ID 并标记完成")
+        lines.append("- `忽略` = 不处理")
+        lines.append("")
+
+        return "\n".join(lines)
+
+    def apply_all_deltas(self, project_dir: Optional[Path] = None) -> dict:
+        """
+        按时间顺序应用所有 delta 文件，生成最终的 actions.md
+
+        这是正确的迭代方式：按会议时间顺序，依次应用每个 delta
+
+        Returns:
+            {"total_meetings": int, "added": int, "completed": int, "merged": int}
+        """
+        base_dir = project_dir or self.config.meetings_dir
+
+        # 获取所有会议目录，按时间排序
+        meeting_dirs = sorted([
+            item for item in base_dir.iterdir()
+            if item.is_dir() and not item.name.startswith(".")
+        ], key=lambda x: x.name)
+
+        # 从空开始，按顺序应用
+        actions: list[ActionItem] = []
+        next_id = 1
+        stats = {"total_meetings": 0, "added": 0, "completed": 0, "merged": 0}
+
+        for meeting_dir in meeting_dirs:
+            delta_file = meeting_dir / "_actions_delta.md"
+            if not delta_file.exists():
+                continue
+
+            before_count = len(actions)
+            actions, next_id = self._apply_delta_to_actions(
+                delta_file, actions, next_id, meeting_dir.name
+            )
+
+            stats["total_meetings"] += 1
+            stats["added"] += len(actions) - before_count
+
+        # 保存最终的 actions
+        self.save(actions, project_dir)
+
+        logger.info("应用所有 delta: %d 个会议，%d 个待办",
+                    stats["total_meetings"], len(actions))
+
+        return stats
+
+    def generate_all_deltas_sequentially(self, project_dir: Optional[Path] = None) -> list[Path]:
+        """
+        按时间顺序为所有会议生成 delta 文件
+
+        关键：每次生成时，只使用"之前会议"的信息来确定待办状态
+
+        Returns:
+            生成的 delta 文件列表
+        """
+        base_dir = project_dir or self.config.meetings_dir
+
+        # 获取所有会议目录，按时间排序
+        meeting_dirs = sorted([
+            item for item in base_dir.iterdir()
+            if item.is_dir() and not item.name.startswith(".")
+        ], key=lambda x: x.name)
+
+        delta_files = []
+        previous_meetings = []
+
+        for meeting_dir in meeting_dirs:
+            minutes_file = meeting_dir / MINUTES_FILE
+            if not minutes_file.exists():
+                previous_meetings.append(meeting_dir)
+                continue
+
+            try:
+                # 生成时只传入"之前的会议"
+                delta_file = self.generate_delta_file(
+                    meeting_dir, project_dir, previous_meetings
+                )
+                delta_files.append(delta_file)
+                previous_meetings.append(meeting_dir)
+            except Exception as e:
+                logger.warning("生成 delta 失败 %s: %s", meeting_dir.name, e)
+                previous_meetings.append(meeting_dir)
+
+        return delta_files
 
     def _find_potential_match(self, task: str, actions: list[ActionItem]) -> Optional[str]:
         """找到可能匹配的现有待办（用于人工确认）"""
@@ -878,208 +1161,6 @@ class ActionsManager:
 
         return None
 
-    def _generate_delta_md(self, delta: dict, meeting_name: str) -> str:
-        """生成 delta 文件的 markdown 内容"""
-        lines = [
-            f"# 待办变更记录",
-            "",
-            f"> 会议：{meeting_name}",
-            f"> 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}",
-            "",
-            "---",
-            "",
-        ]
-
-        # 新增待办
-        lines.append("## 新增待办")
-        lines.append("")
-        if delta["new"]:
-            lines.append("| 临时ID | 任务 | 负责人 | 截止 | 确认操作 |")
-            lines.append("|--------|------|--------|------|----------|")
-            for item in delta["new"]:
-                match_hint = item.get("match_hint") or ""
-                lines.append(f"| {item['temp_id']} | {item['task']} | {item['owner']} | {item['due_date']} | 新增 |")
-        else:
-            lines.append("*无新增*")
-        lines.append("")
-
-        # 已完成 - 关键：允许人工修改关联ID
-        lines.append("## 已完成（请确认或修改关联ID）")
-        lines.append("")
-        if delta["completed"]:
-            lines.append("| 关联ID | 完成说明 | 确认 |")
-            lines.append("|--------|----------|------|")
-            for item in delta["completed"]:
-                action_id = item.get("action_id", "?")
-                completed_desc = item["completed_desc"][:50]
-                lines.append(f"| {action_id} | {completed_desc} | ✓ |")
-        else:
-            lines.append("*无*")
-        lines.append("")
-
-        # 重复提及
-        if delta["mentioned"]:
-            lines.append("## 重复提及（本次会议再次提到的现有待办）")
-            lines.append("")
-            lines.append("| 现有ID | 本次提及内容 |")
-            lines.append("|--------|--------------|")
-            for item in delta["mentioned"]:
-                lines.append(f"| {item['action_id']} | {item['new_desc'][:40]}... |")
-            lines.append("")
-
-        # 使用说明
-        lines.append("---")
-        lines.append("")
-        lines.append("## 操作说明")
-        lines.append("")
-        lines.append("**新增待办**：")
-        lines.append("- `新增` = 创建新待办")
-        lines.append("- `合并到 AXXX` = 不新增，合并到现有待办")
-        lines.append("")
-        lines.append("**已完成**：")
-        lines.append("- 修改 `关联ID` 列为正确的 action ID（如 `?` -> `A001`）")
-        lines.append("- `✓` = 确认完成，`-` = 不处理")
-        lines.append("")
-
-        return "\n".join(lines)
-
-    def apply_delta(
-        self,
-        delta_file: Path,
-        project_dir: Optional[Path] = None,
-    ) -> dict:
-        """
-        应用 delta 文件到 actions.md
-
-        解析人工确认后的 delta 文件，更新 actions
-
-        Returns:
-            {"added": int, "completed": int, "merged": int}
-        """
-        content = delta_file.read_text(encoding="utf-8")
-        actions = self.load(project_dir)
-
-        stats = {"added": 0, "completed": 0, "merged": 0}
-
-        # 解析新增待办表格
-        # | 临时ID | 任务 | 负责人 | 截止 | 确认操作 |
-        new_pattern = r"\|\s*(N\d+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]*)\s*\|\s*([^|]+)\s*\|"
-        for match in re.finditer(new_pattern, content):
-            temp_id = match.group(1).strip()
-            task = match.group(2).strip()
-            owner = match.group(3).strip()
-            due_date_str = match.group(4).strip()
-            operation = match.group(5).strip()
-
-            if operation == "新增":
-                # 创建新待办
-                existing_ids = {a.id for a in actions}
-                next_num = 1
-                while f"A{next_num:03d}" in existing_ids:
-                    next_num += 1
-
-                new_action = ActionItem(
-                    id=f"A{next_num:03d}",
-                    task=task,
-                    owner=owner,
-                    due_date=self._parse_date(due_date_str),
-                    status=ActionType.PENDING,
-                    created_at=datetime.now(),
-                    created_in_meeting=delta_file.parent.name,
-                )
-                actions.append(new_action)
-                stats["added"] += 1
-
-            elif operation.startswith("合并到 "):
-                # 合并到现有待办
-                target_id = operation.replace("合并到 ", "").strip()
-                for action in actions:
-                    if action.id == target_id:
-                        if delta_file.parent.name not in action.mentions:
-                            action.mentions.append(delta_file.parent.name)
-                        stats["merged"] += 1
-                        break
-
-        # 解析已完成表格
-        # | 关联ID | 完成说明 | 确认 |
-        completed_pattern = r"\|\s*([A-Z]?\d{0,3}|\?)\s*\|\s*([^|]+)\s*\|\s*([✓✗\-]+)\s*\|"
-        for match in re.finditer(completed_pattern, content):
-            action_id = match.group(1).strip()
-            # completed_desc = match.group(2).strip()  # 暂不使用
-            confirmation = match.group(3).strip()
-
-            if confirmation == "✓" and action_id and action_id != "?":
-                for action in actions:
-                    if action.id == action_id:
-                        action.status = ActionType.COMPLETED
-                        stats["completed"] += 1
-                        break
-
-        self.save(actions, project_dir)
-        logger.info("应用 delta: 新增 %d，完成 %d，合并 %d",
-                    stats["added"], stats["completed"], stats["merged"])
-
-        return stats
-
-    def _parse_confirmations(self, content: str, section_name: str) -> dict[str, str]:
-        """解析人工确认部分"""
-        result = {}
-
-        # 查找确认区域 - 支持两种格式
-        # 格式1: ### 标题\n```\n...\n```
-        # 格式2: ### 标题\n| ID | 确认 |\n|---|---|\n| A001 | 确认 |
-
-        pattern = rf"###\s*{re.escape(section_name)}.*?(?=###|\Z)"
-        match = re.search(pattern, content, re.DOTALL)
-
-        if not match:
-            return result
-
-        section = match.group(0)
-
-        # 尝试解析代码块格式
-        code_pattern = r"```\s*\n(.*?)\n```"
-        code_match = re.search(code_pattern, section, re.DOTALL)
-
-        if code_match:
-            block = code_match.group(1)
-            for line in block.split("\n"):
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-
-                # 解析格式: key -> value
-                if " -> " in line:
-                    parts = line.split(" -> ", 1)
-                    if len(parts) == 2:
-                        key = parts[0].strip()
-                        value = parts[1].strip()
-                        result[key] = value
-
-        # 尝试解析表格格式
-        table_pattern = r"\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|"
-        for table_match in re.finditer(table_pattern, section):
-            key = table_match.group(1).strip()
-            value = table_match.group(2).strip()
-            if key and value and key not in ["ID", "关联ID", "临时ID", "---"]:
-                result[key] = value
-
-        return result
-
-    def _get_task_from_delta(self, content: str, temp_id: str) -> Optional[dict]:
-        """从 delta 文件中获取任务信息"""
-        # 查找表格中的任务
-        pattern = rf"\|\s*{re.escape(temp_id)}\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|"
-        match = re.search(pattern, content)
-
-        if match:
-            return {
-                "task": match.group(1).strip(),
-                "owner": match.group(2).strip(),
-                "due_date": match.group(3).strip(),
-            }
-        return None
-
     def _parse_date(self, date_str: str) -> Optional[date]:
         """解析日期字符串"""
         if not date_str or date_str == "-":
@@ -1088,29 +1169,3 @@ class ActionsManager:
             return datetime.strptime(date_str, "%Y-%m-%d").date()
         except ValueError:
             return None
-
-    def generate_all_deltas(self, project_dir: Optional[Path] = None) -> list[Path]:
-        """
-        为项目中所有会议生成 delta 文件
-
-        Returns:
-            生成的 delta 文件列表
-        """
-        base_dir = project_dir or self.config.meetings_dir
-
-        meeting_dirs = [
-            item for item in sorted(base_dir.iterdir())
-            if item.is_dir() and not item.name.startswith(".")
-        ]
-
-        delta_files = []
-        for meeting_dir in meeting_dirs:
-            minutes_file = meeting_dir / MINUTES_FILE
-            if minutes_file.exists():
-                try:
-                    delta_file = self.generate_delta_file(meeting_dir, project_dir)
-                    delta_files.append(delta_file)
-                except Exception as e:
-                    logger.warning("生成 delta 失败 %s: %s", meeting_dir.name, e)
-
-        return delta_files
