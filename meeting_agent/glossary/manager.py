@@ -166,15 +166,30 @@ class GlossaryManager:
             return True
         return False
 
-    def reject_term(self, term: str, reason: Optional[str] = None) -> RejectedTerm:
+    def reject_term(
+        self,
+        canonical: str,
+        aliases: Optional[list[str]] = None,
+        type: TermType = TermType.OTHER,
+        context: Optional[str] = None,
+        source_meeting: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> RejectedTerm:
         """拒绝术语"""
         rejected = self.load_rejected()
-        result = rejected.add(term=term, reason=reason)
+        result = rejected.add(
+            canonical=canonical,
+            aliases=aliases,
+            type=type,
+            context=context,
+            source_meeting=source_meeting,
+            reason=reason,
+        )
         self.save_rejected()
 
         # 从待审核中移除
         pending = self.load_pending()
-        pending.remove(term)
+        pending.remove(canonical)
         self.save_pending()
 
         return result
@@ -186,8 +201,15 @@ class GlossaryManager:
         term_type: TermType = TermType.OTHER,
         context: Optional[str] = None,
         source_meeting: Optional[str] = None,
-    ) -> TermSuggestion:
+    ) -> Optional[TermSuggestion]:
         """添加术语建议"""
+        # 检查是否已在已接受术语表中
+        glossary = self.load_glossary()
+        if glossary.get_entry(canonical):
+            logger.debug("术语已在术语表中，跳过: %s", canonical)
+            return None
+
+        # 检查是否已被拒绝
         rejected = self.load_rejected()
         if rejected.is_rejected(canonical):
             logger.debug("术语已被拒绝，跳过: %s", canonical)
@@ -227,8 +249,23 @@ class GlossaryManager:
     def reject_suggestion(self, canonical: str, reason: Optional[str] = None) -> bool:
         """拒绝建议的术语"""
         pending = self.load_pending()
-        if pending.remove(canonical):
-            self.reject_term(canonical, reason)
+        # 先找到建议，获取完整信息
+        suggestion = None
+        for s in pending.suggestions:
+            if s.canonical.lower() == canonical.lower():
+                suggestion = s
+                break
+
+        if suggestion:
+            pending.remove(canonical)
+            self.reject_term(
+                canonical=suggestion.canonical,
+                aliases=suggestion.aliases,
+                type=suggestion.type,
+                context=suggestion.context,
+                source_meeting=suggestion.source_meeting,
+                reason=reason,
+            )
             self.save_pending()
             return True
         return False

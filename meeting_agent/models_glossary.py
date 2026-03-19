@@ -35,7 +35,11 @@ class GlossaryEntry(BaseModel):
 
 class RejectedTerm(BaseModel):
     """被拒绝的术语"""
-    term: str
+    canonical: str
+    aliases: list[str] = Field(default_factory=list)
+    type: TermType = TermType.OTHER
+    context: Optional[str] = None
+    source_meeting: Optional[str] = None
     reason: Optional[str] = None
     rejected_at: datetime
     rejected_by: Optional[str] = None
@@ -140,10 +144,22 @@ class RejectedGlossary(BaseModel):
     last_updated: Optional[datetime] = None
     rejected: list[RejectedTerm] = Field(default_factory=list)
 
-    def add(self, term: str, reason: Optional[str] = None) -> RejectedTerm:
+    def add(
+        self,
+        canonical: str,
+        aliases: Optional[list[str]] = None,
+        type: TermType = TermType.OTHER,
+        context: Optional[str] = None,
+        source_meeting: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> RejectedTerm:
         """添加拒绝的术语"""
         rejected_term = RejectedTerm(
-            term=term,
+            canonical=canonical,
+            aliases=aliases or [],
+            type=type,
+            context=context,
+            source_meeting=source_meeting,
             reason=reason,
             rejected_at=datetime.now(),
         )
@@ -151,9 +167,9 @@ class RejectedGlossary(BaseModel):
         self.last_updated = datetime.now()
         return rejected_term
 
-    def is_rejected(self, term: str) -> bool:
+    def is_rejected(self, canonical: str) -> bool:
         """检查术语是否被拒绝"""
-        return term.lower() in {r.term.lower() for r in self.rejected}
+        return canonical.lower() in {r.canonical.lower() for r in self.rejected}
 
 
 class TermSuggestion(BaseModel):
