@@ -10,7 +10,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
-from meeting_agent.config import Config, ACTIONS_FILE
+from meeting_agent.config import Config, ACTIONS_FILE, MINUTES_FILE
 from meeting_agent.models import ActionItem, ActionType
 
 logger = logging.getLogger("meeting_agent.memory")
@@ -261,3 +261,271 @@ class ActionsManager:
             lines.append(f"| {a.id} | {a.task} | {a.owner} | {due_str} | {status_str} |")
 
         return "\n".join(lines)
+
+    def _find_similar_action(
+        self, task: str, actions: list[ActionItem], threshold: float = 0.5
+    ) -> Optional[ActionItem]:
+        """
+        查找相似的任务
+
+        使用多种匹配策略：
+        1. 完全匹配
+        2. 包含关系匹配
+        3. 关键词重叠度匹配
+
+        Args:
+            task: 要查找的任务
+            actions: 现有待办列表
+            threshold: 相似度阈值 (0-1)
+
+        Returns:
+            找到的相似任务，或 None
+        """
+        import re
+
+        task_lower = task.strip().lower()
+
+        # 提取关键词（中文按字符，英文按单词）
+        def extract_keywords(text: str) -> set[str]:
+            # 移除标点符号，替换为空格
+            text = re.sub(r'[，。！？、；：""''（）【】 ]+', ' ', text)
+            words = []
+            for part in text.split():
+                if part:
+                    # 如果包含中文，按字符拆分
+                    if any('\u4e00' <= c <= '\u9fff' for c in part):
+                        words.extend(c for c in part if '\u4e00' <= c <= '\u9fff')
+                    else:
+                        words.append(part.lower())
+            return set(words)
+
+        task_keywords = extract_keywords(task_lower)
+
+        best_match = None
+        best_score = threshold
+
+        for action in actions:
+            action_lower = action.task.strip().lower()
+
+            # 1. 完全匹配
+            if task_lower == action_lower:
+                return action
+
+            # 2. 包含关系匹配（较短的是较长的子串）
+            shorter = min(task_lower, action_lower, key=len)
+            longer = max(task_lower, action_lower, key=len)
+            if len(shorter) >= 10 and shorter in longer:
+                return action
+
+            # 3. 关键词重叠度匹配
+            action_keywords = extract_keywords(action_lower)
+            common = task_keywords & action_keywords
+            if not common:
+                continue
+
+            # 计算重叠度（相对于较短任务的关键词数量）
+            min_len = min(len(task_keywords), len(action_keywords))
+            if min_len == 0:
+                continue
+
+            score = len(common) / min_len
+
+            # 如果重叠度很高，认为是同一个任务
+            if score >= 0.7:
+                return action
+
+            if score > best_score:
+                best_score = score
+                best_match = action
+
+        return best_match
+
+    def sync_from_minutes(self, project_dir: Optional[Path] = None) -> dict:
+        """
+        从所有会议纪要中同步待办事项
+
+        扫描项目目录下的所有会议纪要，解析待办事项并更新到 actions.md
+
+        Returns:
+            统计信息 {"added": int, "updated": int, "completed": int, "meetings": int}
+        """
+        base_dir = project_dir or self.config.meetings_dir
+
+        if not base_dir.exists():
+            logger.warning("项目目录不存在: %s", base_dir)
+            return {"added": 0, "updated": 0, "completed": 0, "meetings": 0}
+
+        # 加载现有待办
+        actions = self.load(project_dir)
+
+        stats = {"added": 0, "updated": 0, "completed": 0, "meetings": 0}
+
+        # 扫描所有会议目录
+        meeting_dirs = [
+            item for item in sorted(base_dir.iterdir())
+            if item.is_dir() and not item.name.startswith(".")
+        ]
+
+        for meeting_dir in meeting_dirs:
+            minutes_file = meeting_dir / MINUTES_FILE
+            if not minutes_file.exists():
+                continue
+
+            try:
+                content = minutes_file.read_text(encoding="utf-8")
+                result = self._extract_actions_from_minutes(content, meeting_dir.name)
+
+                # 处理新增待办
+                for action_data in result.get("new_actions", []):
+                    task = action_data.get("task", "").strip()
+                    if not task:
+                        continue
+
+                    # 查找相似任务
+                    similar = self._find_similar_action(task, actions)
+
+                    if similar:
+                        # 已存在相似任务，更新信息
+                        if action_data.get("due_date") and not similar.due_date:
+                            similar.due_date = action_data["due_date"]
+                        if meeting_dir.name not in similar.mentions:
+                            similar.mentions.append(meeting_dir.name)
+                        stats["updated"] += 1
+                    else:
+                        # 新增 - 直接创建 ActionItem，不调用 add 方法
+                        existing_ids = {a.id for a in actions}
+                        next_num = 1
+                        while f"A{next_num:03d}" in existing_ids:
+                            next_num += 1
+
+                        new_action = ActionItem(
+                            id=f"A{next_num:03d}",
+                            task=task,
+                            owner=action_data.get("owner", ""),
+                            due_date=action_data.get("due_date"),
+                            status=ActionType.PENDING,
+                            created_at=datetime.now(),
+                            created_in_meeting=meeting_dir.name,
+                            mentions=[meeting_dir.name],
+                        )
+                        actions.append(new_action)
+                        stats["added"] += 1
+
+                # 处理已完成的待办
+                for task_text in result.get("completed", []):
+                    # 尝试匹配现有待办
+                    similar = self._find_similar_action(task_text, actions)
+                    if similar and similar.status != ActionType.COMPLETED:
+                        similar.status = ActionType.COMPLETED
+                        stats["completed"] += 1
+
+                stats["meetings"] += 1
+
+            except Exception as e:
+                logger.warning("解析会议纪要失败 %s: %s", meeting_dir.name, e)
+                continue
+
+        # 保存更新后的待办
+        if stats["added"] > 0 or stats["updated"] > 0 or stats["completed"] > 0:
+            self.save(actions, project_dir)
+
+        logger.info(
+            "同步完成: 扫描 %d 个会议，新增 %d，更新 %d，完成 %d",
+            stats["meetings"], stats["added"], stats["updated"], stats["completed"]
+        )
+
+        return stats
+
+    def _extract_actions_from_minutes(self, content: str, meeting_name: str) -> dict:
+        """
+        从会议纪要内容中提取待办事项
+
+        支持的格式：
+        - 负责人：任务描述
+        - 负责人：任务描述（截止 YYYY-MM-DD）
+        - 负责人：任务描述（截止日期：YYYY-MM-DD）
+        """
+        result = {
+            "new_actions": [],
+            "completed": [],
+        }
+
+        # 查找待办事项部分 - 匹配 "## 六、待办事项" 或 "## 待办事项"
+        # 使用非贪婪匹配，直到下一个 ## 开头的行或文件结束
+        action_section_match = re.search(
+            r"^##\s*[^#\n]*待办[^#\n]*\n(.*?)(?=^##\s[^#]|\Z)",
+            content,
+            re.MULTILINE | re.DOTALL
+        )
+
+        if not action_section_match:
+            return result
+
+        action_section = action_section_match.group(1)
+
+        # 提取新增待办 - 匹配 "### 新增待办" 部分
+        new_action_match = re.search(
+            r"###\s*新增待办\s*\n(.*?)(?=###|$)",
+            action_section,
+            re.DOTALL
+        )
+
+        if new_action_match:
+            new_section = new_action_match.group(1)
+            # 解析每行待办
+            for line in new_section.split("\n"):
+                line = line.strip()
+                if not line.startswith("-"):
+                    continue
+
+                # 移除开头的 "- "
+                line = line[1:].strip()
+                if not line:
+                    continue
+
+                # 尝试解析格式: 负责人：任务描述（截止 日期）
+                # 或: 负责人：任务描述
+                match = re.match(
+                    r"^([^：:]+)[：:]\s*(.+?)(?:\s*[（(]\s*截止[^）)]*?(\d{4}-\d{2}-\d{2})\s*[）)])?$",
+                    line
+                )
+
+                if match:
+                    owner = match.group(1).strip()
+                    task = match.group(2).strip()
+                    due_date = None
+
+                    if match.group(3):
+                        try:
+                            due_date = datetime.strptime(match.group(3), "%Y-%m-%d").date()
+                        except ValueError:
+                            pass
+
+                    result["new_actions"].append({
+                        "owner": owner,
+                        "task": task,
+                        "due_date": due_date,
+                    })
+                elif line:
+                    # 无法解析格式，作为纯任务处理
+                    result["new_actions"].append({
+                        "owner": "",
+                        "task": line,
+                        "due_date": None,
+                    })
+
+        # 提取已完成待办
+        completed_match = re.search(
+            r"###\s*已完成[^#\n]*\n(.*?)(?=###|$)",
+            action_section,
+            re.DOTALL
+        )
+
+        if completed_match:
+            completed_section = completed_match.group(1)
+            for line in completed_section.split("\n"):
+                line = line.strip()
+                if line.startswith("-"):
+                    result["completed"].append(line[1:].strip())
+
+        return result
