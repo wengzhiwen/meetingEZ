@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -216,7 +216,7 @@ class ActionsManager:
         """生成 actions.md 内容"""
         today = date.today()
 
-        # 分类
+        # 统计
         overdue = [a for a in actions if a.due_date and a.due_date < today and a.status != ActionType.COMPLETED]
         in_progress = [a for a in actions if a.status == ActionType.IN_PROGRESS]
         pending = [a for a in actions if a.status == ActionType.PENDING and a not in overdue]
@@ -225,71 +225,39 @@ class ActionsManager:
         lines = [
             "# 待办事项追踪",
             "",
-            f"> 最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-            "",
-            "---",
-            "",
-            "## 状态统计",
-            "",
-            "| 状态 | 数量 |",
-            "|------|------|",
-            f"| 🔴 超期 | {len(overdue)} |",
-            f"| 🟡 进行中 | {len(in_progress)} |",
-            f"| ⏳ 待处理 | {len(pending)} |",
-            f"| ✅ 已完成 | {len(completed)} |",
-            "",
-            "---",
-        ]
-
-        # 超期待办
-        if overdue:
-            lines.extend(["", "## 🔴 超期待办", ""])
-            for a in sorted(overdue, key=lambda x: x.due_date or date.min):
-                overdue_days = (today - a.due_date).days if a.due_date else 0
-                lines.extend([
-                    f"### {a.id} - {a.task}",
-                    f"- **负责人**: {a.owner}",
-                    f"- **截止日期**: {a.due_date}",
-                    f"- **超期天数**: {overdue_days} 天",
-                    f"- **来源会议**: {a.created_in_meeting}",
-                    "",
-                ])
-
-        # 进行中
-        if in_progress:
-            lines.extend(["", "## 🟡 进行中", ""])
-            for a in in_progress:
-                due_info = f"（截止 {a.due_date}）" if a.due_date else ""
-                lines.append(f"- **{a.id}** {a.task} - {a.owner} {due_info}")
-            lines.append("")
-
-        # 待处理
-        if pending:
-            lines.extend(["", "## ⏳ 待处理", ""])
-            for a in sorted(pending, key=lambda x: x.due_date or date.max):
-                due_info = f"（截止 {a.due_date}）" if a.due_date else ""
-                lines.append(f"- **{a.id}** {a.task} - {a.owner} {due_info}")
-            lines.append("")
-
-        # 全部列表
-        lines.extend([
-            "---",
-            "",
-            "## 全部待办列表",
+            f"> 最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M')} | "
+            f"🔴 {len(overdue)} | 🟡 {len(in_progress)} | ⏳ {len(pending)} | ✅ {len(completed)}",
             "",
             "| ID | 任务 | 负责人 | 截止 | 状态 |",
             "|----|------|--------|------|------|",
-        ])
+        ]
 
-        for a in actions:
-            status_emoji = {
-                ActionType.COMPLETED: "✅",
-                ActionType.IN_PROGRESS: "🟡",
-                ActionType.OVERDUE: "🔴",
-                ActionType.PENDING: "⏳",
-            }.get(a.status, "⏳")
+        # 按状态排序：超期 > 进行中 > 待处理 > 已完成
+        def sort_key(a: ActionItem) -> tuple:
+            status_order = {
+                ActionType.OVERDUE: 0,
+                ActionType.IN_PROGRESS: 1,
+                ActionType.PENDING: 2,
+                ActionType.COMPLETED: 3,
+            }
+            # 超期待办按截止日期升序，其他按截止日期升序
+            is_overdue = a.due_date and a.due_date < today and a.status != ActionType.COMPLETED
+            if is_overdue:
+                return (0, a.due_date or date.min)
+            return (status_order.get(a.status, 2), a.due_date or date.max)
+
+        for a in sorted(actions, key=sort_key):
+            # 动态计算状态
+            if a.status == ActionType.COMPLETED:
+                status_str = "✅"
+            elif a.status == ActionType.IN_PROGRESS:
+                status_str = "🟡"
+            elif a.due_date and a.due_date < today:
+                status_str = "🔴"
+            else:
+                status_str = "⏳"
 
             due_str = str(a.due_date) if a.due_date else "-"
-            lines.append(f"| {a.id} | {a.task} | {a.owner} | {due_str} | {status_emoji} |")
+            lines.append(f"| {a.id} | {a.task} | {a.owner} | {due_str} | {status_str} |")
 
         return "\n".join(lines)
