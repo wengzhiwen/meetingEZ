@@ -19,6 +19,11 @@ const STORAGE_KEY = 'meetingEZ_transcripts';
 const STORAGE_VERSION = 2;
 const HIDE_BEFORE_KEY = 'meetingEZ_hideBefore';
 
+// 转写模式：'segmented'（分段上传）或 'realtime'（实时流式）
+let transcriptionMode = 'segmented';
+let realtimeClient = null;  // RealtimeTranscription 实例
+let realtimeCurrentTranscript = '';  // Realtime 模式当前累积的转录文本
+
 // 后置处理模型（结构化纠错与翻译）
 const POST_PROCESS_MODEL = 'gpt-4.1-mini-2025-04-14';
 
@@ -76,7 +81,7 @@ function loadSettings() {
     if (savedApiKey) {
         apiKeyInput.value = savedApiKey;
     }
-    
+
     // 加载音频源设置
     const savedAudioSource = localStorage.getItem('meetingEZ_audioSource') || 'microphone';
     selectedAudioSource = savedAudioSource;
@@ -88,6 +93,14 @@ function loadSettings() {
         audioSourceMic.checked = true;
     }
     updateAudioInputVisibility();
+
+    // 加载转写模式设置
+    const savedTranscriptionMode = localStorage.getItem('meetingEZ_transcriptionMode') || 'segmented';
+    transcriptionMode = savedTranscriptionMode;
+    const transcriptionModeSelect = document.getElementById('transcriptionMode');
+    if (transcriptionModeSelect) {
+        transcriptionModeSelect.value = transcriptionMode;
+    }
     
     // 加载语言设置
     const primaryLang = localStorage.getItem('meetingEZ_primaryLanguage');
@@ -188,6 +201,16 @@ function setupEventListeners() {
         localStorage.setItem('meetingEZ_fontSize', e.target.value);
         updateFontSize();
     });
+
+    // 转写模式选择监听器
+    const transcriptionModeSelect = document.getElementById('transcriptionMode');
+    if (transcriptionModeSelect) {
+        transcriptionModeSelect.addEventListener('change', (e) => {
+            transcriptionMode = e.target.value;
+            localStorage.setItem('meetingEZ_transcriptionMode', transcriptionMode);
+            console.log('🔄 转写模式切换为:', transcriptionMode);
+        });
+    }
 
     document.querySelector('.close').addEventListener('click', () => {
         document.getElementById('errorModal').style.display = 'none';
@@ -383,12 +406,16 @@ async function startRecording() {
     try {
         // 重置关闭标志
         isShuttingDown = false;
-        
-        // 创建音频上下文 - 使用48kHz采样率
-        audioContext = new AudioContext({ sampleRate: 48000 });
+
+        // 根据转写模式选择采样率
+        const sampleRate = transcriptionMode === 'realtime' ? 24000 : 48000;
+        console.log(`🎙️ 使用采样率: ${sampleRate}Hz (模式: ${transcriptionMode})`);
+
+        // 创建音频上下文
+        audioContext = new AudioContext({ sampleRate });
         const source = audioContext.createMediaStreamSource(mediaStream);
 
-        // 初始化分段参数
+        // 初始化分段参数（分段上传模式需要）
         segmentSamples = Math.round(SEGMENT_DURATION_SEC * audioContext.sampleRate);
         overlapSamples = Math.round(OVERLAP_DURATION_SEC * audioContext.sampleRate);
         stepSamples = segmentSamples - overlapSamples;
@@ -396,13 +423,18 @@ async function startRecording() {
         segmentStartIndex = 0;
         channelContextTail = { primary: '', secondary: '' };
 
-        // 初始化 WAV 编码 Worker
-        if (!wavEncoderWorker) {
-            wavEncoderWorker = new Worker('/static/js/wav-encoder-worker.js');
-            wavEncoderWorker.onmessage = handleWorkerMessage;
-            wavEncoderWorker.onerror = (error) => {
-                console.error('❌ Worker 错误:', error);
-            };
+        // Realtime 模式：初始化 WebSocket 连接
+        if (transcriptionMode === 'realtime') {
+            await initRealtimeConnection();
+        } else {
+            // 分段上传模式：初始化 WAV 编码 Worker
+            if (!wavEncoderWorker) {
+                wavEncoderWorker = new Worker('/static/js/wav-encoder-worker.js');
+                wavEncoderWorker.onmessage = handleWorkerMessage;
+                wavEncoderWorker.onerror = (error) => {
+                    console.error('❌ Worker 错误:', error);
+                };
+            }
         }
 
         // 加载并创建 AudioWorklet
@@ -429,37 +461,46 @@ async function startRecording() {
                     return;
                 }
 
-                // VAD：检测是否有语音活动
-                const hasVoice = rms > vadThreshold;
-                if (hasVoice) {
-                    silenceFrames = 0;
-                    isSpeaking = true;
-                } else {
-                    silenceFrames++;
-                }
-
-                // 只在检测到语音或最近有语音活动时才追加音频
-                if (isSpeaking || silenceFrames < SILENCE_THRESHOLD) {
-                    // 追加到累积缓冲
-                    aggregatedBuffer = concatFloat32(aggregatedBuffer, data);
-
-                    // 生成尽可能多的窗口（允许并发上传）
-                    while (aggregatedBuffer.length >= segmentStartIndex + segmentSamples) {
-                        const windowData = aggregatedBuffer.slice(segmentStartIndex, segmentStartIndex + segmentSamples);
-                        queueSegmentUpload(windowData);
-                        segmentStartIndex += stepSamples;
-
-                        // 适度清理缓冲，避免无限增长
-                        if (segmentStartIndex > segmentSamples * 2) {
-                            const pruneAt = segmentStartIndex - overlapSamples;
-                            aggregatedBuffer = aggregatedBuffer.slice(pruneAt);
-                            segmentStartIndex -= pruneAt;
-                        }
+                // 根据转写模式处理音频
+                if (transcriptionMode === 'realtime') {
+                    // Realtime 模式：直接发送到 WebSocket
+                    if (realtimeClient && realtimeClient.isConnected) {
+                        realtimeClient.sendAudio(data);
                     }
-                } else if (silenceFrames === SILENCE_THRESHOLD) {
-                    // 刚检测到持续静音，标记为非说话状态
-                    isSpeaking = false;
-                    console.log('🔇 检测到持续静音，停止上传音频段');
+                } else {
+                    // 分段上传模式：VAD + 分段上传
+                    // VAD：检测是否有语音活动
+                    const hasVoice = rms > vadThreshold;
+                    if (hasVoice) {
+                        silenceFrames = 0;
+                        isSpeaking = true;
+                    } else {
+                        silenceFrames++;
+                    }
+
+                    // 只在检测到语音或最近有语音活动时才追加音频
+                    if (isSpeaking || silenceFrames < SILENCE_THRESHOLD) {
+                        // 追加到累积缓冲
+                        aggregatedBuffer = concatFloat32(aggregatedBuffer, data);
+
+                        // 生成尽可能多的窗口（允许并发上传）
+                        while (aggregatedBuffer.length >= segmentStartIndex + segmentSamples) {
+                            const windowData = aggregatedBuffer.slice(segmentStartIndex, segmentStartIndex + segmentSamples);
+                            queueSegmentUpload(windowData);
+                            segmentStartIndex += stepSamples;
+
+                            // 适度清理缓冲，避免无限增长
+                            if (segmentStartIndex > segmentSamples * 2) {
+                                const pruneAt = segmentStartIndex - overlapSamples;
+                                aggregatedBuffer = aggregatedBuffer.slice(pruneAt);
+                                segmentStartIndex -= pruneAt;
+                            }
+                        }
+                    } else if (silenceFrames === SILENCE_THRESHOLD) {
+                        // 刚检测到持续静音，标记为非说话状态
+                        isSpeaking = false;
+                        console.log('🔇 检测到持续静音，停止上传音频段');
+                    }
                 }
             }
         };
@@ -470,6 +511,121 @@ async function startRecording() {
         console.error('❌ 开始录音失败:', error);
         throw error;
     }
+}
+
+// 初始化 Realtime WebSocket 连接
+async function initRealtimeConnection() {
+    const apiKey = localStorage.getItem('meetingEZ_apiKey') || apiKeyInput.value.trim();
+    if (!apiKey) {
+        throw new Error('缺少 API Key');
+    }
+
+    const primaryLang = document.getElementById('primaryLanguage').value || 'zh';
+
+    console.log('🔌 初始化 Realtime 连接...');
+
+    realtimeClient = new RealtimeTranscription(apiKey, {
+        model: 'gpt-realtime-1.5',
+        language: primaryLang,
+        sampleRate: 24000,
+
+        onConnected: () => {
+            console.log('✅ Realtime 连接成功');
+            showStatus('Realtime 连接成功', 'success');
+        },
+
+        onDisconnected: (event) => {
+            console.log('🔌 Realtime 断开连接', event);
+            if (isRecording) {
+                showStatus('Realtime 连接断开', 'error');
+            }
+        },
+
+        onSpeechStarted: () => {
+            console.log('🎤 检测到语音开始');
+            realtimeCurrentTranscript = '';
+        },
+
+        onSpeechStopped: () => {
+            console.log('🔇 检测到语音停止');
+        },
+
+        onTranscriptDelta: (delta, itemId) => {
+            if (!delta) return;
+            realtimeCurrentTranscript += delta;
+            console.log('📝 Realtime 增量:', delta);
+
+            // 实时更新流式显示
+            const channel = 'primary';
+            currentStreamingTextMap[channel] = realtimeCurrentTranscript;
+            currentTranscriptIdMap[channel] = itemId;
+            updateStreamingDisplay(channel);
+        },
+
+        onTranscriptComplete: async (transcript, itemId) => {
+            console.log('✅ Realtime 转录完成:', transcript);
+
+            if (!transcript || !transcript.trim()) {
+                return;
+            }
+
+            // 检查是否为幻觉内容
+            if (isHallucinationText(transcript)) {
+                console.log('⚠️ 检测到幻觉内容，跳过:', transcript);
+                realtimeCurrentTranscript = '';
+                return;
+            }
+
+            const channel = 'primary';
+            const normalized = normalizeText(transcript);
+
+            // 保存转录
+            const newTranscript = {
+                id: itemId || Date.now() + Math.random(),
+                timestamp: new Date().toISOString(),
+                text: normalized,
+                language: detectLanguage(normalized),
+                channel
+            };
+            transcripts.push(newTranscript);
+            lastAcceptedTextMap[channel] = normalized;
+            lastAcceptedAtMap[channel] = Date.now();
+            saveTranscripts();
+
+            // 清空流式显示
+            currentStreamingTextMap[channel] = '';
+            currentTranscriptIdMap[channel] = null;
+            realtimeCurrentTranscript = '';
+
+            updateDisplay(channel);
+
+            // 自动滚动
+            if (document.getElementById('autoScroll').classList.contains('btn-primary')) {
+                scrollToBottom();
+            }
+
+            // 后置处理（翻译）
+            try {
+                const primaryLang = document.getElementById('primaryLanguage')?.value || 'zh';
+                const secondaryLang = (document.getElementById('secondaryLanguage')?.value || '').trim();
+                const structured = await postProcessText(transcript, {
+                    primaryLanguage: primaryLang,
+                    secondaryLanguage: secondaryLang || 'ja',
+                    originalLanguageHint: primaryLang
+                });
+                applyPostProcessToTranscript(newTranscript.id, structured);
+            } catch (ppErr) {
+                console.warn('⚠️ 后置处理失败，保留原文:', ppErr);
+            }
+        },
+
+        onError: (error) => {
+            console.error('❌ Realtime 错误:', error);
+            showStatus('Realtime 错误: ' + (error.message || JSON.stringify(error)), 'error');
+        }
+    });
+
+    await realtimeClient.connect();
 }
 
 // 拼接 Float32Array
@@ -651,18 +807,28 @@ function stopRecording() {
     // 保存 sampleRate，因为 audioContext 即将关闭
     const currentSampleRate = audioContext ? audioContext.sampleRate : 48000;
 
-    // 处理剩余的不完整音频段
-    if (aggregatedBuffer && aggregatedBuffer.length > 0) {
-        const remainingSamples = aggregatedBuffer.length - segmentStartIndex;
-        const minSamples = currentSampleRate * 1; // 至少 1 秒才值得处理
-        
-        if (remainingSamples >= minSamples) {
-            console.log(`📦 处理剩余音频段: ${remainingSamples} 样本 (${(remainingSamples / currentSampleRate).toFixed(2)} 秒)`);
-            const finalWindow = aggregatedBuffer.slice(segmentStartIndex);
-            // 保存当前音频上下文的采样率
-            queueSegmentUploadWithSampleRate(finalWindow, currentSampleRate);
-        } else {
-            console.log(`⏭️ 跳过过短的剩余音频段: ${remainingSamples} 样本`);
+    // 根据模式处理
+    if (transcriptionMode === 'realtime') {
+        // Realtime 模式：断开 WebSocket
+        if (realtimeClient) {
+            realtimeClient.disconnect();
+            realtimeClient = null;
+        }
+        realtimeCurrentTranscript = '';
+    } else {
+        // 分段上传模式：处理剩余的不完整音频段
+        if (aggregatedBuffer && aggregatedBuffer.length > 0) {
+            const remainingSamples = aggregatedBuffer.length - segmentStartIndex;
+            const minSamples = currentSampleRate * 1; // 至少 1 秒才值得处理
+
+            if (remainingSamples >= minSamples) {
+                console.log(`📦 处理剩余音频段: ${remainingSamples} 样本 (${(remainingSamples / currentSampleRate).toFixed(2)} 秒)`);
+                const finalWindow = aggregatedBuffer.slice(segmentStartIndex);
+                // 保存当前音频上下文的采样率
+                queueSegmentUploadWithSampleRate(finalWindow, currentSampleRate);
+            } else {
+                console.log(`⏭️ 跳过过短的剩余音频段: ${remainingSamples} 样本`);
+            }
         }
     }
 

@@ -88,6 +88,15 @@
                 </div>
             </div>
 
+            <!-- 转写模式选择 -->
+            <div class="setting-item">
+                <label for="transcriptionMode">转写模式</label>
+                <select id="transcriptionMode">
+                    <option value="segmented">分段上传（稳定）</option>
+                    <option value="realtime">实时流式（低延迟）</option>
+                </select>
+            </div>
+
             <!-- 标签页音频提示信息 -->
             <div id="tabAudioHint" class="status-message info" style="display: none; margin-bottom: 15px;">
                 <strong>📋 标签页音频模式</strong><br>
@@ -162,6 +171,7 @@
     </div>
 
     <!-- 脚本 -->
+    <script src="{{ url_for('static', filename='js/realtime-transcription.js') }}"></script>
     <script type="module" src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>
