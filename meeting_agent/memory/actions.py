@@ -533,3 +533,584 @@ class ActionsManager:
                     result["completed"].append(line[1:].strip())
 
         return result
+
+    def reconcile(self, project_dir: Optional[Path] = None, auto_fix: bool = True) -> dict:
+        """
+        双向校验：从纪要中重新评估所有 actions 的重复性和状态
+
+        流程：
+        1. 收集所有纪要中的待办信息（新增 + 已完成）
+        2. 对每个 action，找到纪要中最匹配的内容
+        3. 检测重复：多个 actions 匹配到纪要中的同一任务
+        4. 更新状态：如果 action 在纪要中被标记为已完成
+
+        Args:
+            project_dir: 项目目录
+            auto_fix: 是否自动修复（合并重复、更新状态）
+
+        Returns:
+            {
+                "duplicates": [[action_id, ...], ...],  # 重复组
+                "should_complete": [action_id, ...],    # 应该完成的
+                "fixed": {"merged": int, "completed": int}
+            }
+        """
+        base_dir = project_dir or self.config.meetings_dir
+
+        if not base_dir.exists():
+            return {"duplicates": [], "should_complete": [], "fixed": {"merged": 0, "completed": 0}}
+
+        # 1. 收集所有纪要中的待办信息
+        all_new_actions = []  # [(meeting, action_data), ...]
+        all_completed = []    # [(meeting, completed_text), ...]
+
+        meeting_dirs = [
+            item for item in sorted(base_dir.iterdir())
+            if item.is_dir() and not item.name.startswith(".")
+        ]
+
+        for meeting_dir in meeting_dirs:
+            minutes_file = meeting_dir / MINUTES_FILE
+            if not minutes_file.exists():
+                continue
+
+            try:
+                content = minutes_file.read_text(encoding="utf-8")
+                result = self._extract_actions_from_minutes(content, meeting_dir.name)
+
+                for action_data in result.get("new_actions", []):
+                    all_new_actions.append((meeting_dir.name, action_data))
+                for completed_text in result.get("completed", []):
+                    all_completed.append((meeting_dir.name, completed_text))
+            except Exception as e:
+                logger.warning("解析会议纪要失败 %s: %s", meeting_dir.name, e)
+
+        # 2. 加载现有 actions
+        actions = self.load(project_dir)
+
+        # 3. 建立 action → 纪要任务的映射
+        action_to_minutes_task: dict[str, list[tuple[str, dict]]] = {}
+        # 纪要任务 → 匹配的 actions
+        minutes_task_to_actions: dict[int, list[ActionItem]] = {}
+
+        for action in actions:
+            action_to_minutes_task[action.id] = []
+
+        for idx, (meeting, action_data) in enumerate(all_new_actions):
+            task = action_data.get("task", "")
+            matched_actions = []
+
+            for action in actions:
+                if self._is_same_task(task, action.task):
+                    action_to_minutes_task[action.id].append((meeting, action_data))
+                    matched_actions.append(action)
+
+            if matched_actions:
+                minutes_task_to_actions[idx] = matched_actions
+
+        # 4. 检测重复：多个 actions 匹配到纪要中的同一任务
+        duplicates = []
+        seen_groups = set()
+
+        for idx, matched in minutes_task_to_actions.items():
+            if len(matched) > 1:
+                # 创建重复组
+                group_ids = tuple(sorted(a.id for a in matched))
+                if group_ids not in seen_groups:
+                    seen_groups.add(group_ids)
+                    duplicates.append([a.id for a in matched])
+
+        # 5. 检测应该完成但未完成的 actions
+        should_complete = []
+
+        for action in actions:
+            if action.status == ActionType.COMPLETED:
+                continue
+
+            # 在已完成列表中查找
+            for meeting, completed_text in all_completed:
+                if self._is_same_task(action.task, completed_text):
+                    should_complete.append(action.id)
+                    break
+
+        # 6. 自动修复
+        fixed = {"merged": 0, "completed": 0}
+
+        if auto_fix and (duplicates or should_complete):
+            # 合并重复项：保留最早创建的，其他的标记为完成
+            for group in duplicates:
+                # 按创建时间排序，保留最早的
+                group_actions = [a for a in actions if a.id in group]
+                group_actions.sort(key=lambda x: x.created_at or datetime.max)
+
+                keep = group_actions[0]
+                for dup in group_actions[1:]:
+                    # 合并 mentions
+                    for m in dup.mentions:
+                        if m not in keep.mentions:
+                            keep.mentions.append(m)
+                    # 标记为完成（实际上是删除）
+                    dup.status = ActionType.COMPLETED
+                    dup.task = f"[已合并到 {keep.id}] {dup.task}"
+                    fixed["merged"] += 1
+
+            # 标记应该完成的
+            for action_id in should_complete:
+                for action in actions:
+                    if action.id == action_id and action.status != ActionType.COMPLETED:
+                        action.status = ActionType.COMPLETED
+                        fixed["completed"] += 1
+                        break
+
+            self.save(actions, project_dir)
+
+        return {
+            "duplicates": duplicates,
+            "should_complete": should_complete,
+            "fixed": fixed,
+        }
+
+    def _is_same_task(self, task1: str, task2: str) -> bool:
+        """
+        判断两个任务描述是否是同一个任务
+
+        使用多种策略：
+        1. 完全相同
+        2. 包含关系（较短是较长的子串）
+        3. 关键词高度重叠
+        """
+        t1 = task1.strip().lower()
+        t2 = task2.strip().lower()
+
+        if t1 == t2:
+            return True
+
+        # 包含关系
+        shorter, longer = (t1, t2) if len(t1) < len(t2) else (t2, t1)
+        if len(shorter) >= 8 and shorter in longer:
+            return True
+
+        # 关键词重叠
+        keywords1 = self._extract_keywords(t1)
+        keywords2 = self._extract_keywords(t2)
+
+        if not keywords1 or not keywords2:
+            return False
+
+        common = keywords1 & keywords2
+        min_len = min(len(keywords1), len(keywords2))
+
+        # 5+ 共同关键词且重叠度 >= 50%
+        if len(common) >= 5 and len(common) / min_len >= 0.5:
+            return True
+
+        # 重叠度 >= 70%
+        if len(common) / min_len >= 0.7:
+            return True
+
+        return False
+
+    def _extract_keywords(self, text: str) -> set[str]:
+        """提取关键词（中文按字符，英文按单词）"""
+        text = re.sub(r'[，。！？、；：""''（）【】 ]+', ' ', text)
+        words = []
+        for part in text.split():
+            if part:
+                if any('\u4e00' <= c <= '\u9fff' for c in part):
+                    words.extend(c for c in part if '\u4e00' <= c <= '\u9fff')
+                else:
+                    words.append(part.lower())
+        return set(words)
+
+    # ==================== Delta 文件相关方法 ====================
+
+    def generate_delta_file(
+        self,
+        meeting_dir: Path,
+        project_dir: Optional[Path] = None,
+    ) -> Path:
+        """
+        为单个会议生成 action 变化文件
+
+        Args:
+            meeting_dir: 会议目录
+            project_dir: 项目目录
+
+        Returns:
+            生成的 delta 文件路径
+        """
+        minutes_file = meeting_dir / MINUTES_FILE
+        if not minutes_file.exists():
+            raise FileNotFoundError(f"会议纪要不存在: {minutes_file}")
+
+        content = minutes_file.read_text(encoding="utf-8")
+        meeting_name = meeting_dir.name
+
+        # 提取待办变更
+        extracted = self._extract_actions_from_minutes(content, meeting_name)
+
+        # 加载现有 actions，用于匹配
+        actions = self.load(project_dir)
+
+        # 分析变更
+        delta = self._analyze_delta(extracted, actions, meeting_name)
+
+        # 生成 delta 文件
+        delta_file = meeting_dir / "_actions_delta.md"
+        delta_content = self._generate_delta_md(delta, meeting_name)
+        delta_file.write_text(delta_content, encoding="utf-8")
+
+        logger.info("生成 delta 文件: %s", delta_file)
+        return delta_file
+
+    def _analyze_delta(
+        self,
+        extracted: dict,
+        existing_actions: list[ActionItem],
+        meeting_name: str,
+    ) -> dict:
+        """
+        分析提取的待办，与现有待办对比，生成变更记录
+
+        Returns:
+            {
+                "new": [{"temp_id": "N1", "task": ..., "owner": ..., "due_date": ..., "match_hint": ...}],
+                "completed": [{"action_id": "A001", "task": ..., "completed_desc": ...}],
+                "mentioned": [{"action_id": "A002", "task": ...}],
+                "duplicates": [{"keep_id": "A004", "dup_ids": ["A013"], "reason": ...}],
+            }
+        """
+        delta = {
+            "new": [],
+            "completed": [],
+            "mentioned": [],
+            "duplicates": [],
+        }
+
+        # 分析新增待办
+        new_idx = 1
+        for action_data in extracted.get("new_actions", []):
+            task = action_data.get("task", "").strip()
+            if not task:
+                continue
+
+            # 检查是否与现有待办相似
+            similar = self._find_similar_action(task, existing_actions)
+
+            if similar:
+                # 记录为提及
+                delta["mentioned"].append({
+                    "action_id": similar.id,
+                    "task": similar.task,
+                    "new_desc": task,
+                    "owner": action_data.get("owner", ""),
+                })
+            else:
+                # 新增
+                match_hint = self._find_potential_match(task, existing_actions)
+                delta["new"].append({
+                    "temp_id": f"N{new_idx}",
+                    "task": task,
+                    "owner": action_data.get("owner", ""),
+                    "due_date": str(action_data["due_date"]) if action_data.get("due_date") else "-",
+                    "match_hint": match_hint,  # 可能的匹配提示
+                })
+                new_idx += 1
+
+        # 分析已完成
+        for completed_text in extracted.get("completed", []):
+            similar = self._find_similar_action(completed_text, existing_actions)
+            if similar:
+                delta["completed"].append({
+                    "action_id": similar.id,
+                    "task": similar.task,
+                    "completed_desc": completed_text,
+                })
+            else:
+                # 没有匹配到，可能是遗漏的完成信息
+                delta["completed"].append({
+                    "action_id": "?",  # 需要人工确认
+                    "task": "",
+                    "completed_desc": completed_text,
+                })
+
+        # 检测新增中的重复
+        seen_tasks = {}
+        for item in delta["new"]:
+            task = item["task"]
+            for existing in existing_actions:
+                if self._is_same_task(task, existing.task):
+                    if existing.id not in seen_tasks:
+                        seen_tasks[existing.id] = []
+                    seen_tasks[existing.id].append(item["temp_id"])
+
+        for existing_id, dup_temp_ids in seen_tasks.items():
+            if len(dup_temp_ids) > 0:
+                delta["duplicates"].append({
+                    "keep_id": existing_id,
+                    "dup_temp_ids": dup_temp_ids,
+                    "reason": "任务描述相似",
+                })
+
+        return delta
+
+    def _find_potential_match(self, task: str, actions: list[ActionItem]) -> Optional[str]:
+        """找到可能匹配的现有待办（用于人工确认）"""
+        task_lower = task.strip().lower()
+
+        for action in actions:
+            action_lower = action.task.strip().lower()
+
+            # 部分匹配
+            if len(task_lower) >= 5 and task_lower in action_lower:
+                return f"可能是 {action.id}"
+            if len(action_lower) >= 5 and action_lower in task_lower:
+                return f"可能是 {action.id}"
+
+            # 关键词重叠 > 30%
+            keywords1 = self._extract_keywords(task)
+            keywords2 = self._extract_keywords(action.task)
+            if keywords1 and keywords2:
+                common = keywords1 & keywords2
+                min_len = min(len(keywords1), len(keywords2))
+                if len(common) / min_len > 0.3:
+                    return f"可能是 {action.id}"
+
+        return None
+
+    def _generate_delta_md(self, delta: dict, meeting_name: str) -> str:
+        """生成 delta 文件的 markdown 内容"""
+        lines = [
+            f"# 待办变更记录",
+            "",
+            f"> 会议：{meeting_name}",
+            f"> 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "",
+            "---",
+            "",
+        ]
+
+        # 新增待办
+        lines.append("## 新增待办")
+        lines.append("")
+        if delta["new"]:
+            lines.append("| 临时ID | 任务 | 负责人 | 截止 | 确认操作 |")
+            lines.append("|--------|------|--------|------|----------|")
+            for item in delta["new"]:
+                match_hint = item.get("match_hint") or ""
+                lines.append(f"| {item['temp_id']} | {item['task']} | {item['owner']} | {item['due_date']} | 新增 |")
+        else:
+            lines.append("*无新增*")
+        lines.append("")
+
+        # 已完成 - 关键：允许人工修改关联ID
+        lines.append("## 已完成（请确认或修改关联ID）")
+        lines.append("")
+        if delta["completed"]:
+            lines.append("| 关联ID | 完成说明 | 确认 |")
+            lines.append("|--------|----------|------|")
+            for item in delta["completed"]:
+                action_id = item.get("action_id", "?")
+                completed_desc = item["completed_desc"][:50]
+                lines.append(f"| {action_id} | {completed_desc} | ✓ |")
+        else:
+            lines.append("*无*")
+        lines.append("")
+
+        # 重复提及
+        if delta["mentioned"]:
+            lines.append("## 重复提及（本次会议再次提到的现有待办）")
+            lines.append("")
+            lines.append("| 现有ID | 本次提及内容 |")
+            lines.append("|--------|--------------|")
+            for item in delta["mentioned"]:
+                lines.append(f"| {item['action_id']} | {item['new_desc'][:40]}... |")
+            lines.append("")
+
+        # 使用说明
+        lines.append("---")
+        lines.append("")
+        lines.append("## 操作说明")
+        lines.append("")
+        lines.append("**新增待办**：")
+        lines.append("- `新增` = 创建新待办")
+        lines.append("- `合并到 AXXX` = 不新增，合并到现有待办")
+        lines.append("")
+        lines.append("**已完成**：")
+        lines.append("- 修改 `关联ID` 列为正确的 action ID（如 `?` -> `A001`）")
+        lines.append("- `✓` = 确认完成，`-` = 不处理")
+        lines.append("")
+
+        return "\n".join(lines)
+
+    def apply_delta(
+        self,
+        delta_file: Path,
+        project_dir: Optional[Path] = None,
+    ) -> dict:
+        """
+        应用 delta 文件到 actions.md
+
+        解析人工确认后的 delta 文件，更新 actions
+
+        Returns:
+            {"added": int, "completed": int, "merged": int}
+        """
+        content = delta_file.read_text(encoding="utf-8")
+        actions = self.load(project_dir)
+
+        stats = {"added": 0, "completed": 0, "merged": 0}
+
+        # 解析新增待办表格
+        # | 临时ID | 任务 | 负责人 | 截止 | 确认操作 |
+        new_pattern = r"\|\s*(N\d+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]*)\s*\|\s*([^|]+)\s*\|"
+        for match in re.finditer(new_pattern, content):
+            temp_id = match.group(1).strip()
+            task = match.group(2).strip()
+            owner = match.group(3).strip()
+            due_date_str = match.group(4).strip()
+            operation = match.group(5).strip()
+
+            if operation == "新增":
+                # 创建新待办
+                existing_ids = {a.id for a in actions}
+                next_num = 1
+                while f"A{next_num:03d}" in existing_ids:
+                    next_num += 1
+
+                new_action = ActionItem(
+                    id=f"A{next_num:03d}",
+                    task=task,
+                    owner=owner,
+                    due_date=self._parse_date(due_date_str),
+                    status=ActionType.PENDING,
+                    created_at=datetime.now(),
+                    created_in_meeting=delta_file.parent.name,
+                )
+                actions.append(new_action)
+                stats["added"] += 1
+
+            elif operation.startswith("合并到 "):
+                # 合并到现有待办
+                target_id = operation.replace("合并到 ", "").strip()
+                for action in actions:
+                    if action.id == target_id:
+                        if delta_file.parent.name not in action.mentions:
+                            action.mentions.append(delta_file.parent.name)
+                        stats["merged"] += 1
+                        break
+
+        # 解析已完成表格
+        # | 关联ID | 完成说明 | 确认 |
+        completed_pattern = r"\|\s*([A-Z]?\d{0,3}|\?)\s*\|\s*([^|]+)\s*\|\s*([✓✗\-]+)\s*\|"
+        for match in re.finditer(completed_pattern, content):
+            action_id = match.group(1).strip()
+            # completed_desc = match.group(2).strip()  # 暂不使用
+            confirmation = match.group(3).strip()
+
+            if confirmation == "✓" and action_id and action_id != "?":
+                for action in actions:
+                    if action.id == action_id:
+                        action.status = ActionType.COMPLETED
+                        stats["completed"] += 1
+                        break
+
+        self.save(actions, project_dir)
+        logger.info("应用 delta: 新增 %d，完成 %d，合并 %d",
+                    stats["added"], stats["completed"], stats["merged"])
+
+        return stats
+
+    def _parse_confirmations(self, content: str, section_name: str) -> dict[str, str]:
+        """解析人工确认部分"""
+        result = {}
+
+        # 查找确认区域 - 支持两种格式
+        # 格式1: ### 标题\n```\n...\n```
+        # 格式2: ### 标题\n| ID | 确认 |\n|---|---|\n| A001 | 确认 |
+
+        pattern = rf"###\s*{re.escape(section_name)}.*?(?=###|\Z)"
+        match = re.search(pattern, content, re.DOTALL)
+
+        if not match:
+            return result
+
+        section = match.group(0)
+
+        # 尝试解析代码块格式
+        code_pattern = r"```\s*\n(.*?)\n```"
+        code_match = re.search(code_pattern, section, re.DOTALL)
+
+        if code_match:
+            block = code_match.group(1)
+            for line in block.split("\n"):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                # 解析格式: key -> value
+                if " -> " in line:
+                    parts = line.split(" -> ", 1)
+                    if len(parts) == 2:
+                        key = parts[0].strip()
+                        value = parts[1].strip()
+                        result[key] = value
+
+        # 尝试解析表格格式
+        table_pattern = r"\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|"
+        for table_match in re.finditer(table_pattern, section):
+            key = table_match.group(1).strip()
+            value = table_match.group(2).strip()
+            if key and value and key not in ["ID", "关联ID", "临时ID", "---"]:
+                result[key] = value
+
+        return result
+
+    def _get_task_from_delta(self, content: str, temp_id: str) -> Optional[dict]:
+        """从 delta 文件中获取任务信息"""
+        # 查找表格中的任务
+        pattern = rf"\|\s*{re.escape(temp_id)}\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|"
+        match = re.search(pattern, content)
+
+        if match:
+            return {
+                "task": match.group(1).strip(),
+                "owner": match.group(2).strip(),
+                "due_date": match.group(3).strip(),
+            }
+        return None
+
+    def _parse_date(self, date_str: str) -> Optional[date]:
+        """解析日期字符串"""
+        if not date_str or date_str == "-":
+            return None
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    def generate_all_deltas(self, project_dir: Optional[Path] = None) -> list[Path]:
+        """
+        为项目中所有会议生成 delta 文件
+
+        Returns:
+            生成的 delta 文件列表
+        """
+        base_dir = project_dir or self.config.meetings_dir
+
+        meeting_dirs = [
+            item for item in sorted(base_dir.iterdir())
+            if item.is_dir() and not item.name.startswith(".")
+        ]
+
+        delta_files = []
+        for meeting_dir in meeting_dirs:
+            minutes_file = meeting_dir / MINUTES_FILE
+            if minutes_file.exists():
+                try:
+                    delta_file = self.generate_delta_file(meeting_dir, project_dir)
+                    delta_files.append(delta_file)
+                except Exception as e:
+                    logger.warning("生成 delta 失败 %s: %s", meeting_dir.name, e)
+
+        return delta_files
