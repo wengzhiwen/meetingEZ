@@ -263,7 +263,7 @@ class ActionsManager:
         return "\n".join(lines)
 
     def _find_similar_action(
-        self, task: str, actions: list[ActionItem], threshold: float = 0.5
+        self, task: str, actions: list[ActionItem], threshold: float = 0.4
     ) -> Optional[ActionItem]:
         """
         查找相似的任务
@@ -329,6 +329,10 @@ class ActionsManager:
                 continue
 
             score = len(common) / min_len
+
+            # 如果有 5 个以上共同关键词且重叠度 >= 50%，也认为是匹配
+            if len(common) >= 5 and score >= 0.5:
+                return action
 
             # 如果重叠度很高，认为是同一个任务
             if score >= 0.7:
