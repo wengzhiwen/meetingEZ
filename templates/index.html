@@ -81,6 +81,30 @@
             </div>
 
             <div class="setting-item stack">
+                <label>字幕增强</label>
+                <label class="toggle-row">
+                    <span>
+                        <span class="toggle-title">转写智能修正</span>
+                        <span class="toggle-help">结合上下文修正明显转写错误</span>
+                    </span>
+                    <input type="checkbox" id="enableCorrection">
+                </label>
+                <label class="toggle-row">
+                    <span>
+                        <span class="toggle-title">专有名词表</span>
+                        <span class="toggle-help">优先按会议术语修正和翻译</span>
+                    </span>
+                    <input type="checkbox" id="enableGlossary">
+                </label>
+            </div>
+
+            <div class="setting-item stack">
+                <label for="glossaryInput">会议术语表</label>
+                <textarea id="glossaryInput" class="glossary-input" rows="6" placeholder="每行一个术语，可用 | 添加别名&#10;MeetingEZ | meeting ez | 米听易&#10;Realtime API | realtime | 实时接口"></textarea>
+                <div class="setting-help">每行一个术语；第一列是标准写法，后面可用 <code>|</code> 添加常见误识别别名。</div>
+            </div>
+
+            <div class="setting-item stack">
                 <label>音频输入源</label>
                 <div class="radio-group">
                     <label class="radio-label">

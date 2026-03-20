@@ -28,6 +28,85 @@ let volumeAnalyser = null;
 let meetingStartedAt = null;
 let meetingTimerInterval = null;
 
+function getProcessingSettings() {
+    return {
+        enableCorrection: !!document.getElementById('enableCorrection')?.checked,
+        enableGlossary: !!document.getElementById('enableGlossary')?.checked,
+        glossary: document.getElementById('glossaryInput')?.value || ''
+    };
+}
+
+function updateGlossaryInputState() {
+    const glossaryInput = document.getElementById('glossaryInput');
+    const enableGlossary = document.getElementById('enableGlossary');
+    if (!glossaryInput || !enableGlossary) return;
+    glossaryInput.disabled = !enableGlossary.checked;
+}
+
+function isStructuredTranscript(entry) {
+    return !!entry && (
+        Object.prototype.hasOwnProperty.call(entry, 'rawTranscript') ||
+        Object.prototype.hasOwnProperty.call(entry, 'correctedTranscript') ||
+        Object.prototype.hasOwnProperty.call(entry, 'primaryTranslation') ||
+        Object.prototype.hasOwnProperty.call(entry, 'secondaryTranslation')
+    );
+}
+
+function getDisplayTranscriptText(entry) {
+    if (!entry) return '';
+    if (isStructuredTranscript(entry)) {
+        return (entry.correctedTranscript || entry.rawTranscript || '').trim();
+    }
+    return (entry.text || '').trim();
+}
+
+function rebuildTranslationContext() {
+    const nextContext = [];
+    transcripts.forEach((entry) => {
+        if (isStructuredTranscript(entry)) {
+            const sourceText = getDisplayTranscriptText(entry);
+            if (sourceText) {
+                nextContext.push({
+                    text: sourceText,
+                    language: entry.originalLanguage || entry.language || detectLanguage(sourceText),
+                    timestamp: Date.parse(entry.timestamp) || Date.now()
+                });
+            }
+            return;
+        }
+
+        if (!entry.isTranslation && entry.text) {
+            nextContext.push({
+                text: entry.text.trim(),
+                language: entry.language || detectLanguage(entry.text),
+                timestamp: Date.parse(entry.timestamp) || Date.now()
+            });
+        }
+    });
+    translationContext = nextContext.slice(-TRANSLATION_CONTEXT_SIZE);
+}
+
+function normalizeStoredTranscriptEntry(entry) {
+    if (!entry || typeof entry !== 'object') return null;
+    if (isStructuredTranscript(entry)) {
+        return {
+            id: entry.id || Date.now() + Math.random(),
+            timestamp: entry.timestamp || new Date().toISOString(),
+            channel: entry.channel || 'primary',
+            originalLanguage: entry.originalLanguage || entry.language || '',
+            rawTranscript: entry.rawTranscript || '',
+            correctedTranscript: entry.correctedTranscript || null,
+            correctionApplied: !!entry.correctionApplied,
+            primaryTranslation: entry.primaryTranslation || null,
+            secondaryTranslation: entry.secondaryTranslation || null,
+            postProcessing: !!entry.postProcessing,
+            pendingCorrection: !!entry.pendingCorrection,
+            pendingTranslation: !!entry.pendingTranslation
+        };
+    }
+    return { ...entry, channel: entry.channel || 'primary' };
+}
+
 function addToTranslationContext(text, language) {
     if (!text || !text.trim()) return;
     translationContext.push({ text: text.trim(), language: language || 'unknown', timestamp: Date.now() });
@@ -127,6 +206,18 @@ function loadSettings() {
     const secSelect = document.getElementById('secondaryLanguage');
     if (secSelect) secSelect.value = secondaryLang;
 
+    const enableCorrection = localStorage.getItem('meetingEZ_enableCorrection');
+    document.getElementById('enableCorrection').checked = enableCorrection !== 'false';
+
+    const enableGlossary = localStorage.getItem('meetingEZ_enableGlossary') === 'true';
+    document.getElementById('enableGlossary').checked = enableGlossary;
+
+    const glossaryInput = document.getElementById('glossaryInput');
+    if (glossaryInput) {
+        glossaryInput.value = localStorage.getItem('meetingEZ_glossary') || '';
+    }
+    updateGlossaryInputState();
+
     enableSplitView(false);
 }
 
@@ -184,6 +275,19 @@ function setupEventListeners() {
             localStorage.setItem('meetingEZ_secondaryLanguage', (e.target.value || '').trim());
         });
     }
+
+    document.getElementById('enableCorrection').addEventListener('change', (e) => {
+        localStorage.setItem('meetingEZ_enableCorrection', String(e.target.checked));
+    });
+
+    document.getElementById('enableGlossary').addEventListener('change', (e) => {
+        localStorage.setItem('meetingEZ_enableGlossary', String(e.target.checked));
+        updateGlossaryInputState();
+    });
+
+    document.getElementById('glossaryInput').addEventListener('input', (e) => {
+        localStorage.setItem('meetingEZ_glossary', e.target.value);
+    });
 
     document.getElementById('fontSize').addEventListener('change', (e) => {
         localStorage.setItem('meetingEZ_fontSize', e.target.value);
@@ -362,12 +466,20 @@ async function initRealtimeConnection() {
             const newTranscript = {
                 id: itemId || Date.now() + Math.random(),
                 timestamp: new Date().toISOString(),
-                text: normalized,
-                language: detectLanguage(normalized),
-                channel
+                channel,
+                originalLanguage: detectLanguage(normalized),
+                rawTranscript: normalized,
+                correctedTranscript: null,
+                correctionApplied: false,
+                primaryTranslation: null,
+                secondaryTranslation: null,
+                postProcessing: false,
+                pendingCorrection: false,
+                pendingTranslation: false
             };
             transcripts.push(newTranscript);
             saveTranscripts();
+            rebuildTranslationContext();
 
             currentStreamingTextMap.primary = '';
             currentTranscriptIdMap.primary = null;
@@ -385,16 +497,37 @@ async function initRealtimeConnection() {
             try {
                 const primaryLang = document.getElementById('primaryLanguage')?.value || 'zh';
                 const secondaryLang = (document.getElementById('secondaryLanguage')?.value || '').trim();
-                if (secondaryLang) {
-                    const structured = await postProcessText(transcript, {
+                const processingSettings = getProcessingSettings();
+                if (processingSettings.enableCorrection || secondaryLang) {
+                    newTranscript.postProcessing = true;
+                    newTranscript.pendingCorrection = processingSettings.enableCorrection;
+                    newTranscript.pendingTranslation = !!secondaryLang;
+                    saveTranscripts();
+                    updateDisplay(channel);
+
+                    postProcessText(normalized, {
                         primaryLanguage: primaryLang,
                         secondaryLanguage: secondaryLang,
-                        originalLanguageHint: newTranscript.language
+                        originalLanguageHint: newTranscript.originalLanguage,
+                        enableCorrection: processingSettings.enableCorrection,
+                        enableGlossary: processingSettings.enableGlossary,
+                        glossary: processingSettings.glossary
+                    }).then((structured) => {
+                        applyPostProcessToTranscript(newTranscript.id, structured);
+                    }).catch((ppErr) => {
+                        const currentEntry = transcripts.find(t => t.id === newTranscript.id);
+                        if (currentEntry) {
+                            currentEntry.postProcessing = false;
+                            currentEntry.pendingCorrection = false;
+                            currentEntry.pendingTranslation = false;
+                            saveTranscripts();
+                            updateDisplay(channel);
+                        }
+                        console.warn('后置处理失败，保留原文:', ppErr);
                     });
-                    applyPostProcessToTranscript(newTranscript.id, structured);
                 }
             } catch (ppErr) {
-                console.warn('后置处理失败，保留原文:', ppErr);
+                console.warn('后置处理初始化失败，保留原文:', ppErr);
             }
         },
 
@@ -563,6 +696,53 @@ function updateStreamingDisplay(channel = 'primary') {
     }
 }
 
+function renderLegacyTranscriptEntry(entry) {
+    const time = new Date(entry.timestamp).toLocaleTimeString();
+    const textClass = entry.isTranslation ? 'translation-text' : '';
+    return `<div class="${textClass}">${escapeHtml(entry.text)} [${time}]</div>`;
+}
+
+function renderStructuredTranscriptEntry(entry) {
+    const time = new Date(entry.timestamp).toLocaleTimeString();
+    const mainText = getDisplayTranscriptText(entry);
+    const notes = [];
+    if (entry.postProcessing) {
+        const pendingParts = [
+            entry.pendingCorrection ? '智能修正中' : '',
+            entry.pendingTranslation ? '翻译中' : ''
+        ].filter(Boolean).join(' / ');
+        if (pendingParts) notes.push(pendingParts);
+    }
+    if (entry.correctionApplied) {
+        notes.push('已应用智能修正');
+    }
+    const noteBlock = notes.length > 0
+        ? `<div class="transcript-note">${escapeHtml(notes.join(' · '))}</div>`
+        : '';
+
+    const translationRows = [
+        entry.primaryTranslation
+            ? `<div class="transcript-translation-row"><span class="transcript-label">主译</span><span>${escapeHtml(entry.primaryTranslation)}</span></div>`
+            : '',
+        entry.secondaryTranslation
+            ? `<div class="transcript-translation-row"><span class="transcript-label">次译</span><span>${escapeHtml(entry.secondaryTranslation)}</span></div>`
+            : ''
+    ].filter(Boolean).join('');
+
+    const translationBlock = translationRows
+        ? `<div class="transcript-translation">${translationRows}</div>`
+        : '';
+
+    return `
+        <div class="transcript-entry">
+            <div class="transcript-main">${escapeHtml(mainText)}</div>
+            ${translationBlock}
+            ${noteBlock}
+            <div class="transcript-meta">${time}</div>
+        </div>
+    `;
+}
+
 function updateDisplay(channel = 'primary') {
     const tc = document.getElementById('transcriptContent');
     transcriptSplit = transcriptSplit || document.getElementById('transcriptSplit');
@@ -573,7 +753,7 @@ function updateDisplay(channel = 'primary') {
         tc.innerHTML = `
             <div class="welcome-message">
                 <p>欢迎使用 MeetingEZ！</p>
-                <p>点击"开始会议"开始实时转写。</p>
+                <p>点击底部开始按钮开始实时转写。</p>
             </div>
         `;
         return;
@@ -586,11 +766,11 @@ function updateDisplay(channel = 'primary') {
 
     const contentHtml = displayTranscripts
         .filter(t => (transcriptSplit && transcriptSplit.style.display !== 'none') ? t.channel === channel : true)
-        .map(transcript => {
-            const time = new Date(transcript.timestamp).toLocaleTimeString();
-            const textClass = transcript.isTranslation ? 'translation-text' : '';
-            return `<div class="${textClass}">${escapeHtml(transcript.text)} [${time}]</div>`;
-        }).join('');
+        .map(transcript => (
+            isStructuredTranscript(transcript)
+                ? renderStructuredTranscriptEntry(transcript)
+                : renderLegacyTranscriptEntry(transcript)
+        )).join('');
 
     if (transcriptSplit && transcriptSplit.style.display !== 'none') {
         if (channel === 'secondary') {
@@ -646,17 +826,21 @@ function loadTranscripts() {
         if (stored) {
             const parsed = JSON.parse(stored);
             if (parsed && parsed.version === STORAGE_VERSION && Array.isArray(parsed.items)) {
-                transcripts = parsed.items;
+                transcripts = parsed.items.map(normalizeStoredTranscriptEntry).filter(Boolean);
             } else if (Array.isArray(parsed)) {
-                transcripts = parsed.map(t => ({ ...t, channel: t.channel || 'primary' }));
+                transcripts = parsed.map(normalizeStoredTranscriptEntry).filter(Boolean);
                 saveTranscripts();
             } else {
                 transcripts = [];
             }
+            rebuildTranslationContext();
             updateDisplay();
+            updateControls();
         }
     } catch (error) {
         transcripts = [];
+        rebuildTranslationContext();
+        updateControls();
     }
 }
 
@@ -670,7 +854,19 @@ function downloadTranscript() {
 
     transcripts.forEach((t, i) => {
         content += `[${i + 1}] ${new Date(t.timestamp).toLocaleString()}\n`;
-        content += `内容: ${t.text}\n\n`;
+        if (isStructuredTranscript(t)) {
+            content += `原始转写: ${t.rawTranscript || '-'}\n`;
+            content += `智能修正: ${t.correctedTranscript || '-'}\n`;
+            content += `翻译(主语言): ${t.primaryTranslation || '-'}\n`;
+            content += `翻译(第二语言): ${t.secondaryTranslation || '-'}\n\n`;
+        } else if (t.isTranslation) {
+            content += `翻译结果: ${t.text || '-'}\n\n`;
+        } else {
+            content += `原始转写: ${t.text || '-'}\n`;
+            content += '智能修正: -\n';
+            content += '翻译(主语言): -\n';
+            content += '翻译(第二语言): -\n\n';
+        }
     });
 
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
@@ -697,6 +893,8 @@ function clearTranscript() {
                 <p>点击底部开始按钮开始实时转写。</p>
             </div>
         `;
+        rebuildTranslationContext();
+        updateControls();
         setTimeout(() => saveTranscripts(), 0);
     }
 }
@@ -745,7 +943,7 @@ function updateFontSize() {
 }
 
 function disableSettings() {
-    ['audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize', 'audioSourceMic', 'audioSourceTab'].forEach(id => {
+    ['audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize', 'audioSourceMic', 'audioSourceTab', 'enableCorrection', 'enableGlossary', 'glossaryInput'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.disabled = true;
     });
@@ -756,7 +954,7 @@ function disableSettings() {
 }
 
 function enableSettings() {
-    ['audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize', 'audioSourceMic', 'audioSourceTab'].forEach(id => {
+    ['audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize', 'audioSourceMic', 'audioSourceTab', 'enableCorrection', 'enableGlossary', 'glossaryInput'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.disabled = false;
     });
@@ -764,6 +962,7 @@ function enableSettings() {
         const el = document.getElementById(id);
         if (el) el.disabled = false;
     });
+    updateGlossaryInputState();
 }
 
 function enableSplitView(enabled) {
@@ -952,8 +1151,11 @@ function initializeAutoScroll() {
 
 async function postProcessText(originalText, opts = {}) {
     const primaryLanguage = opts.primaryLanguage || 'zh';
-    const secondaryLanguage = opts.secondaryLanguage || 'ja';
+    const secondaryLanguage = opts.secondaryLanguage || '';
     const originalLanguageHint = opts.originalLanguageHint || primaryLanguage;
+    const enableCorrection = !!opts.enableCorrection;
+    const enableGlossary = !!opts.enableGlossary;
+    const glossary = opts.glossary || '';
     const translateStartedAt = performance.now();
 
     const contextInfo = translationContext.length > 0
@@ -968,6 +1170,9 @@ async function postProcessText(originalText, opts = {}) {
             primaryLanguage,
             secondaryLanguage,
             originalLanguageHint,
+            enableCorrection,
+            enableGlossary,
+            glossary,
             context: contextInfo
         })
     });
@@ -988,9 +1193,13 @@ async function postProcessText(originalText, opts = {}) {
         elapsedMs: Math.round(performance.now() - translateStartedAt),
         textChars: originalText.length,
         originalLanguage: structured.originalLanguage,
+        correctionApplied: !!structured.correctionApplied,
         hasPrimaryTranslation: !!structured.primaryTranslation,
         hasSecondaryTranslation: !!structured.secondaryTranslation
     });
+    structured.rawTranscript = structured.rawTranscript || originalText;
+    structured.correctedTranscript = structured.correctedTranscript || null;
+    structured.correctionApplied = !!structured.correctionApplied;
     structured.primaryTranslation = structured.primaryTranslation || null;
     structured.secondaryTranslation = structured.secondaryTranslation || null;
     return structured;
@@ -1000,43 +1209,24 @@ function applyPostProcessToTranscript(provisionalId, structured) {
     const idx = transcripts.findIndex(t => t.id === provisionalId);
     if (idx === -1) return;
     const entry = transcripts[idx];
-
-    const primaryLang = document.getElementById('primaryLanguage')?.value || 'zh';
-    const secondaryLang = document.getElementById('secondaryLanguage')?.value || 'ja';
-
-    entry.language = structured.originalLanguage || entry.language;
-    entry.timestamp = new Date().toISOString();
-    addToTranslationContext(entry.text, entry.language);
-
-    let offset = 0;
-
-    if (structured.primaryTranslation) {
-        addToTranslationContext(structured.primaryTranslation, primaryLang);
-        transcripts.splice(idx + 1 + offset, 0, {
-            id: Date.now() + Math.random(),
-            timestamp: new Date().toISOString(),
-            text: normalizeText(structured.primaryTranslation),
-            language: primaryLang,
-            channel: entry.channel,
-            isTranslation: true
-        });
-        offset++;
-    }
-
-    if (structured.secondaryTranslation) {
-        addToTranslationContext(structured.secondaryTranslation, secondaryLang);
-        transcripts.splice(idx + 1 + offset, 0, {
-            id: Date.now() + Math.random() + 1,
-            timestamp: new Date().toISOString(),
-            text: normalizeText(structured.secondaryTranslation),
-            language: secondaryLang,
-            channel: entry.channel,
-            isTranslation: true
-        });
-        offset++;
-    }
+    entry.originalLanguage = structured.originalLanguage || entry.originalLanguage;
+    entry.rawTranscript = normalizeText(structured.rawTranscript || entry.rawTranscript);
+    entry.correctedTranscript = structured.correctedTranscript
+        ? normalizeText(structured.correctedTranscript)
+        : null;
+    entry.correctionApplied = !!structured.correctionApplied;
+    entry.primaryTranslation = structured.primaryTranslation
+        ? normalizeText(structured.primaryTranslation)
+        : null;
+    entry.secondaryTranslation = structured.secondaryTranslation
+        ? normalizeText(structured.secondaryTranslation)
+        : null;
+    entry.postProcessing = false;
+    entry.pendingCorrection = false;
+    entry.pendingTranslation = false;
 
     saveTranscripts();
+    rebuildTranslationContext();
     updateDisplay(entry.channel || 'primary');
 }
 

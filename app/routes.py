@@ -43,6 +43,34 @@ def _build_translation_reasoning(model, effort):
     return {'effort': normalized_effort}
 
 
+def _coerce_bool(value, default=False):
+    """兼容 bool / 字符串形式的布尔值"""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in ('1', 'true', 'yes', 'on')
+    return bool(value)
+
+
+def _parse_glossary(text):
+    """将多行术语表解析为标准词 + 别名列表"""
+    entries = []
+    for raw_line in (text or '').splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#'):
+            continue
+        parts = [part.strip() for part in line.split('|') if part.strip()]
+        if not parts:
+            continue
+        entries.append({
+            'canonical': parts[0],
+            'aliases': parts[1:]
+        })
+    return entries
+
+
 def _get_api_key():
     """从环境变量读取 OpenAI API Key"""
     key = os.getenv('OPENAI_API_KEY', '')
@@ -253,7 +281,7 @@ def create_realtime_session():
 
 @main_bp.route('/api/translate', methods=['POST'])
 def translate():
-    """翻译代理：前端不再直接调用 OpenAI"""
+    """后置语言处理代理：智能修正 + 双向翻译"""
     try:
         api_key = _get_api_key()
     except ValueError as e:
@@ -268,17 +296,33 @@ def translate():
     secondary_language = data.get('secondaryLanguage', 'ja')
     original_language_hint = data.get('originalLanguageHint', primary_language)
     context = data.get('context', '')
+    enable_correction = _coerce_bool(data.get('enableCorrection'), default=False)
+    enable_glossary = _coerce_bool(data.get('enableGlossary'), default=False)
+    glossary_entries = _parse_glossary(data.get('glossary', '')) if enable_glossary else []
 
     system_prompt = (
-        '你是实时会议字幕的双向翻译助手。\n\n'
+        '你是实时会议字幕的后置语言处理助手，负责两件事：\n'
+        '1. 在允许时，对 ASR 原始转写做轻量智能修正\n'
+        '2. 输出双向翻译\n\n'
         '## 输入\n'
         '- primary_language: 第一语言（如 zh）\n'
         '- secondary_language: 第二语言（如 ja）\n'
-        '- current_text: 当前需要处理的文本\n\n'
+        '- current_text: 当前需要处理的 ASR 原始文本\n'
+        '- enable_correction: 是否启用智能修正\n'
+        '- enable_glossary: 是否启用专有名词表\n'
+        '- glossary_entries: 术语表，包含标准写法和别名\n'
+        '- recent_context: 最近上下文\n\n'
+        '## 智能修正规则\n'
+        '- 仅在 enable_correction=true 时输出 correctedTranscript\n'
+        '- 只允许修正明显 ASR 错误、术语误识别、轻度断句和标点\n'
+        '- 不允许改写说话意图，不允许补充未说出的信息，不允许总结替代原句\n'
+        '- 如果没有明确证据，不要擅自修改\n'
+        '- 如果 enable_glossary=true，优先将术语修正为 glossary_entries 中的标准写法\n\n'
         '## 规则\n'
-        '情况A - 文本是第一语言：primaryTranslation = null, secondaryTranslation = 翻译成第二语言\n'
-        '情况B - 文本是第二语言：primaryTranslation = 翻译成第一语言, secondaryTranslation = null\n'
-        '情况C - 文本是其他语言：primaryTranslation = 翻译成第一语言, secondaryTranslation = null\n'
+        '- 翻译应基于 correctedTranscript（如果启用了智能修正），否则基于 current_text\n'
+        '- 情况A: 文本是第一语言 => primaryTranslation = null, secondaryTranslation = 翻译成第二语言\n'
+        '- 情况B: 文本是第二语言 => primaryTranslation = 翻译成第一语言, secondaryTranslation = null\n'
+        '- 情况C: 文本是其他语言 => primaryTranslation = 翻译成第一语言, secondaryTranslation = null\n'
         '绝对不要输出与原文同语种的“翻译”。若目标语言与原文同语种，对应字段必须是 null。\n'
         'originalLanguage 必须是你判定的原文语言，而不是目标语言。\n\n'
         '输出严格的 JSON，不要添加任何解释。'
@@ -289,6 +333,9 @@ def translate():
         'primary_language': primary_language,
         'secondary_language': secondary_language,
         'original_language_hint': original_language_hint,
+        'enable_correction': enable_correction,
+        'enable_glossary': enable_glossary,
+        'glossary_entries': glossary_entries,
         'recent_context': context,
         'current_text': text
     })
@@ -299,11 +346,25 @@ def translate():
             '$schema': 'http://json-schema.org/draft-07/schema#',
             'type': 'object',
             'additionalProperties': False,
-            'required': ['originalLanguage', 'primaryTranslation', 'secondaryTranslation'],
+            'required': [
+                'originalLanguage',
+                'correctedTranscript',
+                'correctionApplied',
+                'primaryTranslation',
+                'secondaryTranslation'
+            ],
             'properties': {
                 'originalLanguage': {
                     'type': 'string',
                     'description': '判定的文本语言 ISO 代码'
+                },
+                'correctedTranscript': {
+                    'description': '智能修正后的文本；若未启用修正则为 null',
+                    'anyOf': [{'type': 'string'}, {'type': 'null'}]
+                },
+                'correctionApplied': {
+                    'type': 'boolean',
+                    'description': '是否真的修改了原始转写'
                 },
                 'primaryTranslation': {
                     'description': '翻译成第一语言，或 null',
@@ -326,6 +387,9 @@ def translate():
         model=model,
         reasoning_effort=reasoning.get('effort') if reasoning else None,
         text_chars=len(text),
+        enable_correction=enable_correction,
+        enable_glossary=enable_glossary,
+        glossary_entries=len(glossary_entries),
         primary_language=primary_language,
         secondary_language=secondary_language,
         original_language_hint=original_language_hint,
@@ -392,17 +456,34 @@ def translate():
         if not structured or 'originalLanguage' not in structured:
             structured = {
                 'originalLanguage': original_language_hint,
+                'correctedTranscript': text if enable_correction else None,
+                'correctionApplied': False,
                 'primaryTranslation': None,
                 'secondaryTranslation': None
             }
 
         original_language = structured.get('originalLanguage') or original_language_hint
+        corrected_transcript = structured.get('correctedTranscript')
+        correction_applied = _coerce_bool(structured.get('correctionApplied'), default=False)
         primary_translation = structured.get('primaryTranslation')
         secondary_translation = structured.get('secondaryTranslation')
 
-        if primary_translation and primary_translation.strip() == text.strip():
+        if enable_correction:
+            corrected_transcript = (corrected_transcript or text).strip()
+            if corrected_transcript == text.strip():
+                correction_applied = False
+        else:
+            corrected_transcript = None
+            correction_applied = False
+
+        effective_source_text = corrected_transcript or text
+
+        if primary_translation and primary_translation.strip() == effective_source_text.strip():
             primary_translation = None
-        if secondary_translation and secondary_translation.strip() == text.strip():
+        if secondary_translation and secondary_translation.strip() == effective_source_text.strip():
+            secondary_translation = None
+
+        if not secondary_language:
             secondary_translation = None
 
         if _is_same_language(original_language, primary_language):
@@ -414,6 +495,9 @@ def translate():
 
         structured = {
             'originalLanguage': original_language,
+            'rawTranscript': text,
+            'correctedTranscript': corrected_transcript,
+            'correctionApplied': correction_applied,
             'primaryTranslation': primary_translation,
             'secondaryTranslation': secondary_translation
         }
@@ -423,6 +507,7 @@ def translate():
             reasoning_effort=reasoning.get('effort') if reasoning else None,
             elapsed_ms=round((time.perf_counter() - translate_started_at) * 1000, 1),
             original_language=structured['originalLanguage'],
+            correction_applied=structured['correctionApplied'],
             has_primary_translation=bool(structured['primaryTranslation']),
             has_secondary_translation=bool(structured['secondaryTranslation'])
         )
