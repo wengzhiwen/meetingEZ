@@ -58,6 +58,29 @@
             <div id="connectionStatus" class="status-message"></div>
 
             <div class="setting-item stack">
+                <label>当前模型</label>
+                <div class="model-info-list">
+                    <div class="model-info-card">
+                        <div class="model-info-header">
+                            <span class="model-purpose">{{ model_info.transcription.purpose }}</span>
+                            <span class="model-api">{{ model_info.transcription.api }}</span>
+                        </div>
+                        <div class="model-name">{{ model_info.transcription.model }}</div>
+                    </div>
+                    <div class="model-info-card">
+                        <div class="model-info-header">
+                            <span class="model-purpose">{{ model_info.translation.purpose }}</span>
+                            <span class="model-api">{{ model_info.translation.api }}</span>
+                        </div>
+                        <div class="model-name">{{ model_info.translation.model }}</div>
+                        {% if model_info.translation.reasoning_effort %}
+                        <div class="model-meta">reasoning: {{ model_info.translation.reasoning_effort.effort }}</div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+
+            <div class="setting-item stack">
                 <label>音频输入源</label>
                 <div class="radio-group">
                     <label class="radio-label">

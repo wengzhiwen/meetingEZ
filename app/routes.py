@@ -13,7 +13,8 @@ from flask import (Blueprint, jsonify, redirect, render_template, request,
 
 main_bp = Blueprint('main', __name__)
 TRANSCRIPTION_MODEL = 'gpt-4o-transcribe'
-TRANSLATION_MODEL = os.getenv('TRANSLATION_MODEL', 'gpt-4.1-mini')
+TRANSLATION_MODEL = os.getenv('TRANSLATION_MODEL', 'gpt-5.4-mini-2026-03-17')
+TRANSLATION_REASONING_EFFORT = os.getenv('TRANSLATION_REASONING_EFFORT', 'low').strip()
 
 
 def _normalize_language_code(value):
@@ -26,6 +27,20 @@ def _is_same_language(left, right):
     left_normalized = _normalize_language_code(left)
     right_normalized = _normalize_language_code(right)
     return bool(left_normalized and right_normalized and left_normalized == right_normalized)
+
+
+def _supports_translation_reasoning(model):
+    """只在明确支持 reasoning 的模型上发送 reasoning 参数"""
+    normalized_model = (model or '').strip().lower()
+    return normalized_model.startswith('gpt-5')
+
+
+def _build_translation_reasoning(model, effort):
+    """根据模型能力构造 reasoning 配置"""
+    normalized_effort = (effort or '').strip().lower()
+    if not normalized_effort or not _supports_translation_reasoning(model):
+        return None
+    return {'effort': normalized_effort}
 
 
 def _get_api_key():
@@ -94,7 +109,23 @@ def logout():
 @main_bp.route('/')
 def index():
     """主页面"""
-    return render_template('index.html')
+    model_info = {
+        'transcription': {
+            'purpose': '实时转写',
+            'api': 'Realtime API',
+            'model': TRANSCRIPTION_MODEL
+        },
+        'translation': {
+            'purpose': '后置翻译',
+            'api': 'Responses API',
+            'model': TRANSLATION_MODEL,
+            'reasoning_effort': _build_translation_reasoning(
+                TRANSLATION_MODEL,
+                TRANSLATION_REASONING_EFFORT
+            )
+        }
+    }
+    return render_template('index.html', model_info=model_info)
 
 
 @main_bp.route('/health')
@@ -287,10 +318,13 @@ def translate():
     }
 
     model = data.get('model', TRANSLATION_MODEL)
+    reasoning_effort = data.get('reasoningEffort', TRANSLATION_REASONING_EFFORT)
+    reasoning = _build_translation_reasoning(model, reasoning_effort)
     translate_started_at = time.perf_counter()
     _log_timing(
         'translate_request_received',
         model=model,
+        reasoning_effort=reasoning.get('effort') if reasoning else None,
         text_chars=len(text),
         primary_language=primary_language,
         secondary_language=secondary_language,
@@ -299,32 +333,37 @@ def translate():
     )
 
     try:
+        payload = {
+            'model': model,
+            'input': [
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': user_content}
+            ],
+            'text': {
+                'format': {
+                    'type': 'json_schema',
+                    'name': json_schema['name'],
+                    'schema': json_schema['schema'],
+                    'strict': True
+                }
+            }
+        }
+        if reasoning:
+            payload['reasoning'] = reasoning
+
         resp = requests.post(
             'https://api.openai.com/v1/responses',
             headers={
                 'Authorization': f'Bearer {api_key}',
                 'Content-Type': 'application/json'
             },
-            json={
-                'model': model,
-                'input': [
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_content}
-                ],
-                'text': {
-                    'format': {
-                        'type': 'json_schema',
-                        'name': json_schema['name'],
-                        'schema': json_schema['schema'],
-                        'strict': True
-                    }
-                }
-            },
+            json=payload,
             timeout=30
         )
         _log_timing(
             'translate_openai_response',
             model=model,
+            reasoning_effort=reasoning.get('effort') if reasoning else None,
             elapsed_ms=round((time.perf_counter() - translate_started_at) * 1000, 1),
             status_code=resp.status_code,
             request_id=resp.headers.get('x-request-id')
@@ -381,6 +420,7 @@ def translate():
         _log_timing(
             'translate_request_completed',
             model=model,
+            reasoning_effort=reasoning.get('effort') if reasoning else None,
             elapsed_ms=round((time.perf_counter() - translate_started_at) * 1000, 1),
             original_language=structured['originalLanguage'],
             has_primary_translation=bool(structured['primaryTranslation']),
@@ -393,6 +433,7 @@ def translate():
         _log_timing(
             'translate_request_failed',
             model=model,
+            reasoning_effort=reasoning.get('effort') if reasoning else None,
             elapsed_ms=round((time.perf_counter() - translate_started_at) * 1000, 1),
             error=str(e)
         )
