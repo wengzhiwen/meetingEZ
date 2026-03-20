@@ -12,7 +12,7 @@
         <!-- 头部 -->
         <header class="header">
             <h1>MeetingEZ</h1>
-            <p class="subtitle">智能会议助手 - 实时语音识别</p>
+            <p class="subtitle">智能会议助手 - 实时转写</p>
         </header>
 
         <!-- 控制面板 -->
@@ -29,7 +29,7 @@
         <!-- 字幕显示区域 -->
         <div class="transcript-container">
             <div class="transcript-header">
-                <h2>不那么实时字幕</h2>
+                <h2>实时字幕</h2>
                 <div class="transcript-header-right">
                     <div class="volume-meter compact">
                         <div id="volumeBar" class="volume-bar"></div>
@@ -45,7 +45,7 @@
             <div id="transcriptContent" class="transcript-content">
                 <div class="welcome-message">
                     <p>欢迎使用 MeetingEZ！</p>
-                    <p>请先配置 OpenAI API Key，然后点击"开始会议"开始使用。</p>
+                    <p>点击"开始会议"开始实时转写。</p>
                 </div>
             </div>
             <!-- 当选择第二语言时，将把上面的 transcriptContent 替换为以下左右分屏容器：
@@ -59,17 +59,10 @@
         <!-- 设置面板 -->
         <div class="settings-panel">
             <h3>设置</h3>
-            <!-- API Key 配置（移动到设置区域） -->
+            <!-- API 连接状态 -->
             <div class="setting-item">
-                <label for="apiKey">OpenAI API Key</label>
-                <div class="input-with-button">
-                    <input type="password" id="apiKey" placeholder="请输入您的 OpenAI API Key" autocomplete="off">
-                    <button type="button" id="toggleApiKey" class="toggle-btn" title="显示/隐藏">👁️</button>
-                </div>
-                <div class="button-group">
-                    <button id="testConnection" class="btn btn-icon btn-secondary" title="测试连接" aria-label="测试连接">测</button>
-                    <button id="saveApiKey" class="btn btn-icon btn-primary" title="保存" aria-label="保存">存</button>
-                </div>
+                <label>API 连接</label>
+                <button id="testConnection" class="btn btn-small btn-secondary" title="测试连接">测试连接</button>
                 <div id="connectionStatus" class="status-message"></div>
             </div>
 
@@ -86,15 +79,6 @@
                         <span>使用标签页音频</span>
                     </label>
                 </div>
-            </div>
-
-            <!-- 转写模式选择 -->
-            <div class="setting-item">
-                <label for="transcriptionMode">转写模式</label>
-                <select id="transcriptionMode">
-                    <option value="segmented">分段上传（稳定）</option>
-                    <option value="realtime">实时流式（低延迟）</option>
-                </select>
             </div>
 
             <!-- 标签页音频提示信息 -->
@@ -171,7 +155,7 @@
     </div>
 
     <!-- 脚本 -->
-    <script src="{{ url_for('static', filename='js/realtime-transcription.js') }}"></script>
-    <script type="module" src="{{ url_for('static', filename='js/app.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/realtime-transcription.js') }}?v=20260320"></script>
+    <script type="module" src="{{ url_for('static', filename='js/app.js') }}?v=20260320"></script>
 </body>
 </html>

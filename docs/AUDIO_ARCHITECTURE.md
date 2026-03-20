@@ -68,6 +68,62 @@ MeetingEZ 采用 **AudioWorklet + Web Worker 双线程架构**，确保音频采
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+## 实时流式模式数据流
+
+实时流式模式（`realtime`）与分段上传模式共用 AudioWorklet 采集层，但音频不经过 WAV 编码和 REST 上传，而是直接通过 WebSocket 发送至 OpenAI Realtime API。
+
+### 架构差异
+
+| | 分段上传模式 | 实时流式模式 |
+|---|---|---|
+| **采样率** | 48kHz | 24kHz |
+| **音频格式** | Float32 → WAV (Worker) | Float32 → PCM16 → Base64 |
+| **传输方式** | REST `/v1/audio/transcriptions` | WebSocket `wss://api.openai.com/v1/realtime` |
+| **模型** | `gpt-4o-transcribe` | `gpt-realtime-1.5`（含 `gpt-4o-transcribe` 转写子模型） |
+| **VAD** | 客户端 RMS 启发式 | 服务端 VAD + 客户端静音过滤 |
+| **认证** | 浏览器直接带 Authorization header | 后端创建 ephemeral session → subprotocol 传 key |
+| **分段逻辑** | 8 秒窗口 + 1 秒重叠 | 无需分段，持续流式发送 |
+
+### 实时流式数据流
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        音频设备（麦克风/标签页）                  │
+└─────────────────────┬───────────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  AudioWorklet 线程（音频线程，24kHz）                             │
+│  - 每 2048 样本采集一次                                          │
+│  - 计算 RMS 音量                                                 │
+│  - 发送到主线程                                                  │
+└─────────────────────┬───────────────────────────────────────────┘
+                      │ MessageChannel
+                      ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  主线程                                                          │
+│  - 客户端 VAD 静音过滤                                           │
+│  - Float32 → Int16 PCM16 转换                                    │
+│  - Base64 编码                                                   │
+│  - 通过 WebSocket JSON 消息发送                                  │
+└─────────────────────┬───────────────────────────────────────────┘
+                      │ WebSocket (wss://api.openai.com/v1/realtime)
+                      ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  OpenAI Realtime API (gpt-realtime-1.5)                          │
+│  - 服务端 VAD 检测语音边界                                       │
+│  - gpt-4o-transcribe 生成转录                                    │
+│  - 返回 delta / completed 事件                                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 连接建立流程
+
+1. 前端 → 后端 `POST /api/realtime-session`（携带 API Key）
+2. 后端 → OpenAI `POST /v1/realtime/client_secrets`（创建 ephemeral client secret）
+3. 后端 → 前端（返回 `clientSecret` ephemeral key）
+4. 前端 → OpenAI WebSocket（通过 subprotocol `openai-insecure-api-key.{key}` 认证）
+
 ## 关键组件
 
 ### 1. AudioWorklet Processor (audio-processor.js)

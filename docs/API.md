@@ -2,7 +2,12 @@
 
 ## 概述
 
-MeetingEZ 通过浏览器端将音频分段上传至 OpenAI `gpt-4o-transcribe`（接口：`/v1/audio/transcriptions`）进行转写；随后在浏览器端调用文本模型对结果进行“后置处理”（纠错与按需翻译），不依赖后端中转。本文档描述分段策略、请求参数与字段。
+MeetingEZ 提供两种转写模式：
+
+1. **分段上传模式**（`segmented`）：浏览器端将音频分段上传至 OpenAI `gpt-4o-transcribe`（REST 接口 `/v1/audio/transcriptions`），48kHz 采样率
+2. **实时流式模式**（`realtime`）：通过后端创建 ephemeral session，前端直接用 WebSocket 连接 OpenAI Realtime API（`gpt-realtime-1.5`），24kHz 采样率
+
+两种模式均在浏览器端调用文本模型对结果进行”后置处理”（纠错与按需翻译），不依赖后端中转。本文档描述两种模式的策略、请求参数与字段。
 
 ## OpenAI /v1/audio/transcriptions 集成
 
@@ -62,9 +67,91 @@ function stopRecording() {
 }
 ```
 
-## （提示）已移除 Realtime API / WebRTC
+## 实时流式转写模式（Realtime）
 
-本项目已不再使用 OpenAI Realtime API 与 WebRTC。所有语音数据通过浏览器端分段编码后，使用 REST 接口 `/v1/audio/transcriptions` 上传并获取转写结果。
+### 架构
+
+实时流式模式采用 **后端创建 ephemeral session + 前端 WebSocket 直连** 的架构：
+
+1. 前端向后端 `/api/realtime-session` 发送 API Key
+2. 后端调用 OpenAI `/v1/realtime/client_secrets`（GA endpoint）创建 ephemeral client secret
+3. 后端将 `client_secret.value` 返回给前端
+4. 前端使用 ephemeral key 通过 WebSocket subprotocol 认证，直连 OpenAI Realtime API
+
+### 模型
+
+- **Realtime session 模型**：`gpt-realtime-1.5`（管理 WebSocket 会话、VAD、音频流）
+- **转写子模型**：`gpt-4o-transcribe`（在 session 配置的 `input_audio_transcription.model` 中指定）
+
+### 后端 Session 创建
+
+```python
+# POST /api/realtime-session
+resp = requests.post(
+    'https://api.openai.com/v1/realtime/client_secrets',
+    headers={
+        'Authorization': f'Bearer {api_key}',
+        'Content-Type': 'application/json'
+    },
+    json={
+        'model': 'gpt-realtime-1.5',
+        'input_audio_format': 'pcm16',
+        'input_audio_transcription': {
+            'model': 'gpt-4o-transcribe'
+        },
+        'turn_detection': {
+            'type': 'server_vad',
+            'threshold': 0.7,
+            'prefix_padding_ms': 300,
+            'silence_duration_ms': 300
+        }
+    }
+)
+
+# 返回给前端
+session_data = resp.json()
+return {
+    'clientSecret': session_data['client_secret']['value'],
+    'expiresAt': session_data['client_secret']['expires_at']
+}
+```
+
+### 前端 WebSocket 连接
+
+```javascript
+// 使用 subprotocol 传递 ephemeral key（浏览器不支持 WebSocket 自定义 header）
+const url = `wss://api.openai.com/v1/realtime?model=gpt-realtime-1.5`;
+const ws = new WebSocket(url, [
+    'realtime',
+    `openai-insecure-api-key.${clientSecret}`
+]);
+```
+
+### 音频格式
+
+- **采样率**：24000 Hz（与 Realtime API 要求一致）
+- **格式**：PCM16，Base64 编码后通过 JSON 消息发送
+
+### 事件类型
+
+| 事件 | 说明 |
+|------|------|
+| `session.created` | WebSocket 连接后，session 创建成功 |
+| `input_audio_buffer.speech_started` | 服务端 VAD 检测到语音开始 |
+| `input_audio_buffer.speech_stopped` | 服务端 VAD 检测到语音停止 |
+| `conversation.item.input_audio_transcription.delta` | 增量转录文本 |
+| `conversation.item.input_audio_transcription.completed` | 一段语音的完整转录 |
+| `error` | API 错误 |
+
+### 发送音频
+
+```javascript
+// Float32 → Int16 PCM → Base64
+ws.send(JSON.stringify({
+    type: 'input_audio_buffer.append',
+    audio: base64EncodedPCM16
+}));
+```
 
 ## 音频处理
 
@@ -379,11 +466,17 @@ async function testAudioDevices() {
 
 ## 配置参数
 
-### 音频参数（会议主流程）
+### 音频参数（分段上传模式）
 - **采样率**: 48000 Hz
 - **位深度**: 16-bit
 - **声道数**: 单声道
-- **格式**: PCM
+- **格式**: PCM → WAV 封装后上传
+
+### 音频参数（实时流式模式）
+- **采样率**: 24000 Hz
+- **位深度**: 16-bit
+- **声道数**: 单声道
+- **格式**: PCM16 → Base64 编码后通过 WebSocket JSON 发送
 
 ### 音频参数（麦克风测试）
 - **采样率**: 24000 Hz

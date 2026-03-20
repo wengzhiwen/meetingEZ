@@ -1,3 +1,11 @@
+2026-03-19 修复并重构实时流式转写模式
+- **修复后端 session 创建**：endpoint 从 `/v1/realtime/transcription_sessions` 改为 GA endpoint `/v1/realtime/client_secrets`，model 改为 `gpt-realtime-1.5`，移除 beta header
+- **修复 client_secret 提取**：`client_secret` 是 `{value, expires_at}` 对象，现正确提取 `.value` 字段
+- **修复前端 WebSocket 连接**：URL 参数从 `session_id` 改为 `model`，使用 subprotocol 传递 ephemeral key 认证，移除 beta-era `openai-beta.realtime-v1` subprotocol
+- **清理废弃代码**：移除不再需要的 `_configureSession()` 方法（session 已在后端创建时配置）
+- **简化 `updateLanguage()`**：语言由 API 自动检测，无需运行时更新 session
+- **更新文档**：API.md 新增实时流式模式章节，AUDIO_ARCHITECTURE.md 新增实时流式数据流描述
+
 2025-10-02 重大架构升级：零音频丢失架构
 - **AudioWorklet + Web Worker 双线程架构**：彻底解决音频丢失问题
 - 音频采集运行在独立的 AudioWorklet 线程，不受主线程任何操作影响
