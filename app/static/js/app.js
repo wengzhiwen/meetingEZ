@@ -26,6 +26,7 @@ let translationContext = [];
 let volumeAudioContext = null;
 let volumeAnalyser = null;
 let meetingStartedAt = null;
+let meetingTimerInterval = null;
 
 function addToTranslationContext(text, language) {
     if (!text || !text.trim()) return;
@@ -39,13 +40,62 @@ function clearTranslationContext() {
     translationContext = [];
 }
 
-const startBtn = document.getElementById('startMeeting');
-const stopBtn = document.getElementById('stopMeeting');
+const meetingActionBtn = document.getElementById('meetingAction');
 const statusDiv = document.getElementById('connectionStatus');
 const transcriptContent = document.getElementById('transcriptContent');
 let transcriptSplit = null;
 let transcriptLeft = null;
 let transcriptRight = null;
+let meetingStatusText = '未开始';
+
+function openSettingsPanel() {
+    const panel = document.getElementById('settingsPanel');
+    const backdrop = document.getElementById('settingsBackdrop');
+    if (!panel || !backdrop) return;
+    panel.classList.remove('hidden');
+    backdrop.classList.remove('hidden');
+    panel.setAttribute('aria-hidden', 'false');
+}
+
+function closeSettingsPanel() {
+    const panel = document.getElementById('settingsPanel');
+    const backdrop = document.getElementById('settingsBackdrop');
+    if (!panel || !backdrop) return;
+    panel.classList.add('hidden');
+    backdrop.classList.add('hidden');
+    panel.setAttribute('aria-hidden', 'true');
+}
+
+function updateMeetingTimer() {
+    const timerEl = document.getElementById('meetingTimer');
+    if (!timerEl) return;
+    if (!meetingStartedAt || !isConnected) {
+        timerEl.textContent = meetingStatusText;
+        return;
+    }
+
+    const elapsedSeconds = Math.max(0, Math.floor((Date.now() - meetingStartedAt) / 1000));
+    const hours = Math.floor(elapsedSeconds / 3600);
+    const minutes = Math.floor((elapsedSeconds % 3600) / 60);
+    const seconds = elapsedSeconds % 60;
+    timerEl.textContent = hours > 0
+        ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+        : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function startMeetingTimer() {
+    stopMeetingTimer();
+    updateMeetingTimer();
+    meetingTimerInterval = setInterval(updateMeetingTimer, 1000);
+}
+
+function stopMeetingTimer() {
+    if (meetingTimerInterval) {
+        clearInterval(meetingTimerInterval);
+        meetingTimerInterval = null;
+    }
+    updateMeetingTimer();
+}
 
 // 初始化
 async function init() {
@@ -83,9 +133,17 @@ function loadSettings() {
 function setupEventListeners() {
     const testConnBtn = document.getElementById('testConnection');
     if (testConnBtn) testConnBtn.addEventListener('click', testConnection);
+    document.getElementById('settingsToggle').addEventListener('click', openSettingsPanel);
+    document.getElementById('closeSettings').addEventListener('click', closeSettingsPanel);
+    document.getElementById('settingsBackdrop').addEventListener('click', closeSettingsPanel);
 
-    startBtn.addEventListener('click', startMeeting);
-    stopBtn.addEventListener('click', stopMeeting);
+    meetingActionBtn.addEventListener('click', async () => {
+        if (isConnected) {
+            await stopMeeting();
+            return;
+        }
+        await startMeeting();
+    });
 
     document.getElementById('downloadTranscript').addEventListener('click', downloadTranscript);
     document.getElementById('clearTranscript').addEventListener('click', clearTranscript);
@@ -134,6 +192,13 @@ function setupEventListeners() {
 
     document.querySelector('.close').addEventListener('click', () => {
         document.getElementById('errorModal').style.display = 'none';
+    });
+
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            closeSettingsPanel();
+            document.getElementById('errorModal').style.display = 'none';
+        }
     });
 }
 
@@ -209,11 +274,12 @@ async function startMeeting() {
         }
 
         startVolumeMonitor(mediaStream);
-        meetingStartedAt = performance.now();
+        meetingStartedAt = Date.now();
         await initRealtimeConnection();
 
         isConnected = true;
         isRecording = true;
+        startMeetingTimer();
         updateControls();
         updateMeetingStatus('进行中', 'active');
         updateAudioStatus('已连接', 'active');
@@ -262,7 +328,7 @@ async function initRealtimeConnection() {
             currentTranscriptIdMap.primary = itemId;
             console.log('UI [perf] speech started', {
                 itemId,
-                msFromMeetingStart: meetingStartedAt ? Math.round(performance.now() - meetingStartedAt) : null
+                msFromMeetingStart: meetingStartedAt ? Math.round(Date.now() - meetingStartedAt) : null
             });
             updateStreamingDisplay('primary');
         },
@@ -369,6 +435,8 @@ async function stopMeeting(options = {}) {
         clearTranslationContext();
 
         isConnected = false;
+        meetingStartedAt = null;
+        stopMeetingTimer();
         currentStreamingTextMap.primary = '';
         currentTranscriptIdMap.primary = null;
         updateDisplay('primary');
@@ -626,7 +694,7 @@ function clearTranscript() {
         document.getElementById('transcriptContent').innerHTML = `
             <div class="welcome-message">
                 <p>欢迎使用 MeetingEZ！</p>
-                <p>点击"开始会议"开始实时转写。</p>
+                <p>点击底部开始按钮开始实时转写。</p>
             </div>
         `;
         setTimeout(() => saveTranscripts(), 0);
@@ -636,11 +704,14 @@ function clearTranscript() {
 // ---- 控制 UI ----
 
 function updateControls() {
-    startBtn.disabled = isConnected || isTestingMicrophone;
-    stopBtn.disabled = !isConnected;
+    meetingActionBtn.disabled = isTestingMicrophone;
+    meetingActionBtn.textContent = isConnected ? '结束' : '开始';
+    meetingActionBtn.className = `btn ${isConnected ? 'btn-danger' : 'btn-success'}`;
     document.getElementById('downloadTranscript').disabled = transcripts.length === 0;
     document.getElementById('clearTranscript').disabled = transcripts.length === 0;
     document.getElementById('testMicrophone').disabled = isConnected;
+    document.getElementById('settingsToggle').disabled = false;
+    updateMeetingTimer();
 }
 
 function updateAudioInputVisibility() {
@@ -656,9 +727,8 @@ function updateAudioInputVisibility() {
 }
 
 function updateMeetingStatus(status, className) {
-    const el = document.getElementById('meetingStatus');
-    el.textContent = status;
-    el.className = `status-indicator ${className}`;
+    meetingStatusText = status || '未开始';
+    updateMeetingTimer();
 }
 
 function updateAudioStatus(status, className) {
@@ -675,7 +745,7 @@ function updateFontSize() {
 }
 
 function disableSettings() {
-    ['audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize'].forEach(id => {
+    ['audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize', 'audioSourceMic', 'audioSourceTab'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.disabled = true;
     });
@@ -686,7 +756,7 @@ function disableSettings() {
 }
 
 function enableSettings() {
-    ['audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize'].forEach(id => {
+    ['audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize', 'audioSourceMic', 'audioSourceTab'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.disabled = false;
     });
@@ -718,7 +788,7 @@ function showStatus(message, type) {
 
 function showError(message) {
     document.getElementById('errorMessage').textContent = message;
-    document.getElementById('errorModal').style.display = 'block';
+    document.getElementById('errorModal').style.display = 'flex';
 }
 
 function showLoading(message) {
@@ -994,6 +1064,7 @@ document.addEventListener('DOMContentLoaded', () => {
     init();
     loadTranscripts();
     updateFontSize();
+    updateMeetingTimer();
 
     const secondaryLang = (localStorage.getItem('meetingEZ_secondaryLanguage') || '').trim();
     if (secondaryLang && transcriptSplit && transcriptSplit.style.display !== 'none') {

@@ -8,44 +8,12 @@
     <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
 </head>
 <body>
-    <div class="container">
-        <!-- 头部 -->
-        <header class="header">
-            <h1>MeetingEZ</h1>
-            <p class="subtitle">智能会议助手 - 实时转写</p>
-        </header>
-
-        <!-- 控制面板 -->
-        <div class="control-panel">
-            <!-- 会议控制 -->
-            <div class="meeting-controls">
-                <button id="startMeeting" class="btn btn-success" disabled>开始会议</button>
-                <button id="stopMeeting" class="btn btn-danger" disabled>结束会议</button>
-                <span id="meetingStatus" class="status-indicator">未开始</span>
-                <span id="audioStatus" class="status-indicator">未连接</span>
-            </div>
-        </div>
-
-        <!-- 字幕显示区域 -->
+    <div class="container app-shell">
         <div class="transcript-container">
-            <div class="transcript-header">
-                <h2>实时字幕</h2>
-                <div class="transcript-header-right">
-                    <div class="volume-meter compact">
-                        <div id="volumeBar" class="volume-bar"></div>
-                    </div>
-                    <button id="testMicrophone" class="btn btn-icon btn-outline" title="测试麦克风" aria-label="测试麦克风">测</button>
-                    <div class="transcript-controls">
-                        <button id="autoScroll" class="btn btn-icon btn-primary" title="自动滚动" aria-label="自动滚动">滚</button>
-                        <button id="downloadTranscript" class="btn btn-icon btn-outline" title="下载" aria-label="下载" disabled>下</button>
-                        <button id="clearTranscript" class="btn btn-icon btn-outline" title="清空" aria-label="清空" disabled>空</button>
-                    </div>
-                </div>
-            </div>
             <div id="transcriptContent" class="transcript-content">
                 <div class="welcome-message">
                     <p>欢迎使用 MeetingEZ！</p>
-                    <p>点击"开始会议"开始实时转写。</p>
+                    <p>点击底部开始按钮开始实时转写。</p>
                 </div>
             </div>
             <!-- 当选择第二语言时，将把上面的 transcriptContent 替换为以下左右分屏容器：
@@ -55,19 +23,41 @@
             </div> -->
         </div>
 
+        <div class="floating-dock">
+            <div class="dock-meta">
+                <div class="volume-meter compact">
+                    <div id="volumeBar" class="volume-bar"></div>
+                </div>
+                <div id="meetingTimer" class="meeting-timer">未开始</div>
+            </div>
+            <div class="dock-tools">
+                <button id="testMicrophone" class="btn btn-icon btn-outline" title="测试麦克风" aria-label="测试麦克风">测</button>
+                <button id="autoScroll" class="btn btn-icon btn-primary" title="自动滚动" aria-label="自动滚动">滚</button>
+                <button id="downloadTranscript" class="btn btn-icon btn-outline" title="下载" aria-label="下载" disabled>下</button>
+                <button id="clearTranscript" class="btn btn-icon btn-outline" title="清空" aria-label="清空" disabled>空</button>
+                <button id="settingsToggle" class="btn btn-icon btn-outline" title="设置" aria-label="设置">设</button>
+                <button id="meetingAction" class="btn btn-success" disabled>开始</button>
+            </div>
+        </div>
 
-        <!-- 设置面板 -->
-        <div class="settings-panel">
-            <h3>设置</h3>
-            <!-- API 连接状态 -->
-            <div class="setting-item">
-                <label>API 连接</label>
-                <button id="testConnection" class="btn btn-small btn-secondary" title="测试连接">测试连接</button>
-                <div id="connectionStatus" class="status-message"></div>
+        <div id="settingsBackdrop" class="settings-backdrop hidden"></div>
+        <div id="settingsPanel" class="settings-panel hidden" aria-hidden="true">
+            <div class="settings-header">
+                <h3>设置</h3>
+                <button id="closeSettings" class="btn btn-icon btn-outline" type="button" aria-label="关闭设置">×</button>
             </div>
 
-            <!-- 音频输入源选择 -->
-            <div class="setting-item">
+            <div class="setting-item compact-row">
+                <label>API 连接</label>
+                <button id="testConnection" class="btn btn-small btn-secondary" title="测试连接">测试连接</button>
+            </div>
+            <div class="setting-item compact-row connection-row">
+                <label>连接状态</label>
+                <span id="audioStatus" class="status-indicator">未连接</span>
+            </div>
+            <div id="connectionStatus" class="status-message"></div>
+
+            <div class="setting-item stack">
                 <label>音频输入源</label>
                 <div class="radio-group">
                     <label class="radio-label">
@@ -81,23 +71,19 @@
                 </div>
             </div>
 
-            <!-- 标签页音频提示信息 -->
-            <div id="tabAudioHint" class="status-message info" style="display: none; margin-bottom: 15px;">
-                <strong>📋 标签页音频模式</strong><br>
-                点击"开始会议"后，浏览器会弹出对话框，请：<br>
-                1. 选择"Chrome 标签页"（或对应选项）<br>
-                2. 勾选"共享标签页音频"<br>
-                3. 选择要捕获音频的标签页（如 Google Meet）
+            <div id="tabAudioHint" class="status-message info" style="display: none;">
+                <strong>标签页音频模式</strong>
+                点击开始后请在浏览器弹窗中选择标签页，并勾选共享标签页音频。
             </div>
 
-            <!-- 音频输入设备选择（仅麦克风模式显示） -->
-            <div class="setting-item" id="audioInputContainer">
+            <div class="setting-item stack" id="audioInputContainer">
                 <label for="audioInput">输入设备</label>
                 <select id="audioInput" class="device-select">
                     <option value="">加载中...</option>
                 </select>
             </div>
-            <div class="setting-item">
+
+            <div class="setting-item stack">
                 <label for="primaryLanguage">主要语言</label>
                 <select id="primaryLanguage">
                     <option value="zh">中文 (简体)</option>
@@ -112,7 +98,8 @@
                     <option value="pt">Português</option>
                 </select>
             </div>
-            <div class="setting-item">
+
+            <div class="setting-item stack">
                 <label for="secondaryLanguage">第二语言（可选）</label>
                 <select id="secondaryLanguage">
                     <option value="">无</option>
@@ -128,7 +115,8 @@
                     <option value="pt">Português</option>
                 </select>
             </div>
-            <div class="setting-item">
+
+            <div class="setting-item stack">
                 <label for="fontSize">字体大小</label>
                 <select id="fontSize">
                     <option value="small">小</option>
@@ -139,13 +127,11 @@
         </div>
     </div>
 
-    <!-- 加载提示 -->
     <div id="loadingOverlay" class="loading-overlay" style="display: none;">
         <div class="loading-spinner"></div>
         <p>正在连接...</p>
     </div>
 
-    <!-- 错误提示 -->
     <div id="errorModal" class="modal" style="display: none;">
         <div class="modal-content">
             <span class="close">&times;</span>
@@ -154,7 +140,6 @@
         </div>
     </div>
 
-    <!-- 脚本 -->
     <script src="{{ url_for('static', filename='js/realtime-transcription.js') }}?v=20260320"></script>
     <script type="module" src="{{ url_for('static', filename='js/app.js') }}?v=20260320"></script>
 </body>
