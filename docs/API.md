@@ -2,405 +2,270 @@
 
 ## 概述
 
-MeetingEZ 通过浏览器端将音频分段上传至 OpenAI `gpt-4o-transcribe`（接口：`/v1/audio/transcriptions`）进行转写；随后在浏览器端调用文本模型对结果进行“后置处理”（纠错与按需翻译），不依赖后端中转。本文档描述分段策略、请求参数与字段。
+当前 Web 应用已经收敛为单一路径：
 
-## OpenAI /v1/audio/transcriptions 集成
+- 前端采集音频
+- 后端签发 OpenAI Realtime `client secret`
+- 前端通过 WebRTC 与 OpenAI 建立 transcription session
+- 后端代理翻译请求
 
-### 单通道
+不再使用：
+- 浏览器端保存 API Key
+- 分段上传 `/v1/audio/transcriptions`
+- 浏览器直连翻译接口
+- 前端 WebSocket + Base64 PCM 推流
 
-- 仅进行一路分段并发上传转写。
-- 语言来源：由“使用语言”选择器决定（主要语言或第二语言）。
-- 渲染：单栏顺序展示结果。
+## 页面与登录
 
-### 请求示例（浏览器端 FormData）
+### `GET /`
 
-```javascript
-const form = new FormData();
-form.append('model', 'gpt-4o-transcribe');
-form.append('language', 'ja'); // 例：主要语言
-form.append('response_format', 'json');
-form.append('prompt', tailText); // 例：上一段尾部上下文（可选）
-form.append('file', wavBlob, 'segment.wav');
+主页面。
 
-await fetch('https://api.openai.com/v1/audio/transcriptions', {
-  method: 'POST',
-  headers: { 'Authorization': `Bearer ${apiKey}` },
-  body: form
-});
-```
+### `GET|POST /login`
 
-### 分段与上下文策略
+访问码登录页。
 
-- 分段时长：8 秒
-- 重叠长度：1 秒（滑动步长 7 秒）
-- 上下文：将上一段的文本尾巴（约 200 字符）作为 `prompt` 传入，帮助模型延续上下文
-- 并发：允许多个分段同时上传，降低等待时间
+- 当 `ACCESS_CODE` 为空时，登录保护自动关闭。
+- 当 `ACCESS_CODE` 已配置时，所有页面与 API 都受 session 保护。
 
-### 会议结束处理
+### `GET /logout`
 
-当用户点击"结束会议"时：
-1. 立即设置关闭标志 `isShuttingDown = true`，停止产生新的音频分段
-2. 停止麦克风录音和音频上下文
-3. **保留**所有在途的转写请求继续处理（不执行 `abort()`）
-4. 允许后续的翻译和后置处理正常完成
-5. 这确保了最后一段内容不会因为过早终止而丢失
+清除 session 并回到登录页。
 
-```javascript
-// 停止录音时的处理
-function stopRecording() {
-    isShuttingDown = true;  // 标记关闭，不再产生新分段
-    isRecording = false;
-    
-    // 停止录音设备
-    if (mediaStream) {
-        mediaStream.getTracks().forEach(track => track.stop());
-    }
-    
-    // 不中断在途请求，让它们自然完成
-    // activeUploadControllers 中的请求会继续执行
-    console.log(`保留 ${activeUploadControllers.size} 个在途请求继续处理`);
+### `GET /health`
+
+健康检查。
+
+返回示例：
+
+```json
+{
+  "status": "healthy",
+  "service": "MeetingEZ",
+  "version": "0.2.0"
 }
 ```
 
-## （提示）已移除 Realtime API / WebRTC
+## 后端 API
 
-本项目已不再使用 OpenAI Realtime API 与 WebRTC。所有语音数据通过浏览器端分段编码后，使用 REST 接口 `/v1/audio/transcriptions` 上传并获取转写结果。
+### `POST /api/test-connection`
 
-## 音频处理
+测试后端 `OPENAI_API_KEY` 是否可用。
 
-### 音频输入源
+成功返回：
 
-MeetingEZ 支持两种音频输入源：
-
-#### 1. 标准麦克风输入（getUserMedia）
-
-```javascript
-// 获取麦克风权限
-navigator.mediaDevices.getUserMedia({
-  audio: {
-    echoCancellation: false,
-    noiseSuppression: false,
-    autoGainControl: false,
-    sampleRate: 48000,
-    channelCount: 1,
-    sampleSize: 16,
-    latency: 0.01,
-    deviceId: selectedDeviceId // 可选：指定设备
-  }
-})
-.then(stream => {
-  // 处理音频流
-});
-```
-
-#### 2. 浏览器标签页音频捕获（getDisplayMedia）
-
-使用 `getDisplayMedia` API 捕获其他浏览器标签页的音频，适合转录远程会议（如 Google Meet）。
-
-```javascript
-// 请求共享标签页及其音频
-const displayStream = await navigator.mediaDevices.getDisplayMedia({
-  video: true,   // 需要视频轨才能触发标签页选项
-  audio: true    // 关键：让用户勾选"共享标签页音频"
-});
-
-// 提取音频轨道
-const tabAudioTrack = displayStream.getAudioTracks()[0];
-
-// 检查是否成功获取音频
-if (!tabAudioTrack) {
-  throw new Error('未能获取标签页音频，请确保选择了"共享标签页音频"选项');
-}
-
-// 创建仅包含音频的 MediaStream
-const audioOnlyStream = new MediaStream([tabAudioTrack]);
-
-// 后续处理与麦克风输入相同
-const audioContext = new AudioContext({ sampleRate: 48000 });
-const source = audioContext.createMediaStreamSource(audioOnlyStream);
-// ...
-```
-
-**重要说明**：
-- 用户必须在浏览器弹窗中选择"Chrome 标签页"（或对应选项）
-- 必须勾选"共享标签页音频"或"共享该标签页音频"
-- Chrome/Edge 80+ 完整支持，Firefox 和 Safari 支持有限
-- 视频轨道仅用于触发 UI，可在获取音频后立即停止：
-  ```javascript
-  displayStream.getVideoTracks().forEach(track => track.stop());
-  ```
-
-#### 音频捕获与编码（会议主流程 48kHz）
-
-无论使用哪种输入源，音频处理流程相同：
-
-```javascript
-const audioContext = new AudioContext({ sampleRate: 48000 });
-const source = audioContext.createMediaStreamSource(stream); // stream 可以是麦克风或标签页
-const processor = audioContext.createScriptProcessor(2048, 1, 1);
-
-processor.onaudioprocess = (event) => {
-  const audioData = event.inputBuffer.getChannelData(0);
-  // 转换为 Int16Array 格式
-  const int16Data = new Int16Array(audioData.length);
-  for (let i = 0; i < audioData.length; i++) {
-    int16Data[i] = Math.max(-32768, Math.min(32767, audioData[i] * 32768));
-  }
-  // 使用浏览器端 WAV 封装后通过 REST 上传至 OpenAI
-};
-
-source.connect(processor);
-processor.connect(audioContext.destination);
-```
-
-### 音频格式转换
-```javascript
-function convertFloat32ToInt16(float32Array) {
-  const int16Array = new Int16Array(float32Array.length);
-  for (let i = 0; i < float32Array.length; i++) {
-    const sample = Math.max(-1, Math.min(1, float32Array[i]));
-    int16Array[i] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
-  }
-  return int16Array;
+```json
+{
+  "ok": true
 }
 ```
 
-## 翻译与后置处理（结构化 JSON，浏览器直连）
+失败返回：
 
-浏览器在收到 `/v1/audio/transcriptions` 的文本后，会调用 OpenAI Responses 接口 `/v1/responses`，使用 `gpt-4.1-mini-2025-04-14` 做最小化的结构化处理：
+```json
+{
+  "error": "..."
+}
+```
 
-- 语言判定：`originalLanguage`
-- 是否需要第一语言翻译（非第一语言时为 true）：`isNotPrimaryLanguage`
-- 第一语言翻译（需要时提供，否则为 null）：`primaryTranslation`
+### `POST /api/realtime-session`
 
-### 请求（浏览器 -> OpenAI /v1/responses）
-```javascript
-const payload = {
-  model: 'gpt-4.1-mini-2025-04-14',
-  input: [
-    { role: 'system', content: '...严格输出 JSON 的说明 ...' },
-    { role: 'user', content: JSON.stringify({
-        task: 'translate_transcript',
-        primary_language: 'zh',
-        secondary_language: 'ja',
-        original_language_hint: 'ja',
-        text: '原始转写文本'
-    }) }
-  ],
-  text: {
-    format: {
-      type: 'json_schema',
-      name: 'TranslateTranscript',
-      schema: {
-        $schema: 'http://json-schema.org/draft-07/schema#',
-        type: 'object',
-        additionalProperties: false,
-        required: ['originalLanguage', 'isNotPrimaryLanguage', 'primaryTranslation'],
-        properties: {
-          originalLanguage: { type: 'string' },
-          isNotPrimaryLanguage: { type: 'boolean' },
-          primaryTranslation: { anyOf: [{ type: 'string' }, { type: 'null' }] }
+创建 OpenAI Realtime transcription session 的 `client secret`。
+
+请求体：
+
+```json
+{
+  "language": "zh",
+  "prompt": ""
+}
+```
+
+后端当前创建的 session 配置：
+
+```json
+{
+  "session": {
+    "type": "transcription",
+    "audio": {
+      "input": {
+        "format": {
+          "type": "audio/pcm",
+          "rate": 24000
+        },
+        "noise_reduction": {
+          "type": "near_field"
+        },
+        "transcription": {
+          "model": "gpt-4o-transcribe",
+          "language": "zh"
+        },
+        "turn_detection": {
+          "type": "semantic_vad",
+          "eagerness": "high"
         }
-      },
-      strict: true
-    }
-  }
-};
-```
-
-### 渲染与存储策略
-- 首先以“原始转写”即时显示一行临时记录
-- 收到结构化结果后：保留原文；若需要翻译则紧随其后插入一行翻译（标记为 `isTranslation: true`）
-- 所有记录写入浏览器 Local Storage（键：`meetingEZ_transcripts`，含 `version` 与 `items`）
-
-## 本地存储
-
-### 数据存储结构
-```javascript
-const storageKey = 'meetingEZ_transcripts';
-const transcriptData = {
-  timestamp: Date.now(),
-  original: '原始文本',
-  translated: '翻译文本',
-  language: 'en',
-  confidence: 0.95
-};
-
-// 存储数据
-function saveTranscript(data) {
-  const existing = JSON.parse(localStorage.getItem(storageKey) || '[]');
-  existing.push(data);
-  localStorage.setItem(storageKey, JSON.stringify(existing));
-}
-
-// 读取数据
-function loadTranscripts() {
-  return JSON.parse(localStorage.getItem(storageKey) || '[]');
-}
-
-// 清空数据
-function clearTranscripts() {
-  localStorage.removeItem(storageKey);
-}
-```
-
-## 错误处理
-
-### 连接错误
-```javascript
-client.on('error', (error) => {
-  switch (error.type) {
-    case 'connection_failed':
-      showError('连接失败，请检查网络连接');
-      break;
-    case 'authentication_failed':
-      showError('API Key 无效，请重新输入');
-      break;
-    case 'rate_limit_exceeded':
-      showError('请求频率过高，请稍后重试');
-      break;
-    default:
-      showError('未知错误: ' + error.message);
-  }
-});
-```
-
-### 音频错误
-```javascript
-navigator.mediaDevices.getUserMedia({ audio: true })
-  .catch(error => {
-    switch (error.name) {
-      case 'NotAllowedError':
-        showError('麦克风权限被拒绝，请在浏览器设置中允许麦克风访问');
-        break;
-      case 'NotFoundError':
-        showError('未找到麦克风设备');
-        break;
-      case 'NotReadableError':
-        showError('麦克风被其他应用占用');
-        break;
-      default:
-        showError('获取麦克风失败: ' + error.message);
-    }
-  });
-```
-
-## 性能优化
-
-### 音频缓冲
-```javascript
-class AudioBuffer {
-  constructor(bufferSize = 24000) {
-    this.buffer = new Int16Array(bufferSize);
-    this.index = 0;
-    this.bufferSize = bufferSize;
-  }
-  
-  append(data) {
-    const remaining = this.bufferSize - this.index;
-    const toCopy = Math.min(data.length, remaining);
-    
-    this.buffer.set(data.subarray(0, toCopy), this.index);
-    this.index += toCopy;
-    
-    if (this.index >= this.bufferSize) {
-      this.flush();
-    }
-  }
-  
-  flush() {
-    if (this.index > 0) {
-      client.appendInputAudio(this.buffer.subarray(0, this.index));
-      this.index = 0;
-    }
+      }
+    },
+    "include": ["item.input_audio_transcription.logprobs"]
   }
 }
 ```
 
-### 节流处理
-```javascript
-function throttle(func, delay) {
-  let timeoutId;
-  let lastExecTime = 0;
-  
-  return function (...args) {
-    const currentTime = Date.now();
-    
-    if (currentTime - lastExecTime > delay) {
-      func.apply(this, args);
-      lastExecTime = currentTime;
-    } else {
-      clearTimeout(timeoutId);
-      timeoutId = setTimeout(() => {
-        func.apply(this, args);
-        lastExecTime = Date.now();
-      }, delay - (currentTime - lastExecTime));
-    }
-  };
+返回体：
+
+```json
+{
+  "clientSecret": "rt_...",
+  "expiresAt": 1234567890,
+  "session": {}
 }
 ```
 
-## 测试
+说明：
 
-### API 连接测试
-```javascript
-async function testAPIConnection(apiKey) {
-  try {
-    const client = new RealtimeClient({ apiKey });
-    await client.connect();
-    client.disconnect();
-    return { success: true, message: '连接成功' };
-  } catch (error) {
-    return { success: false, message: error.message };
-  }
+- 当前代码兼容两种返回格式：
+  - 顶层 `value` / `expires_at`
+  - 嵌套 `client_secret.value` / `client_secret.expires_at`
+
+### `POST /api/translate`
+
+后端代理翻译请求，避免前端暴露标准 API Key。
+
+请求体：
+
+```json
+{
+  "text": "こんにちは",
+  "primaryLanguage": "zh",
+  "secondaryLanguage": "ja",
+  "originalLanguageHint": "ja",
+  "context": "[1] (zh) 上一条上下文",
+  "model": "gpt-5.4-mini-2026-03-17",
+  "reasoningEffort": "low"
 }
 ```
 
-### 音频设备测试
-```javascript
-async function testAudioDevices() {
-  try {
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const audioInputs = devices.filter(device => device.kind === 'audioinput');
-    
-    if (audioInputs.length === 0) {
-      throw new Error('未找到音频输入设备');
-    }
-    
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    stream.getTracks().forEach(track => track.stop());
-    
-    return { success: true, devices: audioInputs };
-  } catch (error) {
-    return { success: false, message: error.message };
-  }
+当前行为：
+
+- 默认模型来自环境变量 `TRANSLATION_MODEL`
+- 默认为 `gpt-5.4-mini-2026-03-17`
+- 可选 reasoning effort 来自环境变量 `TRANSLATION_REASONING_EFFORT`
+- 默认为 `low`
+- 当前代码仅在翻译模型名以 `gpt-5` 开头时发送 `reasoning.effort`
+- 输出严格 JSON
+- 后端会做结果清洗，防止“同语种翻译”
+
+返回体：
+
+```json
+{
+  "originalLanguage": "ja",
+  "primaryTranslation": "你好",
+  "secondaryTranslation": null
 }
 ```
 
-## 配置参数
+规则：
 
-### 音频参数（会议主流程）
-- **采样率**: 48000 Hz
-- **位深度**: 16-bit
-- **声道数**: 单声道
-- **格式**: PCM
+- 原文是第一语言：`primaryTranslation = null`
+- 原文是第二语言：`secondaryTranslation = null`
+- 原文是其他语言：只翻到第一语言
 
-### 音频参数（麦克风测试）
-- **采样率**: 24000 Hz
-- **位深度**: 16-bit
-- **声道数**: 单声道
-- **格式**: PCM
+## 前端与 OpenAI Realtime
 
-### 网络参数
-- **HTTP 超时**: 由浏览器与目标服务决定（内置重试：429/5xx 指数退避次数 2）
+### 连接流程
 
-### 性能参数（前端实现）
-- **分段窗口**: 8 秒
-- **重叠**: 1 秒
-- **ScriptProcessor 缓冲**: 2048 样本
-- **VAD 阈值（RMS）**: 0.02（启发式）
-- **持续静音判定**: 连续 30 帧（约 600ms）
+1. 前端请求 `/api/realtime-session`
+2. 后端向 OpenAI 创建 `client secret`
+3. 前端创建 `RTCPeerConnection`
+4. 前端添加音频轨道并创建 `oai-events` data channel
+5. 前端生成 offer
+6. 前端将 SDP POST 到 `https://api.openai.com/v1/realtime/calls`
+7. OpenAI 返回 answer SDP
+8. DataChannel 打开后开始接收转写事件
 
----
+### 前端处理的关键事件
 
-*最后更新: 2025年10月*
+| 事件 | 用途 |
+|------|------|
+| `input_audio_buffer.speech_started` | 开始显示“正在识别...” |
+| `conversation.item.input_audio_transcription.delta` | 更新 live transcript |
+| `conversation.item.input_audio_transcription.completed` | 写入最终字幕 |
+| `error` | 展示连接或会话错误 |
+
+### 状态建模
+
+前端按 `item_id` 维护两层文本：
+
+- `live`
+  增量渲染中的文本
+- `final`
+  完整提交后的文本
+
+## 前端 UI 状态
+
+当前页面结构：
+
+- 全屏字幕区
+- 底部吸附工具栏
+- 设置浮层
+
+底部工具栏包含：
+
+- 音量条
+- 计时/状态文本
+- 麦克风测试
+- 自动滚动
+- 下载
+- 清空
+- 设置
+- 单一 `开始/结束` 切换按钮
+
+设置浮层包含：
+
+- API 测试按钮
+- 连接状态
+- 音频输入源
+- 麦克风设备选择
+- 主要语言 / 第二语言
+- 字体大小
+
+## 性能日志
+
+当前实现已经加入性能日志，便于排查：
+
+### 后端日志
+
+统一前缀：
+
+```text
+[perf]
+```
+
+关键阶段：
+
+- `realtime_session_created`
+- `realtime_session_failed`
+- `translate_request_received`
+- `translate_openai_response`
+- `translate_request_completed`
+- `translate_request_failed`
+
+### 前端日志
+
+浏览器 console 关键前缀：
+
+- `Realtime [perf]`
+- `UI [perf]`
+
+用于观察：
+
+- `speech_started -> first delta`
+- `first delta -> completed`
+- 翻译请求总耗时
+
+## 认证与错误约定
+
+- 未登录访问 API：返回 `401 {"error":"Unauthorized"}`
+- 前端在收到 `401` 后跳转 `/login`
+- 后端所有 OpenAI 代理错误统一返回 JSON `error` 字段
