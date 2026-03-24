@@ -19,6 +19,7 @@ const STORAGE_VERSION = 2;
 const HIDE_BEFORE_KEY = 'meetingEZ_hideBefore';
 
 let realtimeClient = null;
+let currentContextPack = null;
 
 const TRANSLATION_CONTEXT_SIZE = 20;
 let translationContext = [];
@@ -27,6 +28,18 @@ let volumeAudioContext = null;
 let volumeAnalyser = null;
 let meetingStartedAt = null;
 let meetingTimerInterval = null;
+let dockResizeObserver = null;
+const DEFAULT_LANGUAGE_MODE = 'single_primary';
+const NO_PROJECT_ID = '__none__';
+const pageLaunchContext = {
+    mode: document.body?.dataset.entryMode || 'quick',
+    projectId: document.body?.dataset.sessionProject || '',
+    meetingDir: document.body?.dataset.sessionMeeting || '',
+    meetingTitle: document.body?.dataset.sessionTitle || '',
+    languageMode: document.body?.dataset.sessionLanguageMode || '',
+    primaryLanguage: document.body?.dataset.sessionPrimaryLanguage || '',
+    secondaryLanguage: document.body?.dataset.sessionSecondaryLanguage || ''
+};
 
 function getProcessingSettings() {
     return {
@@ -34,6 +47,68 @@ function getProcessingSettings() {
         enableGlossary: !!document.getElementById('enableGlossary')?.checked,
         glossary: document.getElementById('glossaryInput')?.value || ''
     };
+}
+
+function getLanguageMode() {
+    return document.getElementById('languageMode')?.value || DEFAULT_LANGUAGE_MODE;
+}
+
+function getSelectedWorkspaceProject() {
+    return document.getElementById('workspaceProject')?.value || '';
+}
+
+function isQuickModeProject(projectId) {
+    return !projectId || projectId === NO_PROJECT_ID;
+}
+
+function buildEmptyContextPack() {
+    return {
+        projectId: NO_PROJECT_ID,
+        projectName: '',
+        languageMode: getLanguageMode(),
+        primaryLanguage: document.getElementById('primaryLanguage')?.value || 'zh',
+        secondaryLanguage: (document.getElementById('secondaryLanguage')?.value || '').trim(),
+        projectSummary: '',
+        backgroundSummary: '',
+        confirmedTermsCount: 0,
+        glossaryLines: [],
+        pendingActions: [],
+        recentMeetings: [],
+        realtimePrompt: ''
+    };
+}
+
+function updateMeetingEntrySummary() {
+    const badgeEl = document.getElementById('meetingModeBadge');
+    const summaryEl = document.getElementById('meetingContextSummary');
+    if (!badgeEl || !summaryEl) return;
+
+    const projectId = getSelectedWorkspaceProject();
+    const quickMode = isQuickModeProject(projectId);
+    const projectName = currentContextPack?.projectName || '';
+    const meetingTitle = pageLaunchContext.meetingTitle || '';
+
+    badgeEl.textContent = quickMode ? '快速模式' : '项目模式';
+    badgeEl.classList.toggle('app-badge-muted', quickMode);
+
+    if (quickMode) {
+        summaryEl.textContent = '未关联项目，可直接开始实时转写。';
+        return;
+    }
+
+    const pieces = [];
+    if (projectName) {
+        pieces.push(`项目：${projectName}`);
+    }
+    if (meetingTitle) {
+        pieces.push(`会议：${meetingTitle}`);
+    } else if (pageLaunchContext.meetingDir) {
+        pieces.push(`会议目录：${pageLaunchContext.meetingDir}`);
+    }
+    if (!pieces.length) {
+        pieces.push('已关联项目，可加载术语和近期上下文增强。');
+    }
+    summaryEl.textContent = pieces.join(' · ');
 }
 
 function updateGlossaryInputState() {
@@ -176,11 +251,33 @@ function stopMeetingTimer() {
     updateMeetingTimer();
 }
 
+function updateFloatingDockLayout() {
+    const dock = document.getElementById('floatingDock');
+    if (!dock) return;
+    const dockHeight = Math.ceil(dock.getBoundingClientRect().height);
+    document.documentElement.style.setProperty('--floating-dock-height', `${dockHeight}px`);
+}
+
+function initializeFloatingDockLayout() {
+    updateFloatingDockLayout();
+    window.addEventListener('resize', updateFloatingDockLayout);
+
+    const dock = document.getElementById('floatingDock');
+    if (!dock || typeof ResizeObserver !== 'function') return;
+
+    dockResizeObserver = new ResizeObserver(() => {
+        updateFloatingDockLayout();
+    });
+    dockResizeObserver.observe(dock);
+}
+
 // 初始化
 async function init() {
+    initializeFloatingDockLayout();
     loadSettings();
     setupEventListeners();
     await loadAudioDevices();
+    await loadWorkspaceContextPack({ silent: true });
     updateControls();
     initializeAutoScroll();
 }
@@ -197,14 +294,30 @@ function loadSettings() {
     }
     updateAudioInputVisibility();
 
-    const primaryLang = localStorage.getItem('meetingEZ_primaryLanguage');
+    const primaryLang = pageLaunchContext.primaryLanguage || localStorage.getItem('meetingEZ_primaryLanguage');
     if (primaryLang) {
         document.getElementById('primaryLanguage').value = primaryLang;
     }
 
-    const secondaryLang = localStorage.getItem('meetingEZ_secondaryLanguage') || '';
+    const secondaryLang = pageLaunchContext.secondaryLanguage || localStorage.getItem('meetingEZ_secondaryLanguage') || '';
     const secSelect = document.getElementById('secondaryLanguage');
     if (secSelect) secSelect.value = secondaryLang;
+
+    const savedLanguageMode = pageLaunchContext.languageMode || localStorage.getItem('meetingEZ_languageMode') ||
+        (secondaryLang ? 'bilingual' : DEFAULT_LANGUAGE_MODE);
+    const languageModeSelect = document.getElementById('languageMode');
+    if (languageModeSelect) languageModeSelect.value = savedLanguageMode;
+
+    const savedWorkspaceProject = pageLaunchContext.projectId || localStorage.getItem('meetingEZ_workspaceProject');
+    const workspaceProject = document.getElementById('workspaceProject');
+    if (workspaceProject) {
+        const hasSavedOption = savedWorkspaceProject && Array.from(workspaceProject.options).some((option) => option.value === savedWorkspaceProject);
+        if (hasSavedOption) {
+            workspaceProject.value = savedWorkspaceProject;
+        } else if (workspaceProject.options.length > 0) {
+            workspaceProject.value = workspaceProject.options[0].value;
+        }
+    }
 
     const enableCorrection = localStorage.getItem('meetingEZ_enableCorrection');
     document.getElementById('enableCorrection').checked = enableCorrection !== 'false';
@@ -219,6 +332,7 @@ function loadSettings() {
     updateGlossaryInputState();
 
     enableSplitView(false);
+    updateMeetingEntrySummary();
 }
 
 function setupEventListeners() {
@@ -267,14 +381,26 @@ function setupEventListeners() {
 
     document.getElementById('primaryLanguage').addEventListener('change', (e) => {
         localStorage.setItem('meetingEZ_primaryLanguage', e.target.value);
+        void loadWorkspaceContextPack({ silent: true });
     });
 
     const secSelect = document.getElementById('secondaryLanguage');
     if (secSelect) {
         secSelect.addEventListener('change', (e) => {
             localStorage.setItem('meetingEZ_secondaryLanguage', (e.target.value || '').trim());
+            void loadWorkspaceContextPack({ silent: true });
         });
     }
+
+    document.getElementById('languageMode').addEventListener('change', (e) => {
+        localStorage.setItem('meetingEZ_languageMode', e.target.value);
+        void loadWorkspaceContextPack({ silent: true });
+    });
+
+    document.getElementById('workspaceProject').addEventListener('change', (e) => {
+        localStorage.setItem('meetingEZ_workspaceProject', e.target.value);
+        void loadWorkspaceContextPack({ silent: false });
+    });
 
     document.getElementById('enableCorrection').addEventListener('change', (e) => {
         localStorage.setItem('meetingEZ_enableCorrection', String(e.target.checked));
@@ -287,6 +413,7 @@ function setupEventListeners() {
 
     document.getElementById('glossaryInput').addEventListener('input', (e) => {
         localStorage.setItem('meetingEZ_glossary', e.target.value);
+        updateContextPackPreview();
     });
 
     document.getElementById('fontSize').addEventListener('change', (e) => {
@@ -379,6 +506,7 @@ async function startMeeting() {
 
         startVolumeMonitor(mediaStream);
         meetingStartedAt = Date.now();
+        await loadWorkspaceContextPack({ silent: true });
         await initRealtimeConnection();
 
         isConnected = true;
@@ -403,6 +531,7 @@ async function startMeeting() {
 // 初始化 Realtime WebRTC 连接（不再需要 API Key）
 async function initRealtimeConnection() {
     const primaryLang = document.getElementById('primaryLanguage').value || null;
+    const languageMode = getLanguageMode();
     const RealtimeTranscriptionClass = window.RealtimeTranscription;
     if (typeof RealtimeTranscriptionClass !== 'function') {
         throw new Error('RealtimeTranscription 未正确加载');
@@ -411,7 +540,7 @@ async function initRealtimeConnection() {
     realtimeClient = new RealtimeTranscriptionClass({
         model: 'gpt-4o-transcribe',
         language: primaryLang,
-        prompt: '',
+        prompt: buildRealtimePrompt(),
 
         onConnected: () => {
             console.log('Realtime 连接成功');
@@ -508,6 +637,7 @@ async function initRealtimeConnection() {
                     postProcessText(normalized, {
                         primaryLanguage: primaryLang,
                         secondaryLanguage: secondaryLang,
+                        languageMode,
                         originalLanguageHint: newTranscript.originalLanguage,
                         enableCorrection: processingSettings.enableCorrection,
                         enableGlossary: processingSettings.enableGlossary,
@@ -753,7 +883,7 @@ function updateDisplay(channel = 'primary') {
         tc.innerHTML = `
             <div class="welcome-message">
                 <p>欢迎使用 MeetingEZ！</p>
-                <p>点击底部开始按钮开始实时转写。</p>
+                <p>点击底部开始按钮开始实时转写，或返回控制台切换会议流程。</p>
             </div>
         `;
         return;
@@ -783,6 +913,154 @@ function updateDisplay(channel = 'primary') {
         updateStreamingDisplay(channel);
         if (document.getElementById('autoScroll').classList.contains('btn-primary')) {
             scrollToBottom();
+        }
+    }
+}
+
+function buildMergedGlossary() {
+    const manualGlossary = document.getElementById('glossaryInput')?.value || '';
+    const lines = [];
+    const seen = new Set();
+
+    const pushLine = (value) => {
+        const normalized = (value || '').trim();
+        if (!normalized) return;
+        const key = normalized.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        lines.push(normalized);
+    };
+
+    (currentContextPack?.glossaryLines || []).forEach(pushLine);
+    manualGlossary.split('\n').forEach(pushLine);
+    return lines.join('\n');
+}
+
+function buildMeetingContextSummary() {
+    const parts = [];
+    if (currentContextPack?.projectSummary) {
+        parts.push(`项目摘要: ${currentContextPack.projectSummary}`);
+    }
+    if (currentContextPack?.backgroundSummary) {
+        parts.push(`背景说明: ${currentContextPack.backgroundSummary}`);
+    }
+    if (currentContextPack?.pendingActions?.length) {
+        parts.push(`近期行动项: ${currentContextPack.pendingActions.join('；')}`);
+    }
+    if (currentContextPack?.recentMeetings?.length) {
+        parts.push(`近期会议: ${currentContextPack.recentMeetings.join('；')}`);
+    }
+    return parts.join('\n');
+}
+
+function buildRealtimePrompt() {
+    const parts = [];
+    if (currentContextPack?.realtimePrompt) {
+        parts.push(currentContextPack.realtimePrompt);
+    }
+
+    const mergedGlossary = buildMergedGlossary();
+    if (mergedGlossary) {
+        const condensed = mergedGlossary
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .slice(0, 16)
+            .join('；');
+        if (condensed) {
+            parts.push(`术语参考：${condensed}`);
+        }
+    }
+
+    return parts.join(' ');
+}
+
+function updateContextPackPreview() {
+    const statusEl = document.getElementById('contextPackStatus');
+    const previewEl = document.getElementById('contextPackPreview');
+    if (!statusEl || !previewEl) return;
+
+    if (!currentContextPack) {
+        statusEl.textContent = isQuickModeProject(getSelectedWorkspaceProject())
+            ? '当前为快速模式，未加载项目增强包'
+            : '还未加载项目增强包';
+        statusEl.className = 'status-message info';
+        previewEl.textContent = '';
+        updateMeetingEntrySummary();
+        return;
+    }
+
+    if (!currentContextPack.projectName) {
+        statusEl.textContent = '当前为快速模式，未加载项目增强包';
+        statusEl.className = 'status-message info';
+        previewEl.textContent = '仍会保留实时转写、智能修正和翻译能力。';
+        updateMeetingEntrySummary();
+        return;
+    }
+
+    const projectName = currentContextPack.projectName || '当前项目';
+    statusEl.textContent = `已加载 ${projectName} 的增强包`;
+    statusEl.className = 'status-message success';
+
+    const pieces = [
+        `语言模式：${currentContextPack.languageMode === 'bilingual' ? '双语言会议' : '单主语言会议'}`,
+        `术语 ${currentContextPack.confirmedTermsCount || 0} 条`
+    ];
+    if (currentContextPack.pendingActions?.length) {
+        pieces.push(`待办摘要 ${currentContextPack.pendingActions.length} 条`);
+    }
+    if (currentContextPack.recentMeetings?.length) {
+        pieces.push(`近期会议 ${currentContextPack.recentMeetings.length} 条`);
+    }
+    previewEl.textContent = pieces.join(' · ');
+    updateMeetingEntrySummary();
+}
+
+async function loadWorkspaceContextPack(options = {}) {
+    const silent = options.silent === true;
+    const project = getSelectedWorkspaceProject();
+    const primaryLanguage = document.getElementById('primaryLanguage')?.value || 'zh-CN';
+    const secondaryLanguage = (document.getElementById('secondaryLanguage')?.value || '').trim();
+    const languageMode = getLanguageMode();
+
+    const params = new URLSearchParams({
+        project,
+        primaryLanguage,
+        secondaryLanguage,
+        languageMode
+    });
+
+    if (isQuickModeProject(project)) {
+        currentContextPack = buildEmptyContextPack();
+        updateContextPackPreview();
+        if (!silent) {
+            showStatus('当前为快速模式，不加载项目增强包', 'info');
+        }
+        return;
+    }
+
+    try {
+        const resp = await fetch(`/api/workspace/context-pack?${params.toString()}`);
+        if (resp.status === 401) {
+            window.location.href = '/login';
+            return;
+        }
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.error || `HTTP ${resp.status}`);
+        }
+
+        currentContextPack = await resp.json();
+        updateContextPackPreview();
+        if (!silent) {
+            showStatus('项目增强包已刷新', 'success');
+        }
+    } catch (error) {
+        console.warn('加载项目增强包失败:', error);
+        currentContextPack = null;
+        updateContextPackPreview();
+        if (!silent) {
+            showStatus('项目增强包加载失败', 'error');
         }
     }
 }
@@ -890,7 +1168,7 @@ function clearTranscript() {
         document.getElementById('transcriptContent').innerHTML = `
             <div class="welcome-message">
                 <p>欢迎使用 MeetingEZ！</p>
-                <p>点击底部开始按钮开始实时转写。</p>
+                <p>点击底部开始按钮开始实时转写，或返回控制台切换会议流程。</p>
             </div>
         `;
         rebuildTranslationContext();
@@ -943,7 +1221,7 @@ function updateFontSize() {
 }
 
 function disableSettings() {
-    ['audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize', 'audioSourceMic', 'audioSourceTab', 'enableCorrection', 'enableGlossary', 'glossaryInput'].forEach(id => {
+    ['audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize', 'audioSourceMic', 'audioSourceTab', 'enableCorrection', 'enableGlossary', 'glossaryInput', 'languageMode', 'workspaceProject'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.disabled = true;
     });
@@ -954,7 +1232,7 @@ function disableSettings() {
 }
 
 function enableSettings() {
-    ['audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize', 'audioSourceMic', 'audioSourceTab', 'enableCorrection', 'enableGlossary', 'glossaryInput'].forEach(id => {
+    ['audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize', 'audioSourceMic', 'audioSourceTab', 'enableCorrection', 'enableGlossary', 'glossaryInput', 'languageMode', 'workspaceProject'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.disabled = false;
     });
@@ -1152,10 +1430,12 @@ function initializeAutoScroll() {
 async function postProcessText(originalText, opts = {}) {
     const primaryLanguage = opts.primaryLanguage || 'zh';
     const secondaryLanguage = opts.secondaryLanguage || '';
+    const languageMode = opts.languageMode || getLanguageMode();
     const originalLanguageHint = opts.originalLanguageHint || primaryLanguage;
     const enableCorrection = !!opts.enableCorrection;
     const enableGlossary = !!opts.enableGlossary;
-    const glossary = opts.glossary || '';
+    const glossary = enableGlossary ? (buildMergedGlossary() || opts.glossary || '') : '';
+    const meetingContext = buildMeetingContextSummary();
     const translateStartedAt = performance.now();
 
     const contextInfo = translationContext.length > 0
@@ -1169,10 +1449,12 @@ async function postProcessText(originalText, opts = {}) {
             text: originalText,
             primaryLanguage,
             secondaryLanguage,
+            languageMode,
             originalLanguageHint,
             enableCorrection,
             enableGlossary,
             glossary,
+            meetingContext,
             context: contextInfo
         })
     });

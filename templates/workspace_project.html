@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ project.name }} - MeetingEZ</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+</head>
+<body class="workspace-page">
+    <div class="workspace-shell">
+        <div class="workspace-nav">
+            <div class="workspace-nav-title">
+                <a href="{{ url_for('main.workspace') }}" class="workspace-nav-link">返回控制台</a>
+                <span>/</span>
+                <span>{{ project.name }}</span>
+            </div>
+        </div>
+
+        <header class="workspace-header">
+            <div>
+                <p class="workspace-eyebrow">Project Workspace</p>
+                <h1>{{ project.name }}</h1>
+                <p class="workspace-subtitle">{{ project.description or '这里管理项目级信息、知识维护入口和会议列表。' }}</p>
+            </div>
+            <p class="workspace-header-note">{{ project.meeting_count }} 场会议 · {{ project.pending_asr + project.pending_minutes }} 个待处理项 · {{ project.glossary_confirmed }} 条已确认术语</p>
+        </header>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <section class="workspace-flash-stack">
+            {% for category, message in messages %}
+            <div class="workspace-flash workspace-flash-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        </section>
+        {% endif %}
+        {% endwith %}
+
+        <section class="workspace-section">
+            <div class="workspace-section-head">
+                <div>
+                    <p class="workspace-launch-eyebrow">Section 1</p>
+                    <h2>项目基本信息</h2>
+                </div>
+            </div>
+            <div class="workspace-detail-grid">
+                <article class="workspace-panel">
+                    <div class="workspace-kv-list">
+                        <div class="workspace-kv">
+                            <span>项目路径</span>
+                            <strong>{{ project.path }}</strong>
+                        </div>
+                        <div class="workspace-kv">
+                            <span>启动日期</span>
+                            <strong>{{ project.start_date }}</strong>
+                        </div>
+                        <div class="workspace-kv">
+                            <span>团队</span>
+                            <strong>{{ project.team|join('、') if project.team else '待补充' }}</strong>
+                        </div>
+                    </div>
+                    <div class="workspace-pill-row">
+                        <span class="workspace-pill">会议 {{ project.meeting_count }}</span>
+                        <span class="workspace-pill">待 ASR {{ project.pending_asr }}</span>
+                        <span class="workspace-pill">待纪要 {{ project.pending_minutes }}</span>
+                        <span class="workspace-pill">超期行动项 {{ project.actions_overdue }}</span>
+                    </div>
+
+                    {% if recent_actions %}
+                    <div class="workspace-subsection">
+                        <h3>最近行动项</h3>
+                        <div class="workspace-simple-list">
+                            {% for action in recent_actions %}
+                            <div class="workspace-simple-row">
+                                <strong>{{ action.id }}</strong>
+                                <span>{{ action.task }}</span>
+                                <span>{{ action.owner }}</span>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    {% endif %}
+                </article>
+
+                <article class="workspace-panel">
+                    <div class="workspace-card-header">
+                        <div>
+                            <p class="workspace-launch-eyebrow">New Meeting</p>
+                            <h3>新建会议</h3>
+                        </div>
+                    </div>
+                    <form method="POST" action="{{ url_for('main.workspace_project_create_meeting', project_id=project.id) }}" class="workspace-form">
+                        <label for="meeting_title">会议标题</label>
+                        <input id="meeting_title" name="meeting_title" type="text" placeholder="例如：周会 / 客户讨论 / 需求评审" required>
+
+                        <div class="workspace-form-row">
+                            <div>
+                                <label for="meeting_date">会议日期</label>
+                                <input id="meeting_date" name="meeting_date" type="date" value="{{ default_meeting_date }}" required>
+                            </div>
+                            <div>
+                                <label for="meeting_type">会议类型</label>
+                                <select id="meeting_type" name="meeting_type">
+                                    {% for value, label in meeting_type_options %}
+                                    <option value="{{ value }}">{{ label }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="workspace-form-row">
+                            <div>
+                                <label for="language_mode">语言模式</label>
+                                <select id="language_mode" name="language_mode">
+                                    <option value="single_primary">单主语言会议</option>
+                                    <option value="bilingual">双语言会议</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="primary_language">主要语言</label>
+                                <select id="primary_language" name="primary_language">
+                                    {% for value, label in language_options %}
+                                    <option value="{{ value }}" {% if value == 'zh' %}selected{% endif %}>{{ label }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="workspace-form-row">
+                            <div>
+                                <label for="secondary_language">第二语言</label>
+                                <select id="secondary_language" name="secondary_language">
+                                    <option value="">无</option>
+                                    {% for value, label in language_options %}
+                                    <option value="{{ value }}">{{ label }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div>
+                                <label for="notes">备注</label>
+                                <input id="notes" name="notes" type="text" placeholder="可选，写入会议元信息">
+                            </div>
+                        </div>
+
+                        <button type="submit" class="btn btn-success">创建会议</button>
+                    </form>
+                </article>
+            </div>
+        </section>
+
+        <section class="workspace-section">
+            <div class="workspace-section-head">
+                <div>
+                    <p class="workspace-launch-eyebrow">Section 2</p>
+                    <h2>数据维护入口</h2>
+                </div>
+            </div>
+            <div class="workspace-maintenance-grid">
+                <article class="workspace-panel">
+                    <div class="workspace-card-header">
+                        <div>
+                            <p class="workspace-launch-eyebrow">Glossary</p>
+                            <h3>术语维护</h3>
+                        </div>
+                        <span class="workspace-pill">{{ project.glossary_confirmed }} 已确认 / {{ project.pending_term_count }} 待处理</span>
+                    </div>
+                    <p class="workspace-launch-text">维护项目术语、别名和待审核建议，后续实时转写和纪要生成都会优先使用这里的知识。</p>
+                    <div class="workspace-card-actions">
+                        <a href="{{ url_for('main.workspace_project_glossary', project_id=project.id) }}" class="btn btn-outline">进入术语维护</a>
+                    </div>
+                </article>
+
+                <article class="workspace-panel">
+                    <div class="workspace-card-header">
+                        <div>
+                            <p class="workspace-launch-eyebrow">Background</p>
+                            <h3>背景说明维护</h3>
+                        </div>
+                        <span class="workspace-pill">{{ '已维护' if project.background_exists else '待补充' }}</span>
+                    </div>
+                    <p class="workspace-launch-text">{{ project.background_excerpt or '还没有背景说明，建议先补充项目背景、业务流程和团队角色。' }}</p>
+                    <div class="workspace-card-actions">
+                        <a href="{{ url_for('main.workspace_project_background', project_id=project.id) }}" class="btn btn-outline">进入背景维护</a>
+                    </div>
+                </article>
+            </div>
+        </section>
+
+        <section class="workspace-section">
+            <div class="workspace-section-head">
+                <div>
+                    <p class="workspace-launch-eyebrow">Section 3</p>
+                    <h2>会议列表</h2>
+                </div>
+            </div>
+
+            {% if meetings %}
+            <div class="workspace-meeting-list">
+                {% for meeting in meetings %}
+                <article class="workspace-meeting-card">
+                    <div class="workspace-meeting-head">
+                        <div>
+                            <h3>{{ meeting.title }}</h3>
+                            <p class="workspace-meeting-subtitle">{{ meeting.date }} · {{ meeting.type }} · {{ meeting.language_profile }}</p>
+                        </div>
+                        <span class="workspace-status-badge workspace-status-badge-{{ meeting.status_tone }}">{{ meeting.pending_label }}</span>
+                    </div>
+
+                    {% if meeting.notes %}
+                    <p class="workspace-launch-text">{{ meeting.notes }}</p>
+                    {% endif %}
+
+                    <div class="workspace-card-actions">
+                        <a href="{{ url_for('main.realtime', mode='project', project=project.id, meeting=meeting.dir_name, meetingTitle=meeting.title, primaryLanguage=meeting.primary_language, secondaryLanguage=meeting.secondary_language or '', languageMode=meeting.language_mode) }}" class="btn btn-outline">进入实时页</a>
+
+                        <form method="POST" action="{{ url_for('main.workspace_meeting_process', project_id=project.id, meeting_dir=meeting.dir_name) }}">
+                            <input type="hidden" name="action" value="full">
+                            <button type="submit" class="btn btn-outline">完整处理</button>
+                        </form>
+
+                        <form method="POST" action="{{ url_for('main.workspace_meeting_process', project_id=project.id, meeting_dir=meeting.dir_name) }}">
+                            <input type="hidden" name="action" value="minutes">
+                            <button type="submit" class="btn btn-outline">仅处理会议纪要</button>
+                        </form>
+
+                        <a href="{{ url_for('main.workspace_meeting_audio', project_id=project.id, meeting_dir=meeting.dir_name) }}" class="btn btn-outline">音频 {{ meeting.audio_count }}</a>
+                    </div>
+
+                    <div class="workspace-subsection">
+                        <h4>会议文件</h4>
+                        {% if meeting.files %}
+                        <div class="workspace-file-list">
+                            {% for file in meeting.files %}
+                            <div class="workspace-file-row">
+                                <div class="workspace-file-meta">
+                                    <strong>{{ file.label }}</strong>
+                                    <span>{{ file.name }}</span>
+                                    <span>{{ file.size_label }} · {{ file.updated_at }}</span>
+                                </div>
+                                <div class="workspace-file-actions">
+                                    <a href="{{ url_for('main.workspace_meeting_file', project_id=project.id, meeting_dir=meeting.dir_name, filename=file.name) }}" class="btn btn-small btn-outline">查看</a>
+                                    {% if file.editable %}
+                                    <a href="{{ url_for('main.workspace_meeting_file', project_id=project.id, meeting_dir=meeting.dir_name, filename=file.name) }}" class="btn btn-small btn-outline">编辑</a>
+                                    {% endif %}
+                                    <a href="{{ url_for('main.workspace_meeting_file_download', project_id=project.id, meeting_dir=meeting.dir_name, filename=file.name) }}" class="btn btn-small btn-outline">下载</a>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <p class="workspace-empty-inline">当前会议还没有可展示的文本或结构化文件。</p>
+                        {% endif %}
+                    </div>
+                </article>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="workspace-empty">
+                <h2>当前项目还没有会议</h2>
+                <p>可以先在上面的“新建会议”卡片创建第一场会议，然后上传音频或进入实时页。</p>
+            </div>
+            {% endif %}
+        </section>
+    </div>
+</body>
+</html>

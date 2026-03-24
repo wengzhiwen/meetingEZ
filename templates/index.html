@@ -7,13 +7,20 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
 </head>
-<body>
+<body
+    data-entry-mode="{{ entry_mode }}"
+    data-session-project="{{ session_project_id }}"
+    data-session-meeting="{{ session_meeting_dir }}"
+    data-session-title="{{ session_meeting_title }}"
+    data-session-language-mode="{{ initial_language_mode }}"
+    data-session-primary-language="{{ initial_primary_language }}"
+    data-session-secondary-language="{{ initial_secondary_language }}">
     <div class="container app-shell">
         <div class="transcript-container">
             <div id="transcriptContent" class="transcript-content">
                 <div class="welcome-message">
                     <p>欢迎使用 MeetingEZ！</p>
-                    <p>点击底部开始按钮开始实时转写。</p>
+                    <p>点击底部开始按钮开始实时转写，或返回控制台切换到别的项目会议流程。</p>
                 </div>
             </div>
             <!-- 当选择第二语言时，将把上面的 transcriptContent 替换为以下左右分屏容器：
@@ -23,20 +30,37 @@
             </div> -->
         </div>
 
-        <div class="floating-dock">
-            <div class="dock-meta">
-                <div class="volume-meter compact">
-                    <div id="volumeBar" class="volume-bar"></div>
+        <div id="floatingDock" class="floating-dock">
+            <div class="dock-summary">
+                <div class="dock-brand">
+                    <div class="dock-title-row">
+                        <p class="app-eyebrow">MeetingEZ</p>
+                        <span id="meetingModeBadge" class="app-badge {% if entry_mode != 'project' %}app-badge-muted{% endif %}">{{ session_mode_label }}</span>
+                    </div>
+                    <div class="dock-heading-row">
+                        <h1>{{ page_heading }}</h1>
+                        <p id="meetingContextSummary" class="dock-summary-text">{{ session_summary }}</p>
+                    </div>
                 </div>
-                <div id="meetingTimer" class="meeting-timer">未开始</div>
+                <div class="dock-summary-actions">
+                    <a href="{{ url_for('main.index') }}" class="btn btn-small btn-outline">返回控制台</a>
+                </div>
             </div>
-            <div class="dock-tools">
-                <button id="testMicrophone" class="btn btn-icon btn-outline" title="测试麦克风" aria-label="测试麦克风">测</button>
-                <button id="autoScroll" class="btn btn-icon btn-primary" title="自动滚动" aria-label="自动滚动">滚</button>
-                <button id="downloadTranscript" class="btn btn-icon btn-outline" title="下载" aria-label="下载" disabled>下</button>
-                <button id="clearTranscript" class="btn btn-icon btn-outline" title="清空" aria-label="清空" disabled>空</button>
-                <button id="settingsToggle" class="btn btn-icon btn-outline" title="设置" aria-label="设置">设</button>
-                <button id="meetingAction" class="btn btn-success" disabled>开始</button>
+            <div class="dock-controls">
+                <div class="dock-meta">
+                    <div class="volume-meter compact">
+                        <div id="volumeBar" class="volume-bar"></div>
+                    </div>
+                    <div id="meetingTimer" class="meeting-timer">未开始</div>
+                </div>
+                <div class="dock-tools">
+                    <button id="testMicrophone" class="btn btn-icon btn-outline" title="测试麦克风" aria-label="测试麦克风">测</button>
+                    <button id="autoScroll" class="btn btn-icon btn-primary" title="自动滚动" aria-label="自动滚动">滚</button>
+                    <button id="downloadTranscript" class="btn btn-icon btn-outline" title="下载" aria-label="下载" disabled>下</button>
+                    <button id="clearTranscript" class="btn btn-icon btn-outline" title="清空" aria-label="清空" disabled>空</button>
+                    <button id="settingsToggle" class="btn btn-icon btn-outline" title="设置" aria-label="设置">设</button>
+                    <button id="meetingAction" class="btn btn-success" disabled>开始</button>
+                </div>
             </div>
         </div>
 
@@ -44,7 +68,13 @@
         <div id="settingsPanel" class="settings-panel hidden" aria-hidden="true">
             <div class="settings-header">
                 <h3>设置</h3>
-                <button id="closeSettings" class="btn btn-icon btn-outline" type="button" aria-label="关闭设置">×</button>
+                <div class="settings-header-actions">
+                    <a href="{{ url_for('main.index') }}" class="btn btn-small btn-outline">控制台</a>
+                    {% if access_protected %}
+                    <a href="{{ url_for('main.logout') }}" class="btn btn-small btn-outline">退出</a>
+                    {% endif %}
+                    <button id="closeSettings" class="btn btn-icon btn-outline" type="button" aria-label="关闭设置">×</button>
+                </div>
             </div>
 
             <div class="setting-item compact-row">
@@ -91,8 +121,8 @@
                 </label>
                 <label class="toggle-row">
                     <span>
-                        <span class="toggle-title">专有名词表</span>
-                        <span class="toggle-help">优先按会议术语修正和翻译</span>
+                        <span class="toggle-title">术语表增强</span>
+                        <span class="toggle-help">优先按会议术语、人名、缩写修正和翻译</span>
                     </span>
                     <input type="checkbox" id="enableGlossary">
                 </label>
@@ -102,6 +132,26 @@
                 <label for="glossaryInput">会议术语表</label>
                 <textarea id="glossaryInput" class="glossary-input" rows="6" placeholder="每行一个术语，可用 | 添加别名&#10;MeetingEZ | meeting ez | 米听易&#10;Realtime API | realtime | 实时接口"></textarea>
                 <div class="setting-help">每行一个术语；第一列是标准写法，后面可用 <code>|</code> 添加常见误识别别名。</div>
+            </div>
+
+            <div class="setting-item stack">
+                <label>协同增强</label>
+                <div class="setting-help">选择项目工作区后，会自动加载已确认术语、近期议题和待办摘要，用于增强实时转写与后置处理。</div>
+                <label for="workspaceProject" class="setting-sub-label">项目工作区</label>
+                <select id="workspaceProject">
+                    {% for project in workspace_projects %}
+                    <option value="{{ project.id }}" {% if project.id == default_project_id %}selected{% endif %}>{{ project.label }}</option>
+                    {% endfor %}
+                </select>
+                <label for="languageMode" class="setting-sub-label">语言模式</label>
+                <select id="languageMode">
+                    <option value="single_primary" selected>单主语言会议</option>
+                    <option value="bilingual">双语言会议</option>
+                </select>
+                <div id="contextPackStatus" class="status-message info">
+                    还未加载项目增强包
+                </div>
+                <div id="contextPackPreview" class="setting-help"></div>
             </div>
 
             <div class="setting-item stack">

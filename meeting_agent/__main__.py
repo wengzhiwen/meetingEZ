@@ -137,9 +137,9 @@ def cmd_run(args):
         # 1. ASR
         if task.needs_asr and task.audio_files:
             with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    console=console,
             ) as progress:
                 progress.add_task("执行 ASR 转写...", total=None)
 
@@ -162,27 +162,30 @@ def cmd_run(args):
 
         # 判断是否需要生成纪要：原来就需要、强制生成、或本次 ASR 刚完成
         should_generate_minutes = task.needs_minutes or force_minutes or (
-            task.needs_asr and has_transcript_now
-        )
+            task.needs_asr and has_transcript_now)
 
         if should_generate_minutes and has_transcript_now:
 
             with open(transcript_file, "r", encoding="utf-8") as f:
                 transcript_data = json.load(f)
 
-            transcript_text = "\n".join(
-                seg["text"] for seg in transcript_data.get("segments", [])
-            )
+            transcript_text = "\n".join(seg["text"]
+                                        for seg in transcript_data.get("segments", []))
 
             # 加载上下文
-            context_md, actions_md, recent_minutes = memory_writer.get_context_for_meeting(project_dir)
+            context_md, actions_md, recent_minutes = memory_writer.get_context_for_meeting(
+                project_dir)
 
             # 加载术语表和人工维护的上下文 (_context.md)
             if project_dir:
                 from meeting_agent.config import Settings
-                glossary_config = Config(Settings(
-                    **{k: v for k, v in config.settings.model_dump().items() if v is not None}
-                ))
+                glossary_config = Config(
+                    Settings(
+                        **{
+                            k: v
+                            for k, v in config.settings.model_dump().items()
+                            if v is not None
+                        }))
                 glossary_config.settings.meetings_dir = project_dir
             else:
                 glossary_config = config
@@ -196,9 +199,9 @@ def cmd_run(args):
             pre_hint = None
             if meeting_meta:
                 with Progress(
-                    SpinnerColumn(),
-                    TextColumn("[progress.description]{task.description}"),
-                    console=console,
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        console=console,
                 ) as progress:
                     progress.add_task("生成会议前提示...", total=None)
                     pre_hint = llm_client.generate_pre_meeting_hint(
@@ -211,9 +214,9 @@ def cmd_run(args):
 
             # 调用 GPT 分析
             with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    console=console,
             ) as progress:
                 progress.add_task("调用 GPT-5.4 分析...", total=None)
 
@@ -236,9 +239,13 @@ def cmd_run(args):
                 # 创建指向项目目录的配置
                 if project_dir:
                     from meeting_agent.config import Settings
-                    term_config = Config(Settings(
-                        **{k: v for k, v in config.settings.model_dump().items() if v is not None}
-                    ))
+                    term_config = Config(
+                        Settings(
+                            **{
+                                k: v
+                                for k, v in config.settings.model_dump().items()
+                                if v is not None
+                            }))
                     term_config.settings.meetings_dir = project_dir
                 else:
                     term_config = config
@@ -273,7 +280,8 @@ def cmd_run(args):
                     source_meeting=task.dir_name,
                 )
                 if questions_count > 0:
-                    console.print(f"[green]✓ 添加 {questions_count} 个待解释问题到 _context.md[/green]")
+                    console.print(
+                        f"[green]✓ 添加 {questions_count} 个待解释问题到 _context.md[/green]")
 
             # 保存结果
             if meeting_meta:
@@ -319,7 +327,8 @@ def cmd_status(args):
 
         for proj in projects:
             status = scanner.get_project_status(proj)
-            table.add_row(proj.name, str(status.total_meetings), str(status.total_actions or "-"))
+            table.add_row(proj.name, str(status.total_meetings),
+                          str(status.total_actions or "-"))
 
         console.print(table)
         return 0
@@ -521,7 +530,7 @@ def cmd_init_meeting(args):
     meeting_dir.mkdir(parents=True, exist_ok=True)
 
     # 创建 _meeting.json
-    from meeting_agent.models import MeetingMeta, MeetingType
+    from meeting_agent.models import LanguageMode, MeetingMeta, MeetingType
 
     meeting_date = None
     if args.date:
@@ -540,12 +549,20 @@ def cmd_init_meeting(args):
     except ValueError:
         meeting_type = MeetingType.OTHER
 
+    try:
+        language_mode = LanguageMode(args.language_mode)
+    except ValueError:
+        language_mode = LanguageMode.SINGLE_PRIMARY
+
     meta = MeetingMeta(
         date=meeting_date,
         title=args.name.split("_", 1)[-1] if "_" in args.name else args.name,
         type=meeting_type,
         participants=args.participants.split(",") if args.participants else [],
         notes=args.notes,
+        language_mode=language_mode,
+        primary_language=args.primary_language,
+        secondary_language=args.secondary_language,
     )
 
     meta_file = meeting_dir / MEETING_META_FILE
@@ -556,7 +573,11 @@ def cmd_init_meeting(args):
     console.print(f"[green]✓ 会议目录创建完成[/green]")
     console.print(f"  目录: {meeting_dir}")
     console.print(f"  元信息: {meta_file}")
-    console.print(f"\n请将录音文件放入该目录后运行: python -m meeting_agent run --project {args.project if args.project else ''}")
+    console.print(f"  语言画像: {meta.language_profile_label()}")
+    run_hint = "python -m meeting_agent run"
+    if args.project:
+        run_hint += f" --project {args.project}"
+    console.print(f"\n请将录音文件放入该目录后运行: {run_hint}")
     return 0
 
 
@@ -569,9 +590,10 @@ def cmd_terms(args):
         from meeting_agent.config import Settings
         # 创建新的配置，指向项目目录
         project_dir = config.projects_dir / args.project
-        new_settings = Settings(
-            **{k: v for k, v in config.settings.model_dump().items() if v is not None}
-        )
+        new_settings = Settings(**{
+            k: v
+            for k, v in config.settings.model_dump().items() if v is not None
+        })
         new_settings.meetings_dir = project_dir
         config = Config(new_settings)
 
@@ -647,11 +669,8 @@ def cmd_terms(args):
         }
 
         for entry in sorted(confirmed, key=lambda x: x.canonical):
-            table.add_row(
-                entry.canonical,
-                type_names.get(entry.type, "其他"),
-                ", ".join(entry.aliases) if entry.aliases else "-"
-            )
+            table.add_row(entry.canonical, type_names.get(entry.type, "其他"),
+                          ", ".join(entry.aliases) if entry.aliases else "-")
         console.print(table)
 
     # 待审核术语
@@ -678,15 +697,16 @@ def cmd_terms(args):
 
             for suggestion in sorted(pending.suggestions, key=lambda x: -x.frequency):
                 pending_table.add_row(
-                    suggestion.canonical,
-                    type_names.get(suggestion.type, "其他"),
+                    suggestion.canonical, type_names.get(suggestion.type, "其他"),
                     ", ".join(suggestion.aliases) if suggestion.aliases else "-",
-                    str(suggestion.frequency)
-                )
+                    str(suggestion.frequency))
             console.print(pending_table)
 
-            console.print(f"\n[dim]确认: python -m meeting_agent terms --confirm \"术语\"[/dim]")
-            console.print(f"[dim]拒绝: python -m meeting_agent terms --reject \"术语\" --reason \"原因\"[/dim]")
+            console.print(
+                f"\n[dim]确认: python -m meeting_agent terms --confirm \"术语\"[/dim]")
+            console.print(
+                f"[dim]拒绝: python -m meeting_agent terms --reject \"术语\" --reason \"原因\"[/dim]"
+            )
 
     # 显示拒绝的术语数量
     rejected = glossary_mgr.load_rejected()
@@ -704,7 +724,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="详细输出")
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--version",
+                        action="version",
+                        version=f"%(prog)s {__version__}")
 
     subparsers = parser.add_subparsers(dest="command", help="命令")
 
@@ -752,6 +774,23 @@ def main():
     init_meeting_parser.add_argument("--type", type=str, default="other", help="会议类型")
     init_meeting_parser.add_argument("--participants", type=str, help="参会人员（逗号分隔）")
     init_meeting_parser.add_argument("--notes", type=str, help="特别说明")
+    init_meeting_parser.add_argument(
+        "--language-mode",
+        type=str,
+        default="single_primary",
+        help="语言模式：single_primary 或 bilingual",
+    )
+    init_meeting_parser.add_argument(
+        "--primary-language",
+        type=str,
+        default="zh-CN",
+        help="主要语言（如 zh-CN / en / ja）",
+    )
+    init_meeting_parser.add_argument(
+        "--secondary-language",
+        type=str,
+        help="第二语言（双语言会议时使用）",
+    )
     init_meeting_parser.set_defaults(func=cmd_init_meeting)
 
     # terms 命令（术语表管理）

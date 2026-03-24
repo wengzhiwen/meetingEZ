@@ -4,7 +4,7 @@ Prompt 模板构建器
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 
 from meeting_agent.models import MeetingMeta, MeetingType
 
@@ -100,14 +100,19 @@ class PromptBuilder:
 
         # 本次会议信息
         if meeting_meta:
-            participants = "、".join(meeting_meta.participants) if meeting_meta.participants else "未指定"
+            participants = "、".join(
+                meeting_meta.participants) if meeting_meta.participants else "未指定"
             notes = meeting_meta.notes or "无特别说明"
+            secondary_language = meeting_meta.effective_secondary_language or "无"
 
             sections.append(f"""## 本次会议信息
 
 - **日期**: {meeting_meta.date}
 - **名称**: {meeting_meta.title}
 - **类型**: {meeting_meta.type.value}
+- **语言模式**: {meeting_meta.language_mode.value}
+- **主要语言**: {meeting_meta.effective_primary_language}
+- **第二语言**: {secondary_language}
 - **参会人员**: {participants}
 - **特别关注**: {notes}""")
 
@@ -465,6 +470,9 @@ class PromptBuilder:
 
 - 日期: {meeting_meta.date}
 - 名称: {meeting_meta.title}
+- 语言模式: {meeting_meta.language_mode.value}
+- 主要语言: {meeting_meta.effective_primary_language}
+- 第二语言: {meeting_meta.effective_secondary_language or '无'}
 - 参会人员: {', '.join(meeting_meta.participants) if meeting_meta.participants else '未指定'}
 - 特别关注: {meeting_meta.notes or '无'}
 """

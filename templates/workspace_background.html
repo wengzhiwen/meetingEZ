@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ project.name }} - 背景维护</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+</head>
+<body class="workspace-page">
+    <div class="workspace-shell">
+        <div class="workspace-nav">
+            <div class="workspace-nav-title">
+                <a href="{{ url_for('main.workspace_project_detail', project_id=project.id) }}" class="workspace-nav-link">返回项目</a>
+                <span>/</span>
+                <span>背景说明维护</span>
+            </div>
+        </div>
+
+        <header class="workspace-header">
+            <div>
+                <p class="workspace-eyebrow">Background</p>
+                <h1>{{ project.name }} 背景说明</h1>
+                <p class="workspace-subtitle">{{ project.description or '在这里维护项目背景、业务流程、核心概念和团队角色。' }}</p>
+            </div>
+        </header>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <section class="workspace-flash-stack">
+            {% for category, message in messages %}
+            <div class="workspace-flash workspace-flash-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        </section>
+        {% endif %}
+        {% endwith %}
+
+        <section class="workspace-editor-grid">
+            <article class="workspace-panel workspace-editor-pane">
+                <div class="workspace-section-head">
+                    <div>
+                        <p class="workspace-launch-eyebrow">Editor</p>
+                        <h2>背景说明编辑器</h2>
+                    </div>
+                </div>
+                <form method="POST" action="{{ url_for('main.workspace_project_background', project_id=project.id) }}" class="workspace-form">
+                    <textarea name="background_content" class="workspace-textarea" rows="26" placeholder="补充项目背景、团队角色、业务流程、核心概念等...">{{ content }}</textarea>
+                    <button type="submit" class="btn btn-success">保存背景说明</button>
+                </form>
+            </article>
+
+            <aside class="workspace-panel workspace-side-pane">
+                <div class="workspace-subsection">
+                    <h3>维护建议</h3>
+                    <div class="workspace-simple-list">
+                        <div class="workspace-simple-card">
+                            <strong>核心概念</strong>
+                            <p>解释术语的业务含义、英文缩写以及为什么重要。</p>
+                        </div>
+                        <div class="workspace-simple-card">
+                            <strong>业务流程</strong>
+                            <p>写清楚一场会议里经常提到的流程、角色和上下游关系。</p>
+                        </div>
+                        <div class="workspace-simple-card">
+                            <strong>团队角色</strong>
+                            <p>记录关键人物、团队边界和常见职责，方便后续纪要更准确。</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="workspace-subsection">
+                    <h3>文件位置</h3>
+                    <p class="workspace-empty-inline">{{ file_path }}</p>
+                </div>
+            </aside>
+        </section>
+    </div>
+</body>
+</html>

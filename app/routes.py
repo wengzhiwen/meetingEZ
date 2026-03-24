@@ -3,18 +3,64 @@ MeetingEZ 路由模块
 提供静态文件服务、Realtime session 签发、翻译代理
 所有页面和 API 受 ACCESS_CODE 保护
 """
+from datetime import date
 import json
 import os
+from pathlib import Path
+import subprocess
+import sys
 import time
 
 import requests
-from flask import (Blueprint, jsonify, redirect, render_template, request,
-                   send_from_directory, session, url_for)
+from flask import (Blueprint, flash, jsonify, redirect, render_template,
+                   request, send_from_directory, session, url_for)
+
+from app.workspace_service import (DEFAULT_PROJECT_ID, NO_PROJECT_ID,
+                                   build_audio_manager_view_model,
+                                   build_background_editor_view_model,
+                                   clone_config_for_dir,
+                                   build_context_pack,
+                                   build_glossary_editor_view_model,
+                                   build_meeting_file_editor_view_model,
+                                   build_project_detail_view_model,
+                                   build_workspace_view_model,
+                                   create_meeting_workspace,
+                                   create_project_workspace,
+                                   list_project_handles,
+                                   resolve_meeting_audio_file,
+                                   resolve_meeting_dir,
+                                   resolve_meeting_file,
+                                   resolve_project_handle,
+                                   update_project_background,
+                                   update_project_glossary)
+from meeting_agent.config import AUDIO_EXTENSIONS, Config
+from meeting_agent.glossary import GlossaryManager
+from meeting_agent.scanner import MeetingScanner
 
 main_bp = Blueprint('main', __name__)
 TRANSCRIPTION_MODEL = 'gpt-4o-transcribe'
 TRANSLATION_MODEL = os.getenv('TRANSLATION_MODEL', 'gpt-5.4-mini-2026-03-17')
 TRANSLATION_REASONING_EFFORT = os.getenv('TRANSLATION_REASONING_EFFORT', 'low').strip()
+MEETING_TYPE_OPTIONS = [
+    ('review', '评审会'),
+    ('weekly', '周会'),
+    ('brainstorm', '头脑风暴'),
+    ('retro', '复盘会'),
+    ('kickoff', '启动会'),
+    ('other', '其他'),
+]
+LANGUAGE_OPTIONS = [
+    ('zh', '中文 (简体)'),
+    ('zh-TW', '中文 (繁体)'),
+    ('en', 'English'),
+    ('ja', '日本语'),
+    ('ko', '한국어'),
+    ('es', 'Español'),
+    ('fr', 'Français'),
+    ('de', 'Deutsch'),
+    ('ru', 'Русский'),
+    ('pt', 'Português'),
+]
 
 
 def _normalize_language_code(value):
@@ -26,7 +72,8 @@ def _is_same_language(left, right):
     """宽松比较语言代码"""
     left_normalized = _normalize_language_code(left)
     right_normalized = _normalize_language_code(right)
-    return bool(left_normalized and right_normalized and left_normalized == right_normalized)
+    return bool(left_normalized and right_normalized
+                and left_normalized == right_normalized)
 
 
 def _supports_translation_reasoning(model):
@@ -64,10 +111,7 @@ def _parse_glossary(text):
         parts = [part.strip() for part in line.split('|') if part.strip()]
         if not parts:
             continue
-        entries.append({
-            'canonical': parts[0],
-            'aliases': parts[1:]
-        })
+        entries.append({'canonical': parts[0], 'aliases': parts[1:]})
     return entries
 
 
@@ -85,7 +129,101 @@ def _log_timing(stage, **fields):
     print(f'[perf] {json.dumps(payload, ensure_ascii=False)}')
 
 
+def _build_workspace_project_options(include_no_project=False):
+    handles = list_project_handles()
+    options = []
+    if include_no_project:
+        options.append({
+            'id': NO_PROJECT_ID,
+            'name': '不关联项目',
+            'label': '不关联项目（快速模式）',
+        })
+    options.extend([{
+        'id': handle.project_id,
+        'name': handle.name,
+        'label': '当前工作区' if handle.is_default else handle.name,
+    } for handle in handles])
+    return handles, options
+
+
+def _render_workspace_page(error_message=None):
+    view_model = build_workspace_view_model()
+    _, project_options = _build_workspace_project_options()
+    view_model.update({
+        'access_protected': bool(os.getenv('ACCESS_CODE', '').strip()),
+        'project_options': project_options,
+        'meeting_type_options': MEETING_TYPE_OPTIONS,
+        'language_options': LANGUAGE_OPTIONS,
+        'default_meeting_date': date.today().isoformat(),
+        'workspace_error': error_message,
+        'quick_project_id': NO_PROJECT_ID,
+    })
+    return render_template('workspace.html', **view_model)
+
+
+def _render_project_detail_page(project_id):
+    view_model = build_project_detail_view_model(project_id)
+    view_model.update({
+        'access_protected': bool(os.getenv('ACCESS_CODE', '').strip()),
+        'meeting_type_options': MEETING_TYPE_OPTIONS,
+        'language_options': LANGUAGE_OPTIONS,
+        'default_meeting_date': date.today().isoformat(),
+    })
+    return render_template('workspace_project.html', **view_model)
+
+
+def _build_agent_run_command(project_handle, meeting_dir_name, action):
+    """构造会议处理命令。"""
+    cmd = [sys.executable, '-m', 'meeting_agent', 'run']
+    config = Config()
+    if config.projects_dir:
+        cmd.extend(['--project', project_handle.project_id])
+    cmd.extend(['--meeting', meeting_dir_name])
+
+    if action == 'minutes':
+        cmd.append('--force-minutes')
+
+    return cmd
+
+
+def _workspace_root_dir():
+    """返回仓库根目录。"""
+    return Path(__file__).resolve().parents[1]
+
+
+def _sanitize_audio_filename(filename):
+    """清洗上传或重命名的音频文件名。"""
+    name = Path(filename or '').name.strip()
+    if not name:
+        raise ValueError('文件名不能为空')
+
+    suffix = Path(name).suffix.lower()
+    if suffix not in AUDIO_EXTENSIONS:
+        raise ValueError('仅支持常见音频格式上传')
+
+    stem = Path(name).stem.strip().replace('/', '-').replace('\\', '-')
+    stem = stem or 'audio'
+    return f'{stem}{suffix}'
+
+
+def _allocate_available_path(directory, filename):
+    """若文件名已存在，则自动追加序号。"""
+    candidate = directory / filename
+    if not candidate.exists():
+        return candidate
+
+    stem = candidate.stem
+    suffix = candidate.suffix
+    index = 2
+    while True:
+        next_candidate = directory / f'{stem}-{index}{suffix}'
+        if not next_candidate.exists():
+            return next_candidate
+        index += 1
+
+
 # ---- 认证 ----
+
 
 @main_bp.before_request
 def require_auth():
@@ -95,7 +233,8 @@ def require_auth():
         return
 
     exempt = ('main.login', 'main.health', 'main.favicon')
-    if request.endpoint in exempt or (request.endpoint and request.endpoint.startswith('static')):
+    if request.endpoint in exempt or (request.endpoint
+                                      and request.endpoint.startswith('static')):
         return
     if not session.get('authenticated'):
         if request.path.startswith('/api/'):
@@ -134,9 +273,44 @@ def logout():
 
 # ---- 页面 ----
 
+
 @main_bp.route('/')
 def index():
-    """主页面"""
+    """控制台首页。"""
+    return _render_workspace_page(request.args.get('error'))
+
+
+@main_bp.route('/realtime')
+def realtime():
+    """实时转写页面。"""
+    workspace_handles, workspace_project_options = _build_workspace_project_options(
+        include_no_project=True)
+    entry_mode = (request.args.get('mode') or 'quick').strip().lower()
+    requested_project_id = (request.args.get('project') or '').strip()
+    access_protected = bool(os.getenv('ACCESS_CODE', '').strip())
+
+    if entry_mode == 'project':
+        default_project_id = requested_project_id or (workspace_handles[0].project_id
+                                                      if workspace_handles else
+                                                      DEFAULT_PROJECT_ID)
+    else:
+        default_project_id = NO_PROJECT_ID
+
+    session_meeting_title = (request.args.get('meetingTitle') or '').strip()
+    session_meeting_dir = (request.args.get('meeting') or '').strip()
+    session_primary_language = (request.args.get('primaryLanguage') or '').strip()
+    session_secondary_language = (request.args.get('secondaryLanguage') or '').strip()
+    session_language_mode = (request.args.get('languageMode') or '').strip()
+
+    if entry_mode == 'project':
+        page_heading = '项目会议实时页'
+        session_mode_label = '项目模式'
+        session_summary = session_meeting_title or '已关联项目会议，可直接开始实时转写。'
+    else:
+        page_heading = '快速转写'
+        session_mode_label = '快速模式'
+        session_summary = '未关联项目，可直接开始实时转写。'
+
     model_info = {
         'transcription': {
             'purpose': '实时转写',
@@ -144,16 +318,366 @@ def index():
             'model': TRANSCRIPTION_MODEL
         },
         'translation': {
-            'purpose': '后置翻译',
-            'api': 'Responses API',
-            'model': TRANSLATION_MODEL,
-            'reasoning_effort': _build_translation_reasoning(
-                TRANSLATION_MODEL,
-                TRANSLATION_REASONING_EFFORT
-            )
+            'purpose':
+            '后置翻译',
+            'api':
+            'Responses API',
+            'model':
+            TRANSLATION_MODEL,
+            'reasoning_effort':
+            _build_translation_reasoning(TRANSLATION_MODEL,
+                                         TRANSLATION_REASONING_EFFORT)
         }
     }
-    return render_template('index.html', model_info=model_info)
+    return render_template(
+        'index.html',
+        model_info=model_info,
+        access_protected=access_protected,
+        workspace_projects=workspace_project_options,
+        default_project_id=default_project_id,
+        entry_mode=entry_mode,
+        page_heading=page_heading,
+        session_mode_label=session_mode_label,
+        session_summary=session_summary,
+        session_project_id=default_project_id,
+        session_meeting_title=session_meeting_title,
+        session_meeting_dir=session_meeting_dir,
+        initial_language_mode=session_language_mode,
+        initial_primary_language=session_primary_language,
+        initial_secondary_language=session_secondary_language,
+    )
+
+
+@main_bp.route('/workspace')
+def workspace():
+    """控制台别名路由。"""
+    return _render_workspace_page(request.args.get('error'))
+
+
+@main_bp.route('/workspace/project/create', methods=['POST'])
+def workspace_project_create():
+    """创建新项目并进入项目详情页。"""
+    try:
+        created = create_project_workspace(
+            name=request.form.get('project_name'),
+            description=request.form.get('project_description'),
+            team=request.form.get('project_team'),
+            start_date=request.form.get('project_start_date'),
+        )
+        flash(f"项目已创建：{created['project_name']}", 'success')
+        return redirect(url_for('main.workspace_project_detail',
+                                project_id=created['project_id']))
+    except Exception as exc:  # pragma: no cover - surface validation message
+        flash(str(exc), 'error')
+        return redirect(url_for('main.workspace'))
+
+
+@main_bp.route('/workspace/project/<project_id>')
+def workspace_project_detail(project_id):
+    """项目详情页。"""
+    try:
+        return _render_project_detail_page(project_id)
+    except FileNotFoundError as exc:
+        flash(str(exc), 'error')
+        return redirect(url_for('main.workspace'))
+
+
+@main_bp.route('/workspace/project/<project_id>/meeting/create', methods=['POST'])
+def workspace_project_create_meeting(project_id):
+    """在项目详情页内创建会议。"""
+    try:
+        created = create_meeting_workspace(
+            project_id=project_id,
+            title=request.form.get('meeting_title'),
+            meeting_date=request.form.get('meeting_date'),
+            meeting_type=request.form.get('meeting_type'),
+            primary_language=request.form.get('primary_language'),
+            secondary_language=request.form.get('secondary_language'),
+            language_mode=request.form.get('language_mode'),
+            notes=request.form.get('notes'),
+        )
+        flash(f"会议已创建：{created['meeting_title']}", 'success')
+    except Exception as exc:  # pragma: no cover - surfacing form error
+        flash(str(exc), 'error')
+    return redirect(url_for('main.workspace_project_detail', project_id=project_id))
+
+
+@main_bp.route('/workspace/project/<project_id>/glossary', methods=['GET', 'POST'])
+def workspace_project_glossary(project_id):
+    """项目术语维护页。"""
+    try:
+        if request.method == 'POST':
+            update_project_glossary(project_id, request.form.get('glossary_editor', ''))
+            flash('术语表已更新', 'success')
+            return redirect(url_for('main.workspace_project_glossary',
+                                    project_id=project_id))
+
+        view_model = build_glossary_editor_view_model(project_id)
+        return render_template('workspace_glossary.html', **view_model)
+    except FileNotFoundError as exc:
+        flash(str(exc), 'error')
+        return redirect(url_for('main.workspace'))
+    except Exception as exc:  # pragma: no cover - validation fallback
+        flash(str(exc), 'error')
+        return redirect(url_for('main.workspace_project_glossary',
+                                project_id=project_id))
+
+
+@main_bp.route('/workspace/project/<project_id>/glossary/approve', methods=['POST'])
+def workspace_project_glossary_approve(project_id):
+    """确认待审核术语。"""
+    try:
+        handle = resolve_project_handle(project_id)
+        project_config = clone_config_for_dir(Config(), handle.path)
+        glossary_mgr = GlossaryManager(project_config)
+        canonical = (request.form.get('canonical') or '').strip()
+        if canonical and glossary_mgr.approve_suggestion(canonical):
+            flash(f'已确认术语：{canonical}', 'success')
+        else:
+            flash('未找到待审核术语', 'error')
+    except Exception as exc:  # pragma: no cover - defensive branch
+        flash(str(exc), 'error')
+    return redirect(url_for('main.workspace_project_glossary', project_id=project_id))
+
+
+@main_bp.route('/workspace/project/<project_id>/glossary/reject', methods=['POST'])
+def workspace_project_glossary_reject(project_id):
+    """拒绝待审核术语。"""
+    try:
+        handle = resolve_project_handle(project_id)
+        project_config = clone_config_for_dir(Config(), handle.path)
+        glossary_mgr = GlossaryManager(project_config)
+        canonical = (request.form.get('canonical') or '').strip()
+        reason = (request.form.get('reason') or '').strip() or None
+        if canonical and glossary_mgr.reject_suggestion(canonical, reason):
+            flash(f'已拒绝术语：{canonical}', 'success')
+        else:
+            flash('未找到待审核术语', 'error')
+    except Exception as exc:  # pragma: no cover - defensive branch
+        flash(str(exc), 'error')
+    return redirect(url_for('main.workspace_project_glossary', project_id=project_id))
+
+
+@main_bp.route('/workspace/project/<project_id>/background', methods=['GET', 'POST'])
+def workspace_project_background(project_id):
+    """项目背景说明维护页。"""
+    try:
+        if request.method == 'POST':
+            update_project_background(project_id, request.form.get('background_content', ''))
+            flash('背景说明已保存', 'success')
+            return redirect(url_for('main.workspace_project_background',
+                                    project_id=project_id))
+
+        view_model = build_background_editor_view_model(project_id)
+        return render_template('workspace_background.html', **view_model)
+    except FileNotFoundError as exc:
+        flash(str(exc), 'error')
+        return redirect(url_for('main.workspace'))
+    except Exception as exc:  # pragma: no cover - defensive branch
+        flash(str(exc), 'error')
+        return redirect(url_for('main.workspace_project_background',
+                                project_id=project_id))
+
+
+@main_bp.route('/workspace/project/<project_id>/meeting/<meeting_dir>/audio')
+def workspace_meeting_audio(project_id, meeting_dir):
+    """会议音频管理页。"""
+    try:
+        view_model = build_audio_manager_view_model(project_id, meeting_dir)
+        return render_template('workspace_audio.html', **view_model)
+    except FileNotFoundError as exc:
+        flash(str(exc), 'error')
+        return redirect(url_for('main.workspace_project_detail', project_id=project_id))
+
+
+@main_bp.route('/workspace/project/<project_id>/meeting/<meeting_dir>/audio/upload',
+               methods=['POST'])
+def workspace_meeting_audio_upload(project_id, meeting_dir):
+    """上传会议音频。"""
+    try:
+        _, _, resolved_meeting_dir = resolve_meeting_dir(project_id, meeting_dir)
+        uploaded_files = [item for item in request.files.getlist('audio_files')
+                          if item and item.filename]
+        if not uploaded_files:
+            raise ValueError('请选择至少一个音频文件')
+
+        saved_files = []
+        for uploaded in uploaded_files:
+            target_name = _sanitize_audio_filename(uploaded.filename)
+            target_path = _allocate_available_path(resolved_meeting_dir, target_name)
+            uploaded.save(target_path)
+            saved_files.append(target_path.name)
+
+        flash(f'已上传 {len(saved_files)} 个音频文件', 'success')
+    except Exception as exc:  # pragma: no cover - upload failure path
+        flash(str(exc), 'error')
+    return redirect(url_for('main.workspace_meeting_audio',
+                            project_id=project_id,
+                            meeting_dir=meeting_dir))
+
+
+@main_bp.route('/workspace/project/<project_id>/meeting/<meeting_dir>/audio/<path:filename>')
+def workspace_meeting_audio_file(project_id, meeting_dir, filename):
+    """返回音频文件，用于试听或下载。"""
+    try:
+        _, _, resolved_meeting_dir, audio_path = resolve_meeting_audio_file(project_id,
+                                                                            meeting_dir,
+                                                                            filename)
+        return send_from_directory(str(resolved_meeting_dir),
+                                   audio_path.name,
+                                   as_attachment=request.args.get('download') == '1')
+    except FileNotFoundError as exc:
+        flash(str(exc), 'error')
+        return redirect(url_for('main.workspace_meeting_audio',
+                                project_id=project_id,
+                                meeting_dir=meeting_dir))
+
+
+@main_bp.route('/workspace/project/<project_id>/meeting/<meeting_dir>/audio/<path:filename>/rename',
+               methods=['POST'])
+def workspace_meeting_audio_rename(project_id, meeting_dir, filename):
+    """重命名会议音频。"""
+    try:
+        _, _, resolved_meeting_dir, audio_path = resolve_meeting_audio_file(project_id,
+                                                                            meeting_dir,
+                                                                            filename)
+        new_name = _sanitize_audio_filename(request.form.get('new_name'))
+        target_path = resolved_meeting_dir / new_name
+        if target_path.exists() and target_path.name != audio_path.name:
+            raise ValueError('目标文件名已存在')
+        audio_path.rename(target_path)
+        flash('音频文件已重命名', 'success')
+    except Exception as exc:  # pragma: no cover - defensive branch
+        flash(str(exc), 'error')
+    return redirect(url_for('main.workspace_meeting_audio',
+                            project_id=project_id,
+                            meeting_dir=meeting_dir))
+
+
+@main_bp.route('/workspace/project/<project_id>/meeting/<meeting_dir>/audio/<path:filename>/delete',
+               methods=['POST'])
+def workspace_meeting_audio_delete(project_id, meeting_dir, filename):
+    """删除会议音频。"""
+    try:
+        _, _, _, audio_path = resolve_meeting_audio_file(project_id, meeting_dir, filename)
+        audio_path.unlink()
+        flash('音频文件已删除', 'success')
+    except Exception as exc:  # pragma: no cover - defensive branch
+        flash(str(exc), 'error')
+    return redirect(url_for('main.workspace_meeting_audio',
+                            project_id=project_id,
+                            meeting_dir=meeting_dir))
+
+
+@main_bp.route('/workspace/project/<project_id>/meeting/<meeting_dir>/process',
+               methods=['POST'])
+def workspace_meeting_process(project_id, meeting_dir):
+    """对单个会议执行完整处理或仅纪要处理。"""
+    action = (request.form.get('action') or 'full').strip()
+    try:
+        handle, project_config, resolved_meeting_dir = resolve_meeting_dir(project_id,
+                                                                           meeting_dir)
+        scanner = MeetingScanner(project_config)
+        task = next((item for item in scanner.scan_meetings()
+                     if item.dir_name == resolved_meeting_dir.name), None)
+        if not task:
+            raise FileNotFoundError(f'未找到会议: {meeting_dir}')
+
+        if action == 'minutes' and not task.has_transcript:
+            raise ValueError('当前会议还没有正式转写，无法只生成会议纪要')
+
+        cmd = _build_agent_run_command(handle, resolved_meeting_dir.name, action)
+        result = subprocess.run(cmd,
+                                cwd=_workspace_root_dir(),
+                                capture_output=True,
+                                text=True,
+                                check=False,
+                                timeout=1800)
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or '处理失败').strip().splitlines()
+            raise RuntimeError(message[-1] if message else '处理失败')
+
+        flash('会议处理完成', 'success')
+    except Exception as exc:  # pragma: no cover - process error surfacing
+        flash(str(exc), 'error')
+    return redirect(url_for('main.workspace_project_detail', project_id=project_id))
+
+
+@main_bp.route('/workspace/project/<project_id>/meeting/<meeting_dir>/files/<path:filename>',
+               methods=['GET', 'POST'])
+def workspace_meeting_file(project_id, meeting_dir, filename):
+    """查看或编辑会议文件。"""
+    try:
+        if request.method == 'POST':
+            _, _, _, file_path = resolve_meeting_file(project_id, meeting_dir, filename)
+            if file_path.suffix.lower() not in {'.json', '.md', '.txt', '.csv', '.log'}:
+                raise ValueError('当前文件不支持在线编辑')
+            file_path.write_text(request.form.get('content', ''), encoding='utf-8')
+            flash('文件已保存', 'success')
+            return redirect(url_for('main.workspace_meeting_file',
+                                    project_id=project_id,
+                                    meeting_dir=meeting_dir,
+                                    filename=filename))
+
+        view_model = build_meeting_file_editor_view_model(project_id, meeting_dir, filename)
+        return render_template('workspace_file.html', **view_model)
+    except FileNotFoundError as exc:
+        flash(str(exc), 'error')
+        return redirect(url_for('main.workspace_project_detail', project_id=project_id))
+    except Exception as exc:  # pragma: no cover - defensive branch
+        flash(str(exc), 'error')
+        return redirect(url_for('main.workspace_project_detail', project_id=project_id))
+
+
+@main_bp.route(
+    '/workspace/project/<project_id>/meeting/<meeting_dir>/files/<path:filename>/download')
+def workspace_meeting_file_download(project_id, meeting_dir, filename):
+    """下载会议文件。"""
+    try:
+        _, _, resolved_meeting_dir, file_path = resolve_meeting_file(project_id,
+                                                                     meeting_dir,
+                                                                     filename)
+        return send_from_directory(str(resolved_meeting_dir),
+                                   file_path.name,
+                                   as_attachment=True)
+    except FileNotFoundError as exc:
+        flash(str(exc), 'error')
+        return redirect(url_for('main.workspace_project_detail', project_id=project_id))
+
+
+@main_bp.route('/workspace/launch-project-meeting', methods=['POST'])
+def launch_project_meeting():
+    """从控制台创建会议目录并进入实时页。"""
+    form = request.form
+    title = (form.get('meeting_title') or '').strip()
+    if not title:
+        return redirect(url_for('main.index', error='会议标题不能为空'))
+
+    try:
+        created = create_meeting_workspace(
+            project_id=form.get('project_id'),
+            title=title,
+            meeting_date=form.get('meeting_date'),
+            meeting_type=form.get('meeting_type'),
+            primary_language=form.get('primary_language'),
+            secondary_language=form.get('secondary_language'),
+            language_mode=form.get('language_mode'),
+            notes=form.get('notes'),
+        )
+    except Exception as exc:  # pragma: no cover - form validation fallback
+        return redirect(url_for('main.index', error=str(exc)))
+
+    return redirect(
+        url_for(
+            'main.realtime',
+            mode='project',
+            project=created['project_id'],
+            meeting=created['meeting_dir_name'],
+            meetingTitle=created['meeting_title'],
+            primaryLanguage=created['primary_language'],
+            secondaryLanguage=created['secondary_language'],
+            languageMode=created['language_mode'],
+        ))
 
 
 @main_bp.route('/health')
@@ -172,16 +696,15 @@ def favicon():
 
 # ---- API ----
 
+
 @main_bp.route('/api/test-connection', methods=['POST'])
 def test_connection():
     """测试 OpenAI API 连接"""
     try:
         api_key = _get_api_key()
-        resp = requests.get(
-            'https://api.openai.com/v1/models',
-            headers={'Authorization': f'Bearer {api_key}'},
-            timeout=10
-        )
+        resp = requests.get('https://api.openai.com/v1/models',
+                            headers={'Authorization': f'Bearer {api_key}'},
+                            timeout=10)
         if not resp.ok:
             return jsonify({'error': f'HTTP {resp.status_code}'}), resp.status_code
         return jsonify({'ok': True})
@@ -234,15 +757,13 @@ def create_realtime_session():
 
     session_started_at = time.perf_counter()
     try:
-        resp = requests.post(
-            'https://api.openai.com/v1/realtime/client_secrets',
-            headers={
-                'Authorization': f'Bearer {api_key}',
-                'Content-Type': 'application/json'
-            },
-            json={'session': session_config},
-            timeout=15
-        )
+        resp = requests.post('https://api.openai.com/v1/realtime/client_secrets',
+                             headers={
+                                 'Authorization': f'Bearer {api_key}',
+                                 'Content-Type': 'application/json'
+                             },
+                             json={'session': session_config},
+                             timeout=15)
 
         if not resp.ok:
             print(f'[realtime-session] OpenAI error: {resp.status_code} {resp.text}')
@@ -254,16 +775,18 @@ def create_realtime_session():
 
         if not client_secret:
             client_secret = session_data.get('client_secret', {}).get('value')
-            expires_at = expires_at or session_data.get('client_secret', {}).get('expires_at')
+            expires_at = expires_at or session_data.get('client_secret',
+                                                        {}).get('expires_at')
 
-        print(f'[realtime-session] Session created: {json.dumps(session_data, indent=2)[:500]}')
-        _log_timing(
-            'realtime_session_created',
-            elapsed_ms=round((time.perf_counter() - session_started_at) * 1000, 1),
-            language=language,
-            has_prompt=bool(prompt),
-            turn_detection=session_config['audio']['input']['turn_detection']
+        print(
+            f'[realtime-session] Session created: {json.dumps(session_data, indent=2)[:500]}'
         )
+        _log_timing('realtime_session_created',
+                    elapsed_ms=round((time.perf_counter() - session_started_at) * 1000,
+                                     1),
+                    language=language,
+                    has_prompt=bool(prompt),
+                    turn_detection=session_config['audio']['input']['turn_detection'])
         return jsonify({
             'clientSecret': client_secret,
             'expiresAt': expires_at,
@@ -271,12 +794,41 @@ def create_realtime_session():
         })
 
     except Exception as e:
-        _log_timing(
-            'realtime_session_failed',
-            elapsed_ms=round((time.perf_counter() - session_started_at) * 1000, 1),
-            error=str(e)
-        )
+        _log_timing('realtime_session_failed',
+                    elapsed_ms=round((time.perf_counter() - session_started_at) * 1000,
+                                     1),
+                    error=str(e))
         return jsonify({'error': str(e)}), 500
+
+
+@main_bp.route('/api/workspace/projects', methods=['GET'])
+def workspace_projects():
+    """返回工作区项目列表，供实时页选择协同来源。"""
+    handles = list_project_handles()
+    return jsonify({
+        'projects': [{
+            'id': handle.project_id,
+            'name': handle.name,
+            'isDefault': handle.is_default,
+        } for handle in handles]
+    })
+
+
+@main_bp.route('/api/workspace/context-pack', methods=['GET'])
+def workspace_context_pack():
+    """返回某个项目的 context pack，供实时会议页增强提示。"""
+    try:
+        pack = build_context_pack(
+            project_id=request.args.get('project'),
+            primary_language=request.args.get('primaryLanguage'),
+            secondary_language=request.args.get('secondaryLanguage'),
+            language_mode=request.args.get('languageMode'),
+        )
+        return jsonify(pack)
+    except FileNotFoundError as exc:
+        return jsonify({'error': str(exc)}), 404
+    except Exception as exc:  # pragma: no cover - defensive branch
+        return jsonify({'error': str(exc)}), 500
 
 
 @main_bp.route('/api/translate', methods=['POST'])
@@ -294,23 +846,28 @@ def translate():
     text = data['text']
     primary_language = data.get('primaryLanguage', 'zh')
     secondary_language = data.get('secondaryLanguage', 'ja')
+    language_mode = data.get('languageMode', 'single_primary')
     original_language_hint = data.get('originalLanguageHint', primary_language)
     context = data.get('context', '')
+    meeting_context = data.get('meetingContext', '')
     enable_correction = _coerce_bool(data.get('enableCorrection'), default=False)
     enable_glossary = _coerce_bool(data.get('enableGlossary'), default=False)
-    glossary_entries = _parse_glossary(data.get('glossary', '')) if enable_glossary else []
+    glossary_entries = _parse_glossary(data.get('glossary',
+                                                '')) if enable_glossary else []
 
     system_prompt = (
         '你是实时会议字幕的后置语言处理助手，负责两件事：\n'
         '1. 在允许时，对 ASR 原始转写做轻量智能修正\n'
         '2. 输出双向翻译\n\n'
         '## 输入\n'
+        '- language_mode: 会议语言模式（single_primary / bilingual）\n'
         '- primary_language: 第一语言（如 zh）\n'
         '- secondary_language: 第二语言（如 ja）\n'
         '- current_text: 当前需要处理的 ASR 原始文本\n'
         '- enable_correction: 是否启用智能修正\n'
-        '- enable_glossary: 是否启用专有名词表\n'
+        '- enable_glossary: 是否启用术语表增强\n'
         '- glossary_entries: 术语表，包含标准写法和别名\n'
+        '- meeting_context: 会议级上下文摘要（项目、术语、近期议题）\n'
         '- recent_context: 最近上下文\n\n'
         '## 智能修正规则\n'
         '- 仅在 enable_correction=true 时输出 correctedTranscript\n'
@@ -318,6 +875,9 @@ def translate():
         '- 不允许改写说话意图，不允许补充未说出的信息，不允许总结替代原句\n'
         '- 如果没有明确证据，不要擅自修改\n'
         '- 如果 enable_glossary=true，优先将术语修正为 glossary_entries 中的标准写法\n\n'
+        '## 语言模式约束\n'
+        '- 如果 language_mode=single_primary，说明会议主要使用第一语言，只会夹杂少量外语术语或缩写，应优先保留这些术语原样，不要过度判定成第二语言句子\n'
+        '- 如果 language_mode=bilingual，说明两种语言都是真正的会议语言，应尽量保留原始语言边界，避免把中文和日语等混淆\n\n'
         '## 规则\n'
         '- 翻译应基于 correctedTranscript（如果启用了智能修正），否则基于 current_text\n'
         '- 情况A: 文本是第一语言 => primaryTranslation = null, secondaryTranslation = 翻译成第二语言\n'
@@ -325,17 +885,18 @@ def translate():
         '- 情况C: 文本是其他语言 => primaryTranslation = 翻译成第一语言, secondaryTranslation = null\n'
         '绝对不要输出与原文同语种的“翻译”。若目标语言与原文同语种，对应字段必须是 null。\n'
         'originalLanguage 必须是你判定的原文语言，而不是目标语言。\n\n'
-        '输出严格的 JSON，不要添加任何解释。'
-    )
+        '输出严格的 JSON，不要添加任何解释。')
 
     user_content = json.dumps({
         'task': 'bidirectional_translation',
+        'language_mode': language_mode,
         'primary_language': primary_language,
         'secondary_language': secondary_language,
         'original_language_hint': original_language_hint,
         'enable_correction': enable_correction,
         'enable_glossary': enable_glossary,
         'glossary_entries': glossary_entries,
+        'meeting_context': meeting_context,
         'recent_context': context,
         'current_text': text
     })
@@ -343,15 +904,15 @@ def translate():
     json_schema = {
         'name': 'BidirectionalTranslation',
         'schema': {
-            '$schema': 'http://json-schema.org/draft-07/schema#',
-            'type': 'object',
-            'additionalProperties': False,
+            '$schema':
+            'http://json-schema.org/draft-07/schema#',
+            'type':
+            'object',
+            'additionalProperties':
+            False,
             'required': [
-                'originalLanguage',
-                'correctedTranscript',
-                'correctionApplied',
-                'primaryTranslation',
-                'secondaryTranslation'
+                'originalLanguage', 'correctedTranscript', 'correctionApplied',
+                'primaryTranslation', 'secondaryTranslation'
             ],
             'properties': {
                 'originalLanguage': {
@@ -360,7 +921,11 @@ def translate():
                 },
                 'correctedTranscript': {
                     'description': '智能修正后的文本；若未启用修正则为 null',
-                    'anyOf': [{'type': 'string'}, {'type': 'null'}]
+                    'anyOf': [{
+                        'type': 'string'
+                    }, {
+                        'type': 'null'
+                    }]
                 },
                 'correctionApplied': {
                     'type': 'boolean',
@@ -368,11 +933,19 @@ def translate():
                 },
                 'primaryTranslation': {
                     'description': '翻译成第一语言，或 null',
-                    'anyOf': [{'type': 'string'}, {'type': 'null'}]
+                    'anyOf': [{
+                        'type': 'string'
+                    }, {
+                        'type': 'null'
+                    }]
                 },
                 'secondaryTranslation': {
                     'description': '翻译成第二语言，或 null',
-                    'anyOf': [{'type': 'string'}, {'type': 'null'}]
+                    'anyOf': [{
+                        'type': 'string'
+                    }, {
+                        'type': 'null'
+                    }]
                 }
             }
         }
@@ -382,27 +955,31 @@ def translate():
     reasoning_effort = data.get('reasoningEffort', TRANSLATION_REASONING_EFFORT)
     reasoning = _build_translation_reasoning(model, reasoning_effort)
     translate_started_at = time.perf_counter()
-    _log_timing(
-        'translate_request_received',
-        model=model,
-        reasoning_effort=reasoning.get('effort') if reasoning else None,
-        text_chars=len(text),
-        enable_correction=enable_correction,
-        enable_glossary=enable_glossary,
-        glossary_entries=len(glossary_entries),
-        primary_language=primary_language,
-        secondary_language=secondary_language,
-        original_language_hint=original_language_hint,
-        context_chars=len(context)
-    )
+    _log_timing('translate_request_received',
+                model=model,
+                reasoning_effort=reasoning.get('effort') if reasoning else None,
+                text_chars=len(text),
+                enable_correction=enable_correction,
+                enable_glossary=enable_glossary,
+                glossary_entries=len(glossary_entries),
+                language_mode=language_mode,
+                primary_language=primary_language,
+                secondary_language=secondary_language,
+                original_language_hint=original_language_hint,
+                context_chars=len(context),
+                meeting_context_chars=len(meeting_context))
 
     try:
         payload = {
-            'model': model,
-            'input': [
-                {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': user_content}
-            ],
+            'model':
+            model,
+            'input': [{
+                'role': 'system',
+                'content': system_prompt
+            }, {
+                'role': 'user',
+                'content': user_content
+            }],
             'text': {
                 'format': {
                     'type': 'json_schema',
@@ -415,23 +992,20 @@ def translate():
         if reasoning:
             payload['reasoning'] = reasoning
 
-        resp = requests.post(
-            'https://api.openai.com/v1/responses',
-            headers={
-                'Authorization': f'Bearer {api_key}',
-                'Content-Type': 'application/json'
-            },
-            json=payload,
-            timeout=30
-        )
-        _log_timing(
-            'translate_openai_response',
-            model=model,
-            reasoning_effort=reasoning.get('effort') if reasoning else None,
-            elapsed_ms=round((time.perf_counter() - translate_started_at) * 1000, 1),
-            status_code=resp.status_code,
-            request_id=resp.headers.get('x-request-id')
-        )
+        resp = requests.post('https://api.openai.com/v1/responses',
+                             headers={
+                                 'Authorization': f'Bearer {api_key}',
+                                 'Content-Type': 'application/json'
+                             },
+                             json=payload,
+                             timeout=30)
+        _log_timing('translate_openai_response',
+                    model=model,
+                    reasoning_effort=reasoning.get('effort') if reasoning else None,
+                    elapsed_ms=round(
+                        (time.perf_counter() - translate_started_at) * 1000, 1),
+                    status_code=resp.status_code,
+                    request_id=resp.headers.get('x-request-id'))
 
         if not resp.ok:
             return jsonify({'error': resp.text}), resp.status_code
@@ -464,7 +1038,8 @@ def translate():
 
         original_language = structured.get('originalLanguage') or original_language_hint
         corrected_transcript = structured.get('correctedTranscript')
-        correction_applied = _coerce_bool(structured.get('correctionApplied'), default=False)
+        correction_applied = _coerce_bool(structured.get('correctionApplied'),
+                                          default=False)
         primary_translation = structured.get('primaryTranslation')
         secondary_translation = structured.get('secondaryTranslation')
 
@@ -478,9 +1053,11 @@ def translate():
 
         effective_source_text = corrected_transcript or text
 
-        if primary_translation and primary_translation.strip() == effective_source_text.strip():
+        if primary_translation and primary_translation.strip(
+        ) == effective_source_text.strip():
             primary_translation = None
-        if secondary_translation and secondary_translation.strip() == effective_source_text.strip():
+        if secondary_translation and secondary_translation.strip(
+        ) == effective_source_text.strip():
             secondary_translation = None
 
         if not secondary_language:
@@ -501,25 +1078,23 @@ def translate():
             'primaryTranslation': primary_translation,
             'secondaryTranslation': secondary_translation
         }
-        _log_timing(
-            'translate_request_completed',
-            model=model,
-            reasoning_effort=reasoning.get('effort') if reasoning else None,
-            elapsed_ms=round((time.perf_counter() - translate_started_at) * 1000, 1),
-            original_language=structured['originalLanguage'],
-            correction_applied=structured['correctionApplied'],
-            has_primary_translation=bool(structured['primaryTranslation']),
-            has_secondary_translation=bool(structured['secondaryTranslation'])
-        )
+        _log_timing('translate_request_completed',
+                    model=model,
+                    reasoning_effort=reasoning.get('effort') if reasoning else None,
+                    elapsed_ms=round(
+                        (time.perf_counter() - translate_started_at) * 1000, 1),
+                    original_language=structured['originalLanguage'],
+                    correction_applied=structured['correctionApplied'],
+                    has_primary_translation=bool(structured['primaryTranslation']),
+                    has_secondary_translation=bool(structured['secondaryTranslation']))
 
         return jsonify(structured)
 
     except Exception as e:
-        _log_timing(
-            'translate_request_failed',
-            model=model,
-            reasoning_effort=reasoning.get('effort') if reasoning else None,
-            elapsed_ms=round((time.perf_counter() - translate_started_at) * 1000, 1),
-            error=str(e)
-        )
+        _log_timing('translate_request_failed',
+                    model=model,
+                    reasoning_effort=reasoning.get('effort') if reasoning else None,
+                    elapsed_ms=round(
+                        (time.perf_counter() - translate_started_at) * 1000, 1),
+                    error=str(e))
         return jsonify({'error': str(e)}), 500

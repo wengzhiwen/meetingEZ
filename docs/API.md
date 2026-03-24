@@ -2,9 +2,10 @@
 
 ## 概述
 
-当前 Web 应用已经收敛为单一路径：
+当前 Web 应用已经收敛为“控制台 + 实时页”双入口：
 
-- 前端采集音频
+- 控制台负责项目选择、会议创建和流程分流
+- 实时页负责采集音频
 - 后端签发 OpenAI Realtime `client secret`
 - 前端通过 WebRTC 与 OpenAI 建立 transcription session
 - 后端代理翻译请求
@@ -19,7 +20,28 @@
 
 ### `GET /`
 
-主页面。
+控制台首页。
+
+默认入口。
+
+提供两条流程：
+
+- 项目模式：先选项目、创建会议，再进入实时页
+- 快速模式：不关联项目，直接进入实时页
+
+### `GET /realtime`
+
+实时转写页面。
+
+常见 query 参数：
+
+- `mode=project|quick`
+- `project=<project_id>`
+- `meeting=<meeting_dir>`
+- `meetingTitle=<meeting_title>`
+- `primaryLanguage=<lang>`
+- `secondaryLanguage=<lang>`
+- `languageMode=single_primary|bilingual`
 
 ### `GET|POST /login`
 
@@ -47,6 +69,27 @@
 ```
 
 ## 后端 API
+
+### `POST /workspace/launch-project-meeting`
+
+从控制台创建会议目录并跳转到实时页。
+
+表单字段：
+
+- `project_id`
+- `meeting_title`
+- `meeting_date`
+- `meeting_type`
+- `primary_language`
+- `secondary_language`
+- `language_mode`
+- `notes`
+
+效果：
+
+- 在项目目录下创建会议文件夹
+- 写入 `_meeting.json`
+- 重定向到 `/realtime?mode=project...`
 
 ### `POST /api/test-connection`
 
@@ -127,6 +170,57 @@
   - 顶层 `value` / `expires_at`
   - 嵌套 `client_secret.value` / `client_secret.expires_at`
 
+### `GET /api/workspace/projects`
+
+返回当前工作区可见项目列表。
+
+返回示例：
+
+```json
+{
+  "projects": [
+    {
+      "id": "__default__",
+      "name": "meetings",
+      "isDefault": true
+    }
+  ]
+}
+```
+
+### `GET /api/workspace/context-pack`
+
+返回项目增强包，供实时页增强 prompt 和后置处理。
+
+查询参数：
+
+- `project`
+- `primaryLanguage`
+- `secondaryLanguage`
+- `languageMode`
+
+说明：
+
+- 当 `project=__none__` 时，表示快速模式，返回空增强包
+- 当传入真实项目时，会返回项目摘要、背景说明、术语、近期会议和待办摘要
+
+返回字段示例：
+
+```json
+{
+  "projectId": "__default__",
+  "projectName": "示例项目",
+  "languageMode": "single_primary",
+  "primaryLanguage": "zh",
+  "secondaryLanguage": "",
+  "confirmedTermsCount": 12,
+  "glossaryLines": ["MeetingEZ | 米听易"],
+  "pendingActions": ["整理评审反馈"],
+  "recentMeetings": ["2026-03-23 需求评审"],
+  "realtimePrompt": "你正在执行会议实时转写..."
+}
+```
+
 ### `POST /api/translate`
 
 后端代理翻译请求，避免前端暴露标准 API Key。
@@ -152,6 +246,7 @@
 - 可选 reasoning effort 来自环境变量 `TRANSLATION_REASONING_EFFORT`
 - 默认为 `low`
 - 当前代码仅在翻译模型名以 `gpt-5` 开头时发送 `reasoning.effort`
+- 支持 `languageMode`、`meetingContext`、术语表增强输入
 - 输出严格 JSON
 - 后端会做结果清洗，防止“同语种翻译”
 
@@ -206,9 +301,8 @@
 
 当前页面结构：
 
-- 全屏字幕区
-- 底部吸附工具栏
-- 设置浮层
+- 控制台首页
+- 实时页：全屏字幕区 + 底部吸附工具栏 + 设置浮层
 
 底部工具栏包含：
 
@@ -225,9 +319,12 @@
 
 - API 测试按钮
 - 连接状态
+- 项目工作区选择
+- 语言模式
 - 音频输入源
 - 麦克风设备选择
 - 主要语言 / 第二语言
+- 术语表增强
 - 字体大小
 
 ## 性能日志

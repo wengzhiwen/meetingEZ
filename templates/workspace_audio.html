@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ meeting.title }} - 音频管理</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+</head>
+<body class="workspace-page">
+    <div class="workspace-shell">
+        <div class="workspace-nav">
+            <div class="workspace-nav-title">
+                <a href="{{ url_for('main.workspace_project_detail', project_id=project.id) }}" class="workspace-nav-link">返回项目</a>
+                <span>/</span>
+                <span>{{ meeting.title }}</span>
+                <span>/</span>
+                <span>音频管理</span>
+            </div>
+        </div>
+
+        <header class="workspace-header">
+            <div>
+                <p class="workspace-eyebrow">Audio</p>
+                <h1>{{ meeting.title }}</h1>
+                <p class="workspace-subtitle">{{ meeting.date }} · {{ meeting.language_profile }} · 这里管理这个会议的全部音频文件。</p>
+            </div>
+        </header>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <section class="workspace-flash-stack">
+            {% for category, message in messages %}
+            <div class="workspace-flash workspace-flash-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        </section>
+        {% endif %}
+        {% endwith %}
+
+        <section class="workspace-section">
+            <div class="workspace-section-head">
+                <div>
+                    <p class="workspace-launch-eyebrow">Upload</p>
+                    <h2>上传新的音频文件</h2>
+                </div>
+            </div>
+            <article class="workspace-panel">
+                <form method="POST" action="{{ url_for('main.workspace_meeting_audio_upload', project_id=project.id, meeting_dir=meeting.dir_name) }}" enctype="multipart/form-data" class="workspace-form">
+                    <input type="file" name="audio_files" accept=".mp3,.m4a,.wav,.flac,.ogg,.aac,.wma" multiple required>
+                    <button type="submit" class="btn btn-success">上传音频</button>
+                </form>
+            </article>
+        </section>
+
+        <section class="workspace-section">
+            <div class="workspace-section-head">
+                <div>
+                    <p class="workspace-launch-eyebrow">Library</p>
+                    <h2>音频列表</h2>
+                </div>
+            </div>
+            {% if audio_files %}
+            <div class="workspace-audio-list">
+                {% for file in audio_files %}
+                <article class="workspace-panel workspace-audio-card">
+                    <div class="workspace-card-header">
+                        <div>
+                            <h3>{{ file.name }}</h3>
+                            <p class="workspace-meeting-subtitle">{{ file.size_label }} · {{ file.updated_at }}</p>
+                        </div>
+                    </div>
+
+                    <audio controls preload="none" class="workspace-audio-player">
+                        <source src="{{ url_for('main.workspace_meeting_audio_file', project_id=project.id, meeting_dir=meeting.dir_name, filename=file.name) }}">
+                    </audio>
+
+                    <div class="workspace-card-actions">
+                        <a href="{{ url_for('main.workspace_meeting_audio_file', project_id=project.id, meeting_dir=meeting.dir_name, filename=file.name, download=1) }}" class="btn btn-small btn-outline">下载</a>
+                    </div>
+
+                    <form method="POST" action="{{ url_for('main.workspace_meeting_audio_rename', project_id=project.id, meeting_dir=meeting.dir_name, filename=file.name) }}" class="workspace-form workspace-inline-form">
+                        <input type="text" name="new_name" value="{{ file.name }}" required>
+                        <button type="submit" class="btn btn-small btn-outline">改名</button>
+                    </form>
+
+                    <form method="POST" action="{{ url_for('main.workspace_meeting_audio_delete', project_id=project.id, meeting_dir=meeting.dir_name, filename=file.name) }}">
+                        <button type="submit" class="btn btn-small btn-outline">删除</button>
+                    </form>
+                </article>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="workspace-empty">
+                <h2>还没有音频文件</h2>
+                <p>可以先上传录音，或者回到项目页直接进入实时转写。</p>
+            </div>
+            {% endif %}
+        </section>
+    </div>
+</body>
+</html>

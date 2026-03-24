@@ -9,26 +9,32 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class MeetingType(str, Enum):
     """会议类型"""
-    REVIEW = "review"           # 评审会
-    WEEKLY = "weekly"           # 周会
-    BRAINSTORM = "brainstorm"   # 头脑风暴
-    RETRO = "retro"             # 复盘会
-    KICKOFF = "kickoff"         # 启动会
-    OTHER = "other"             # 其他
+    REVIEW = "review"  # 评审会
+    WEEKLY = "weekly"  # 周会
+    BRAINSTORM = "brainstorm"  # 头脑风暴
+    RETRO = "retro"  # 复盘会
+    KICKOFF = "kickoff"  # 启动会
+    OTHER = "other"  # 其他
+
+
+class LanguageMode(str, Enum):
+    """会议语言模式"""
+    SINGLE_PRIMARY = "single_primary"  # 单主语言会议
+    BILINGUAL = "bilingual"  # 双语言会议
 
 
 class ActionType(str, Enum):
     """待办状态"""
-    PENDING = "pending"         # 待处理
-    IN_PROGRESS = "in_progress" # 进行中
-    COMPLETED = "completed"     # 已完成
-    OVERDUE = "overdue"         # 已超期
-    BLOCKED = "blocked"         # 阻塞中
+    PENDING = "pending"  # 待处理
+    IN_PROGRESS = "in_progress"  # 进行中
+    COMPLETED = "completed"  # 已完成
+    OVERDUE = "overdue"  # 已超期
+    BLOCKED = "blocked"  # 阻塞中
 
 
 class RiskLevel(str, Enum):
@@ -52,20 +58,20 @@ class PeopleConfig(BaseModel):
     people: dict[str, Person] = Field(default_factory=dict)
     teams: dict[str, list[str]] = Field(default_factory=dict)
 
-    def get_person(self, name: str) -> Optional[Person]:
+    def get_person(self, name: str) -> Optional[Person]:  # pylint: disable=no-member
         """根据名称或别名获取人员信息"""
         if name in self.people:
             return self.people[name]
-        for person in self.people.values():
+        for person in self.people.values():  # pylint: disable=no-member
             if name in person.alias:
                 return person
         return None
 
-    def resolve_name(self, name: str) -> str:
+    def resolve_name(self, name: str) -> str:  # pylint: disable=no-member
         """解析名称，将别名映射到标准名称"""
         if name in self.people:
             return name
-        for std_name, person in self.people.items():
+        for std_name, person in self.people.items():  # pylint: disable=no-member
             if name in person.alias:
                 return std_name
         return name
@@ -80,13 +86,52 @@ class MeetingMeta(BaseModel):
     host: Optional[str] = None
     notes: Optional[str] = None
     expected_actions: list[str] = Field(default_factory=list)
-    language: str = "zh-CN"
+    language: str = "zh-CN"  # 兼容旧字段，等价于 primary_language 的默认来源
+    language_mode: LanguageMode = LanguageMode.SINGLE_PRIMARY
+    primary_language: Optional[str] = None
+    secondary_language: Optional[str] = None
     created_at: Optional[datetime] = None
 
-    def __init__(self, **data):
-        super().__init__(**data)
+    @model_validator(mode="after")
+    def _normalize_language_profile(self):
+        primary = (self.primary_language or self.language or "zh-CN").strip()
+        secondary = (self.secondary_language or "").strip() or None
+        self.primary_language = primary
+        self.language = primary
+        self.secondary_language = secondary
+
+        if secondary and self.language_mode == LanguageMode.SINGLE_PRIMARY:
+            self.language_mode = LanguageMode.BILINGUAL
+        if not secondary and self.language_mode == LanguageMode.BILINGUAL:
+            self.language_mode = LanguageMode.SINGLE_PRIMARY
+
         if self.created_at is None:
             self.created_at = datetime.now()
+        return self
+
+    @property
+    def effective_primary_language(self) -> str:
+        """获取有效的主要语言"""
+        return (self.primary_language or self.language or "zh-CN").strip()
+
+    @property
+    def effective_secondary_language(self) -> Optional[str]:
+        """获取有效的第二语言"""
+        return (self.secondary_language or "").strip() or None
+
+    @property
+    def is_bilingual(self) -> bool:
+        """是否为双语言会议"""
+        return self.language_mode == LanguageMode.BILINGUAL and bool(
+            self.effective_secondary_language)
+
+    def language_profile_label(self) -> str:
+        """用于界面展示的语言画像摘要"""
+        primary = self.effective_primary_language
+        secondary = self.effective_secondary_language
+        if self.is_bilingual and secondary:
+            return f"双语言 ({primary} / {secondary})"
+        return f"单主语言 ({primary})"
 
 
 class ProjectConfig(BaseModel):

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ project.name }} - 术语维护</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+</head>
+<body class="workspace-page">
+    <div class="workspace-shell">
+        <div class="workspace-nav">
+            <div class="workspace-nav-title">
+                <a href="{{ url_for('main.workspace_project_detail', project_id=project.id) }}" class="workspace-nav-link">返回项目</a>
+                <span>/</span>
+                <span>术语维护</span>
+            </div>
+        </div>
+
+        <header class="workspace-header">
+            <div>
+                <p class="workspace-eyebrow">Glossary</p>
+                <h1>{{ project.name }} 术语维护</h1>
+                <p class="workspace-subtitle">{{ project.description or '在这里维护项目术语、别名，以及 AI 识别出来的待审核建议。' }}</p>
+            </div>
+        </header>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <section class="workspace-flash-stack">
+            {% for category, message in messages %}
+            <div class="workspace-flash workspace-flash-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        </section>
+        {% endif %}
+        {% endwith %}
+
+        <section class="workspace-editor-grid">
+            <article class="workspace-panel workspace-editor-pane">
+                <div class="workspace-section-head">
+                    <div>
+                        <p class="workspace-launch-eyebrow">Editor</p>
+                        <h2>术语编辑器</h2>
+                    </div>
+                </div>
+                <p class="workspace-launch-text">每行一个术语，可用 <code>|</code> 补充别名，例如：<code>MeetingEZ | meeting ez | 米听易</code>。</p>
+                <form method="POST" action="{{ url_for('main.workspace_project_glossary', project_id=project.id) }}" class="workspace-form">
+                    <textarea name="glossary_editor" class="workspace-textarea" rows="22" placeholder="每行一个术语，使用 | 分隔别名">{{ editor_text }}</textarea>
+                    <button type="submit" class="btn btn-success">保存术语表</button>
+                </form>
+            </article>
+
+            <aside class="workspace-panel workspace-side-pane">
+                <div class="workspace-subsection">
+                    <h3>待审核建议</h3>
+                    {% if pending_terms %}
+                    <div class="workspace-simple-list">
+                        {% for item in pending_terms %}
+                        <div class="workspace-simple-card">
+                            <strong>{{ item.canonical }}</strong>
+                            <p>{{ item.aliases|join('、') if item.aliases else '无别名' }}</p>
+                            <p>频次：{{ item.frequency }}{% if item.source_meeting %} · 来源：{{ item.source_meeting }}{% endif %}</p>
+                            <div class="workspace-card-actions">
+                                <form method="POST" action="{{ url_for('main.workspace_project_glossary_approve', project_id=project.id) }}">
+                                    <input type="hidden" name="canonical" value="{{ item.canonical }}">
+                                    <button type="submit" class="btn btn-small btn-outline">确认</button>
+                                </form>
+                                <form method="POST" action="{{ url_for('main.workspace_project_glossary_reject', project_id=project.id) }}">
+                                    <input type="hidden" name="canonical" value="{{ item.canonical }}">
+                                    <input type="hidden" name="reason" value="人工拒绝">
+                                    <button type="submit" class="btn btn-small btn-outline">拒绝</button>
+                                </form>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <p class="workspace-empty-inline">当前没有待审核术语。</p>
+                    {% endif %}
+                </div>
+
+                <div class="workspace-subsection">
+                    <h3>已确认术语</h3>
+                    {% if confirmed_terms %}
+                    <div class="workspace-tag-list">
+                        {% for item in confirmed_terms %}
+                        <span class="workspace-pill">{{ item.canonical }}</span>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <p class="workspace-empty-inline">还没有已确认术语。</p>
+                    {% endif %}
+                </div>
+
+                <div class="workspace-subsection">
+                    <h3>已拒绝</h3>
+                    {% if rejected_terms %}
+                    <div class="workspace-simple-list">
+                        {% for item in rejected_terms %}
+                        <div class="workspace-simple-row">
+                            <strong>{{ item.canonical }}</strong>
+                            <span>{{ item.reason or '无备注' }}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <p class="workspace-empty-inline">还没有被拒绝的术语。</p>
+                    {% endif %}
+                </div>
+            </aside>
+        </section>
+    </div>
+</body>
+</html>

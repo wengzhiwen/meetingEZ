@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ meeting.title }} - {{ file.label }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+</head>
+<body class="workspace-page">
+    <div class="workspace-shell">
+        <div class="workspace-nav">
+            <div class="workspace-nav-title">
+                <a href="{{ url_for('main.workspace_project_detail', project_id=project.id) }}" class="workspace-nav-link">返回项目</a>
+                <span>/</span>
+                <span>{{ meeting.title }}</span>
+                <span>/</span>
+                <span>{{ file.label }}</span>
+            </div>
+        </div>
+
+        <header class="workspace-header">
+            <div>
+                <p class="workspace-eyebrow">Meeting File</p>
+                <h1>{{ file.label }}</h1>
+                <p class="workspace-subtitle">{{ file.name }} · {{ file.size_label }} · {{ file.updated_at }}</p>
+            </div>
+            <div class="workspace-header-actions">
+                <a href="{{ url_for('main.workspace_meeting_file_download', project_id=project.id, meeting_dir=meeting.dir_name, filename=file.name) }}" class="btn btn-outline">下载文件</a>
+            </div>
+        </header>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <section class="workspace-flash-stack">
+            {% for category, message in messages %}
+            <div class="workspace-flash workspace-flash-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        </section>
+        {% endif %}
+        {% endwith %}
+
+        <section class="workspace-section">
+            <article class="workspace-panel workspace-editor-pane">
+                {% if file.editable %}
+                <form method="POST" action="{{ url_for('main.workspace_meeting_file', project_id=project.id, meeting_dir=meeting.dir_name, filename=file.name) }}" class="workspace-form">
+                    <textarea name="content" class="workspace-textarea" rows="30">{{ file.content }}</textarea>
+                    <button type="submit" class="btn btn-success">保存文件</button>
+                </form>
+                {% else %}
+                <pre class="workspace-code-block">{{ file.content }}</pre>
+                {% endif %}
+            </article>
+        </section>
+    </div>
+</body>
+</html>

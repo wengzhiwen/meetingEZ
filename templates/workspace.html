@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MeetingEZ 工作台</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+</head>
+<body class="workspace-page">
+    <div class="workspace-shell">
+        <div class="workspace-nav">
+            <div class="workspace-nav-title">
+                <span>会议控制台</span>
+            </div>
+            <div class="workspace-header-actions">
+                {% if access_protected %}
+                <a href="{{ url_for('main.logout') }}" class="btn btn-outline">退出登录</a>
+                {% endif %}
+            </div>
+        </div>
+
+        <header class="workspace-header">
+            <div>
+                <p class="workspace-eyebrow">MeetingEZ Console</p>
+                <h1>卡片式工作台</h1>
+                <p class="workspace-subtitle">从这里进入快速转写、创建新项目，或进入某个项目继续维护会议、音频、纪要和项目知识。</p>
+            </div>
+            <p class="workspace-header-note">{{ workspace_summary.project_count }} 个项目 · {{ workspace_summary.meeting_count }} 场会议 · {{ workspace_summary.pending_count }} 个待处理项</p>
+        </header>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <section class="workspace-flash-stack">
+            {% for category, message in messages %}
+            <div class="workspace-flash workspace-flash-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        </section>
+        {% endif %}
+        {% endwith %}
+
+        {% if workspace_error %}
+        <section class="workspace-alert workspace-alert-error">
+            {{ workspace_error }}
+        </section>
+        {% endif %}
+
+        <section class="workspace-console-grid">
+            <article class="workspace-console-card workspace-console-card-accent">
+                <p class="workspace-launch-eyebrow">快速模式</p>
+                <h2>直接开始实时转写</h2>
+                <p class="workspace-launch-text">{{ quick_entry.description }}</p>
+                <div class="workspace-inline-stats">
+                    <span class="workspace-inline-stat">不绑定项目</span>
+                    <span class="workspace-inline-stat">适合临时会议</span>
+                    <span class="workspace-inline-stat">立刻进入实时页</span>
+                </div>
+                <div class="workspace-card-actions">
+                    <a href="{{ url_for('main.realtime', mode='quick', project=quick_project_id) }}" class="btn btn-success">开始快速转写</a>
+                </div>
+            </article>
+
+            <article class="workspace-console-card">
+                <p class="workspace-launch-eyebrow">新建项目</p>
+                <h2>为一条长期会议流建立专属空间</h2>
+                {% if can_create_project %}
+                <form method="POST" action="{{ url_for('main.workspace_project_create') }}" class="workspace-form">
+                    <label for="project_name">项目名称</label>
+                    <input id="project_name" name="project_name" type="text" placeholder="例如：Plan B" required>
+
+                    <label for="project_description">项目描述</label>
+                    <textarea id="project_description" name="project_description" class="workspace-textarea workspace-textarea-compact" rows="3" placeholder="一句话说明项目目标、上下文或业务背景"></textarea>
+
+                    <div class="workspace-form-row">
+                        <div>
+                            <label for="project_team">团队成员</label>
+                            <input id="project_team" name="project_team" type="text" placeholder="Alice, Bob, Carol">
+                        </div>
+                        <div>
+                            <label for="project_start_date">启动日期</label>
+                            <input id="project_start_date" name="project_start_date" type="date" value="{{ default_meeting_date }}">
+                        </div>
+                    </div>
+
+                    <button type="submit" class="btn btn-success">创建项目</button>
+                </form>
+                {% else %}
+                <p class="workspace-launch-text">当前工作区是单项目模式，暂时不能从 Web 端继续创建多个项目。配置 <code>PROJECTS_DIR</code> 后，这里会直接变成新建项目卡片。</p>
+                {% endif %}
+            </article>
+
+            {% for project in projects %}
+            <article class="workspace-console-card">
+                <div class="workspace-card-header">
+                    <div>
+                        <p class="workspace-launch-eyebrow">项目</p>
+                        <h2>{{ project.name }}</h2>
+                    </div>
+                    {% if project.is_default %}
+                    <span class="workspace-badge">当前工作区</span>
+                    {% endif %}
+                </div>
+                <p class="workspace-launch-text">{{ project.description or '暂无项目描述，可进入项目页补充。' }}</p>
+                <div class="workspace-card-stats">
+                    <div class="workspace-mini-stat">
+                        <span>会议</span>
+                        <strong>{{ project.meeting_count }}</strong>
+                    </div>
+                    <div class="workspace-mini-stat">
+                        <span>待处理</span>
+                        <strong>{{ project.pending_asr + project.pending_minutes }}</strong>
+                    </div>
+                    <div class="workspace-mini-stat">
+                        <span>术语</span>
+                        <strong>{{ project.glossary_confirmed }}</strong>
+                    </div>
+                </div>
+                <div class="workspace-inline-stats">
+                    <span class="workspace-inline-stat">{{ '已维护背景说明' if project.background_exists else '待补背景说明' }}</span>
+                    {% if project.last_meeting %}
+                    <span class="workspace-inline-stat">最近会议：{{ project.last_meeting }}</span>
+                    {% endif %}
+                </div>
+                <div class="workspace-card-actions">
+                    <a href="{{ url_for('main.workspace_project_detail', project_id=project.id) }}" class="btn btn-outline">进入项目</a>
+                </div>
+            </article>
+            {% endfor %}
+        </section>
+
+        {% if not projects %}
+        <section class="workspace-empty">
+            <h2>还没有可展示的项目</h2>
+            <p>可以先从上面的新建项目卡片开始，或者直接进入快速模式做一次临时转写。</p>
+        </section>
+        {% endif %}
+    </div>
+</body>
+</html>
