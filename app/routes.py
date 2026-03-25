@@ -16,6 +16,9 @@ from flask import (Blueprint, flash, jsonify, redirect, render_template,
                    request, send_from_directory, session, url_for)
 
 from app.workspace_service import (DEFAULT_PROJECT_ID, NO_PROJECT_ID,
+                                   _normalize_language_mode,
+                                   _parse_team_members,
+                                   _save_project_config,
                                    build_audio_manager_view_model,
                                    build_background_editor_view_model,
                                    clone_config_for_dir,
@@ -33,7 +36,8 @@ from app.workspace_service import (DEFAULT_PROJECT_ID, NO_PROJECT_ID,
                                    resolve_project_handle,
                                    update_project_background,
                                    update_project_glossary)
-from meeting_agent.config import AUDIO_EXTENSIONS, Config
+from meeting_agent.models import LanguageMode, MeetingMeta, MeetingType, ProjectConfig
+from meeting_agent.config import AUDIO_EXTENSIONS, MEETING_META_FILE, Config
 from meeting_agent.glossary import GlossaryManager
 from meeting_agent.scanner import MeetingScanner
 
@@ -130,7 +134,10 @@ def _log_timing(stage, **fields):
 
 
 def _build_workspace_project_options(include_no_project=False):
-    handles = list_project_handles()
+    try:
+        handles = list_project_handles()
+    except OSError:
+        handles = []
     options = []
     if include_no_project:
         options.append({
@@ -189,6 +196,18 @@ def _build_agent_run_command(project_handle, meeting_dir_name, action):
 def _workspace_root_dir():
     """返回仓库根目录。"""
     return Path(__file__).resolve().parents[1]
+
+
+def _safe_error(exc: Exception) -> str:
+    """将异常转为不含服务端路径的错误消息。
+    OSError/FileNotFoundError 的 str() 会暴露绝对路径，统一替换为业务描述。
+    其他业务异常（ValueError、RuntimeError 等）均为自定义消息，可直接使用。
+    """
+    if isinstance(exc, FileNotFoundError):
+        return '资源不存在'
+    if isinstance(exc, OSError):
+        return '服务器文件系统错误'
+    return str(exc)
 
 
 def _sanitize_audio_filename(filename):
@@ -276,8 +295,9 @@ def logout():
 
 @main_bp.route('/')
 def index():
-    """控制台首页。"""
-    return _render_workspace_page(request.args.get('error'))
+    """控制台首页 — SPA 工作台。"""
+    access_protected = bool(os.getenv('ACCESS_CODE', '').strip())
+    return render_template('workspace_spa.html', access_protected=access_protected)
 
 
 @main_bp.route('/realtime')
@@ -350,8 +370,8 @@ def realtime():
 
 @main_bp.route('/workspace')
 def workspace():
-    """控制台别名路由。"""
-    return _render_workspace_page(request.args.get('error'))
+    """控制台别名路由 — 重定向到 SPA。"""
+    return redirect(url_for('main.index'))
 
 
 @main_bp.route('/workspace/project/create', methods=['POST'])
@@ -374,12 +394,8 @@ def workspace_project_create():
 
 @main_bp.route('/workspace/project/<project_id>')
 def workspace_project_detail(project_id):
-    """项目详情页。"""
-    try:
-        return _render_project_detail_page(project_id)
-    except FileNotFoundError as exc:
-        flash(str(exc), 'error')
-        return redirect(url_for('main.workspace'))
+    """项目详情页 — 重定向到 SPA。"""
+    return redirect(f'/#project/{project_id}')
 
 
 @main_bp.route('/workspace/project/<project_id>/meeting/create', methods=['POST'])
@@ -404,23 +420,8 @@ def workspace_project_create_meeting(project_id):
 
 @main_bp.route('/workspace/project/<project_id>/glossary', methods=['GET', 'POST'])
 def workspace_project_glossary(project_id):
-    """项目术语维护页。"""
-    try:
-        if request.method == 'POST':
-            update_project_glossary(project_id, request.form.get('glossary_editor', ''))
-            flash('术语表已更新', 'success')
-            return redirect(url_for('main.workspace_project_glossary',
-                                    project_id=project_id))
-
-        view_model = build_glossary_editor_view_model(project_id)
-        return render_template('workspace_glossary.html', **view_model)
-    except FileNotFoundError as exc:
-        flash(str(exc), 'error')
-        return redirect(url_for('main.workspace'))
-    except Exception as exc:  # pragma: no cover - validation fallback
-        flash(str(exc), 'error')
-        return redirect(url_for('main.workspace_project_glossary',
-                                project_id=project_id))
+    """术语页 — 重定向到 SPA。"""
+    return redirect(f'/#project/{project_id}/glossary')
 
 
 @main_bp.route('/workspace/project/<project_id>/glossary/approve', methods=['POST'])
@@ -460,34 +461,14 @@ def workspace_project_glossary_reject(project_id):
 
 @main_bp.route('/workspace/project/<project_id>/background', methods=['GET', 'POST'])
 def workspace_project_background(project_id):
-    """项目背景说明维护页。"""
-    try:
-        if request.method == 'POST':
-            update_project_background(project_id, request.form.get('background_content', ''))
-            flash('背景说明已保存', 'success')
-            return redirect(url_for('main.workspace_project_background',
-                                    project_id=project_id))
-
-        view_model = build_background_editor_view_model(project_id)
-        return render_template('workspace_background.html', **view_model)
-    except FileNotFoundError as exc:
-        flash(str(exc), 'error')
-        return redirect(url_for('main.workspace'))
-    except Exception as exc:  # pragma: no cover - defensive branch
-        flash(str(exc), 'error')
-        return redirect(url_for('main.workspace_project_background',
-                                project_id=project_id))
+    """背景页 — 重定向到 SPA。"""
+    return redirect(f'/#project/{project_id}/background')
 
 
 @main_bp.route('/workspace/project/<project_id>/meeting/<meeting_dir>/audio')
 def workspace_meeting_audio(project_id, meeting_dir):
-    """会议音频管理页。"""
-    try:
-        view_model = build_audio_manager_view_model(project_id, meeting_dir)
-        return render_template('workspace_audio.html', **view_model)
-    except FileNotFoundError as exc:
-        flash(str(exc), 'error')
-        return redirect(url_for('main.workspace_project_detail', project_id=project_id))
+    """音频管理页 — 重定向到 SPA 会议列表。"""
+    return redirect(f'/#project/{project_id}/meetings')
 
 
 @main_bp.route('/workspace/project/<project_id>/meeting/<meeting_dir>/audio/upload',
@@ -606,27 +587,8 @@ def workspace_meeting_process(project_id, meeting_dir):
 @main_bp.route('/workspace/project/<project_id>/meeting/<meeting_dir>/files/<path:filename>',
                methods=['GET', 'POST'])
 def workspace_meeting_file(project_id, meeting_dir, filename):
-    """查看或编辑会议文件。"""
-    try:
-        if request.method == 'POST':
-            _, _, _, file_path = resolve_meeting_file(project_id, meeting_dir, filename)
-            if file_path.suffix.lower() not in {'.json', '.md', '.txt', '.csv', '.log'}:
-                raise ValueError('当前文件不支持在线编辑')
-            file_path.write_text(request.form.get('content', ''), encoding='utf-8')
-            flash('文件已保存', 'success')
-            return redirect(url_for('main.workspace_meeting_file',
-                                    project_id=project_id,
-                                    meeting_dir=meeting_dir,
-                                    filename=filename))
-
-        view_model = build_meeting_file_editor_view_model(project_id, meeting_dir, filename)
-        return render_template('workspace_file.html', **view_model)
-    except FileNotFoundError as exc:
-        flash(str(exc), 'error')
-        return redirect(url_for('main.workspace_project_detail', project_id=project_id))
-    except Exception as exc:  # pragma: no cover - defensive branch
-        flash(str(exc), 'error')
-        return redirect(url_for('main.workspace_project_detail', project_id=project_id))
+    """文件页 — 重定向到 SPA 会议列表。"""
+    return redirect(f'/#project/{project_id}/meetings')
 
 
 @main_bp.route(
@@ -694,7 +656,405 @@ def favicon():
                                mimetype='image/vnd.microsoft.icon')
 
 
-# ---- API ----
+# ---- SPA JSON API ----
+
+
+def _strip_project_paths(projects: list) -> list:
+    """从项目列表中移除服务端文件路径字段。"""
+    for p in projects:
+        p.pop('path', None)
+    return projects
+
+
+@main_bp.route('/api/workspace/dashboard')
+def api_workspace_dashboard():
+    """SPA 仪表盘数据。"""
+    try:
+        view_model = build_workspace_view_model()
+        view_model['can_create_project'] = bool(Config().projects_dir)
+        _strip_project_paths(view_model.get('projects', []))
+        return jsonify(view_model)
+    except OSError:
+        # 项目目录尚不存在，返回空工作区
+        cfg = Config()
+        return jsonify({
+            'projects': [],
+            'can_create_project': bool(cfg.projects_dir),
+            'workspace_summary': {'project_count': 0, 'meeting_count': 0, 'pending_count': 0},
+            'quick_entry': {'project_id': NO_PROJECT_ID, 'title': '快速模式', 'description': ''},
+        })
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 500
+
+
+@main_bp.route('/api/workspace/project/create', methods=['POST'])
+def api_workspace_project_create():
+    """创建新项目 (JSON)。"""
+    try:
+        data = request.get_json() or {}
+        created = create_project_workspace(
+            name=data.get('name'),
+            description=data.get('description'),
+            team=data.get('team'),
+            start_date=data.get('start_date'),
+        )
+        created.pop('project_path', None)
+        return jsonify(created)
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>')
+def api_workspace_project_detail(project_id):
+    """项目详情 (JSON)。"""
+    try:
+        view_model = build_project_detail_view_model(project_id)
+        view_model['meeting_type_options'] = MEETING_TYPE_OPTIONS
+        view_model['language_options'] = LANGUAGE_OPTIONS
+        view_model.get('project', {}).pop('path', None)
+        return jsonify(view_model)
+    except OSError:
+        # 目录不存在（如 PROJECTS_DIR 已配置但尚未初始化），返回空项目
+        return jsonify({
+            'project': {
+                'id': project_id, 'name': project_id, 'description': '',
+                'team': [], 'start_date': '-', 'meeting_count': 0,
+                'pending_asr': 0, 'pending_minutes': 0,
+                'glossary_confirmed': 0, 'glossary_pending': 0,
+                'actions_total': 0, 'actions_overdue': 0,
+                'background_exists': False, 'pending_term_count': 0,
+            },
+            'meetings': [],
+            'recent_actions': [],
+            'meeting_type_options': MEETING_TYPE_OPTIONS,
+            'language_options': LANGUAGE_OPTIONS,
+        })
+    except FileNotFoundError as exc:
+        return jsonify({'error': _safe_error(exc)}), 404
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 500
+
+
+@main_bp.route('/api/workspace/project/<project_id>', methods=['PUT'])
+def api_workspace_project_update(project_id):
+    """更新项目基本信息 (JSON)。"""
+    try:
+        data = request.get_json() or {}
+        handle = resolve_project_handle(project_id)
+        project_config = clone_config_for_dir(Config(), handle.path)
+        scanner = MeetingScanner(project_config)
+        meta = scanner.load_project_config() or ProjectConfig(name=handle.name)
+        if 'name' in data and data['name'].strip():
+            meta.name = data['name'].strip()
+        if 'description' in data:
+            meta.description = data['description'].strip() or None
+        if 'team' in data:
+            meta.team = _parse_team_members(data['team'])
+        if 'start_date' in data:
+            meta.start_date = data['start_date'].strip() or None
+        _save_project_config(handle.path, meta)
+        return jsonify({'ok': True})
+    except FileNotFoundError as exc:
+        return jsonify({'error': _safe_error(exc)}), 404
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/meeting/create', methods=['POST'])
+def api_workspace_project_create_meeting(project_id):
+    """创建会议 (JSON)。"""
+    try:
+        data = request.get_json() or {}
+        created = create_meeting_workspace(
+            project_id=project_id,
+            title=data.get('title'),
+            meeting_date=data.get('meeting_date'),
+            meeting_type=data.get('meeting_type'),
+            primary_language=data.get('primary_language'),
+            secondary_language=data.get('secondary_language'),
+            language_mode=data.get('language_mode'),
+            notes=data.get('notes'),
+        )
+        return jsonify(created)
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/glossary')
+def api_workspace_project_glossary(project_id):
+    """术语编辑器数据 (JSON)。"""
+    try:
+        view_model = build_glossary_editor_view_model(project_id)
+        # 将 Pydantic 对象转为可序列化 dict
+        view_model['confirmed_terms'] = [
+            {'canonical': t.canonical, 'aliases': t.aliases, 'type': t.type.value}
+            for t in view_model['confirmed_terms']
+        ]
+        view_model['pending_terms'] = [
+            {'canonical': t.canonical, 'aliases': t.aliases, 'frequency': t.frequency,
+             'source_meeting': t.source_meeting or ''}
+            for t in view_model['pending_terms']
+        ]
+        view_model['rejected_terms'] = [
+            {'canonical': t.canonical, 'reason': t.reason or ''}
+            for t in view_model['rejected_terms']
+        ]
+        return jsonify(view_model)
+    except FileNotFoundError as exc:
+        return jsonify({'error': _safe_error(exc)}), 404
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 500
+
+
+@main_bp.route('/api/workspace/project/<project_id>/glossary', methods=['PUT'])
+def api_workspace_project_glossary_save(project_id):
+    """保存术语表 (JSON)。"""
+    try:
+        data = request.get_json() or {}
+        update_project_glossary(project_id, data.get('editor_text', ''))
+        return jsonify({'ok': True})
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/glossary/approve', methods=['POST'])
+def api_workspace_glossary_approve(project_id):
+    """确认待审核术语 (JSON)。"""
+    try:
+        handle = resolve_project_handle(project_id)
+        project_config = clone_config_for_dir(Config(), handle.path)
+        glossary_mgr = GlossaryManager(project_config)
+        data = request.get_json() or {}
+        canonical = (data.get('canonical') or '').strip()
+        if canonical and glossary_mgr.approve_suggestion(canonical):
+            return jsonify({'ok': True, 'canonical': canonical})
+        return jsonify({'error': '未找到待审核术语'}), 404
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/glossary/reject', methods=['POST'])
+def api_workspace_glossary_reject(project_id):
+    """拒绝待审核术语 (JSON)。"""
+    try:
+        handle = resolve_project_handle(project_id)
+        project_config = clone_config_for_dir(Config(), handle.path)
+        glossary_mgr = GlossaryManager(project_config)
+        data = request.get_json() or {}
+        canonical = (data.get('canonical') or '').strip()
+        reason = (data.get('reason') or '').strip() or None
+        if canonical and glossary_mgr.reject_suggestion(canonical, reason):
+            return jsonify({'ok': True, 'canonical': canonical})
+        return jsonify({'error': '未找到待审核术语'}), 404
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/background')
+def api_workspace_project_background(project_id):
+    """背景说明数据 (JSON)。"""
+    try:
+        view_model = build_background_editor_view_model(project_id)
+        view_model.pop('file_path', None)
+        return jsonify(view_model)
+    except FileNotFoundError as exc:
+        return jsonify({'error': _safe_error(exc)}), 404
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 500
+
+
+@main_bp.route('/api/workspace/project/<project_id>/background', methods=['PUT'])
+def api_workspace_project_background_save(project_id):
+    """保存背景说明 (JSON)。"""
+    try:
+        data = request.get_json() or {}
+        update_project_background(project_id, data.get('content', ''))
+        return jsonify({'ok': True})
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>', methods=['PUT'])
+def api_workspace_meeting_update(project_id, meeting_dir):
+    """更新会议基本信息 (JSON)。"""
+    try:
+        data = request.get_json() or {}
+        handle, project_config, meeting_path = resolve_meeting_dir(project_id, meeting_dir)
+        scanner = MeetingScanner(project_config)
+        meta = scanner.load_meeting_meta(meeting_path) or MeetingMeta(
+            date=meeting_dir[:10], title=meeting_dir)
+        if 'title' in data and data['title'].strip():
+            meta.title = data['title'].strip()
+        if 'date' in data and data['date'].strip():
+            meta.date = data['date'].strip()
+        if 'type' in data:
+            try:
+                meta.type = MeetingType(data['type'])
+            except ValueError:
+                meta.type = MeetingType.OTHER
+        if 'notes' in data:
+            meta.notes = data['notes'].strip() or None
+        if 'primary_language' in data:
+            meta.primary_language = data['primary_language'].strip() or meta.primary_language
+        if 'secondary_language' in data:
+            meta.secondary_language = data['secondary_language'].strip() or None
+        if 'language_mode' in data:
+            mode_str = _normalize_language_mode(
+                data['language_mode'], meta.secondary_language or '')
+            meta.language_mode = LanguageMode(mode_str)
+        meta_file = meeting_path / MEETING_META_FILE
+        with open(meta_file, 'w', encoding='utf-8') as f:
+            json.dump(meta.model_dump(), f, ensure_ascii=False, indent=2, default=str)
+        return jsonify({'ok': True})
+    except FileNotFoundError as exc:
+        return jsonify({'error': _safe_error(exc)}), 404
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/audio')
+def api_workspace_meeting_audio(project_id, meeting_dir):
+    """音频文件列表 (JSON)。"""
+    try:
+        view_model = build_audio_manager_view_model(project_id, meeting_dir)
+        return jsonify(view_model)
+    except FileNotFoundError as exc:
+        return jsonify({'error': _safe_error(exc)}), 404
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 500
+
+
+@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/audio/upload',
+               methods=['POST'])
+def api_workspace_meeting_audio_upload(project_id, meeting_dir):
+    """上传音频 (multipart)。"""
+    try:
+        _, _, resolved_meeting_dir = resolve_meeting_dir(project_id, meeting_dir)
+        uploaded_files = [item for item in request.files.getlist('audio_files')
+                          if item and item.filename]
+        if not uploaded_files:
+            raise ValueError('请选择至少一个音频文件')
+
+        saved_files = []
+        for uploaded in uploaded_files:
+            target_name = _sanitize_audio_filename(uploaded.filename)
+            target_path = _allocate_available_path(resolved_meeting_dir, target_name)
+            uploaded.save(target_path)
+            saved_files.append(target_path.name)
+
+        return jsonify({'ok': True, 'saved': saved_files})
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/audio/<path:filename>/rename',
+               methods=['POST'])
+def api_workspace_meeting_audio_rename(project_id, meeting_dir, filename):
+    """重命名音频 (JSON)。"""
+    try:
+        _, _, resolved_meeting_dir, audio_path = resolve_meeting_audio_file(project_id,
+                                                                            meeting_dir,
+                                                                            filename)
+        data = request.get_json() or {}
+        new_name = _sanitize_audio_filename(data.get('new_name'))
+        target_path = resolved_meeting_dir / new_name
+        if target_path.exists() and target_path.name != audio_path.name:
+            raise ValueError('目标文件名已存在')
+        audio_path.rename(target_path)
+        return jsonify({'ok': True, 'new_name': target_path.name})
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/audio/<path:filename>',
+               methods=['DELETE'])
+def api_workspace_meeting_audio_delete(project_id, meeting_dir, filename):
+    """删除音频 (JSON)。"""
+    try:
+        _, _, _, audio_path = resolve_meeting_audio_file(project_id, meeting_dir, filename)
+        audio_path.unlink()
+        return jsonify({'ok': True})
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/process',
+               methods=['POST'])
+def api_workspace_meeting_process(project_id, meeting_dir):
+    """触发会议处理 (JSON)。"""
+    data = request.get_json() or {}
+    action = (data.get('action') or 'full').strip()
+    try:
+        handle, project_config, resolved_meeting_dir = resolve_meeting_dir(project_id,
+                                                                           meeting_dir)
+        scanner = MeetingScanner(project_config)
+        task = next((item for item in scanner.scan_meetings()
+                     if item.dir_name == resolved_meeting_dir.name), None)
+        if not task:
+            raise FileNotFoundError(f'未找到会议: {meeting_dir}')
+
+        if action == 'minutes' and not task.has_transcript:
+            raise ValueError('当前会议还没有正式转写，无法只生成会议纪要')
+
+        cmd = _build_agent_run_command(handle, resolved_meeting_dir.name, action)
+        result = subprocess.run(cmd,
+                                cwd=_workspace_root_dir(),
+                                capture_output=True,
+                                text=True,
+                                check=False,
+                                timeout=1800)
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or '处理失败').strip().splitlines()
+            raise RuntimeError(message[-1] if message else '处理失败')
+
+        return jsonify({'ok': True, 'message': '会议处理完成'})
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/files/<path:filename>')
+def api_workspace_meeting_file(project_id, meeting_dir, filename):
+    """获取文件内容 (JSON)。"""
+    try:
+        view_model = build_meeting_file_editor_view_model(project_id, meeting_dir, filename)
+        return jsonify(view_model)
+    except FileNotFoundError as exc:
+        return jsonify({'error': _safe_error(exc)}), 404
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 500
+
+
+@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/files/<path:filename>',
+               methods=['PUT'])
+def api_workspace_meeting_file_save(project_id, meeting_dir, filename):
+    """保存文件内容 (JSON)。"""
+    try:
+        _, _, _, file_path = resolve_meeting_file(project_id, meeting_dir, filename)
+        if file_path.suffix.lower() not in {'.json', '.md', '.txt', '.csv', '.log'}:
+            raise ValueError('当前文件不支持在线编辑')
+        data = request.get_json() or {}
+        file_path.write_text(data.get('content', ''), encoding='utf-8')
+        return jsonify({'ok': True})
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/files/<path:filename>',
+               methods=['DELETE'])
+def api_workspace_meeting_file_delete(project_id, meeting_dir, filename):
+    """删除会议文件（转写结果、纪要等）。"""
+    try:
+        _, _, _, file_path = resolve_meeting_file(project_id, meeting_dir, filename)
+        if file_path.name in {MEETING_META_FILE}:
+            raise ValueError('该文件不允许删除')
+        if file_path.exists():
+            file_path.unlink()
+        return jsonify({'ok': True})
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+# ---- Realtime & Utility API ----
 
 
 @main_bp.route('/api/test-connection', methods=['POST'])
@@ -804,7 +1164,10 @@ def create_realtime_session():
 @main_bp.route('/api/workspace/projects', methods=['GET'])
 def workspace_projects():
     """返回工作区项目列表，供实时页选择协同来源。"""
-    handles = list_project_handles()
+    try:
+        handles = list_project_handles()
+    except OSError:
+        handles = []
     return jsonify({
         'projects': [{
             'id': handle.project_id,
@@ -826,9 +1189,9 @@ def workspace_context_pack():
         )
         return jsonify(pack)
     except FileNotFoundError as exc:
-        return jsonify({'error': str(exc)}), 404
+        return jsonify({'error': _safe_error(exc)}), 404
     except Exception as exc:  # pragma: no cover - defensive branch
-        return jsonify({'error': str(exc)}), 500
+        return jsonify({'error': _safe_error(exc)}), 500
 
 
 @main_bp.route('/api/translate', methods=['POST'])
