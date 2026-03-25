@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MeetingEZ 工作台</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/workspace-spa.css') }}">
+    <link rel="icon" href="{{ url_for('main.favicon') }}">
+</head>
+<body class="spa-body">
+
+<div class="spa-shell">
+    <!-- 侧边栏 -->
+    <aside class="spa-sidebar" id="sidebar">
+        <div class="spa-sidebar-header">
+            <h2 class="spa-logo">MeetingEZ</h2>
+            <button class="spa-sidebar-close btn-icon" id="sidebarClose" title="关闭侧栏">&times;</button>
+        </div>
+
+        <a href="{{ url_for('main.realtime', mode='quick') }}" class="spa-quick-btn">
+            <span class="spa-quick-icon">&#9654;</span> 快速转写
+        </a>
+
+        <div class="spa-sidebar-section">
+            <div class="spa-sidebar-section-head">
+                <span>项目</span>
+                <button class="spa-btn-tiny" id="btnNewProject" title="新建项目">+</button>
+            </div>
+            <nav class="spa-project-list" id="projectList">
+                <div class="spa-loading">加载中...</div>
+            </nav>
+        </div>
+
+        {% if access_protected %}
+        <div class="spa-sidebar-footer">
+            <a href="{{ url_for('main.logout') }}" class="spa-logout-link">退出登录</a>
+        </div>
+        {% endif %}
+    </aside>
+
+    <!-- 主内容区 -->
+    <div class="spa-main-area">
+        <header class="spa-topbar" id="topbar">
+            <button class="spa-hamburger btn-icon" id="hamburgerBtn" title="菜单">&#9776;</button>
+            <nav class="spa-breadcrumb" id="breadcrumb"></nav>
+        </header>
+        <main class="spa-content" id="mainContent">
+            <div class="spa-loading">加载中...</div>
+        </main>
+    </div>
+</div>
+
+<!-- SlideOver 文件查看/编辑 -->
+<div class="spa-slide-over-backdrop hidden" id="slideOverBackdrop"></div>
+<div class="spa-slide-over" id="slideOver">
+    <div class="spa-slide-over-header">
+        <h3 id="slideOverTitle">文件</h3>
+        <button class="btn-icon spa-slide-over-close" id="slideOverClose">&times;</button>
+    </div>
+    <div class="spa-slide-over-body" id="slideOverBody"></div>
+</div>
+
+<!-- Modal -->
+<div class="spa-modal-backdrop hidden" id="modalBackdrop"></div>
+<div class="spa-modal hidden" id="modal">
+    <div class="spa-modal-header">
+        <h3 id="modalTitle">对话框</h3>
+        <button class="btn-icon spa-modal-close" id="modalClose">&times;</button>
+    </div>
+    <div class="spa-modal-body" id="modalBody"></div>
+</div>
+
+<!-- Toast -->
+<div class="spa-toast-container" id="toastContainer"></div>
+
+<script type="module" src="{{ url_for('static', filename='js/workspace/main.js') }}"></script>
+</body>
+</html>
