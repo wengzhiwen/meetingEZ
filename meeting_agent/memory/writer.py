@@ -182,7 +182,7 @@ class MemoryWriter:
         self,
         project_name: str,
         description: str = "",
-        team: Optional[list[str]] = None,
+        team=None,
         start_date: Optional[str] = None,
         project_dir: Optional[Path] = None,
     ):

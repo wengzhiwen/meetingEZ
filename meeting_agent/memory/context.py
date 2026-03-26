@@ -139,15 +139,34 @@ class ContextManager:
         with open(context_file, "a", encoding="utf-8") as f:
             f.write("".join(updates))
 
+    @staticmethod
+    def _format_team_list(team) -> str:
+        """将 TeamMember 列表格式化为 Markdown。"""
+        if not team:
+            return '- 待添加'
+        lines = []
+        for m in team:
+            if hasattr(m, 'name'):
+                parts = [m.name]
+                if m.nickname:
+                    parts[0] = f"{m.name}（{m.nickname}）"
+                if m.role:
+                    parts.append(m.role)
+                lines.append(f"- {'：'.join(parts)}")
+            else:
+                lines.append(f"- {m}")
+        return chr(10).join(lines)
+
     def create_initial(
         self,
         project_name: str,
         description: str = "",
-        team: Optional[list[str]] = None,
+        team=None,
         start_date: Optional[str] = None,
         project_dir: Optional[Path] = None,
     ) -> str:
         """创建初始项目上下文"""
+        team_text = self._format_team_list(team)
         content = f"""# 项目上下文
 
 > 最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M')}
@@ -163,7 +182,7 @@ class ContextManager:
 **启动日期**: {start_date or '待定'}
 
 **团队**:
-{(chr(10) + '- ' + chr(10).join(f'- {m}' for m in team)) if team else '- 待添加'}
+{team_text}
 
 ---
 

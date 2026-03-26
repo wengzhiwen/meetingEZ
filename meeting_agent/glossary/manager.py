@@ -156,6 +156,89 @@ class GlossaryManager:
         self.save_glossary()
         return entry
 
+    def remove_entry(self, canonical: str) -> bool:
+        """从术语表中删除术语"""
+        glossary = self.load_glossary()
+        result = glossary._find_entry(canonical)
+        if result:
+            glossary.entries.pop(result[0])
+            glossary.last_updated = datetime.now()
+            self.save_glossary()
+            return True
+        return False
+
+    def update_entry(
+        self,
+        canonical: str,
+        new_canonical: Optional[str] = None,
+        aliases: Optional[list[str]] = None,
+        type: Optional[TermType] = None,
+        context: Optional[str] = None,
+    ) -> Optional[GlossaryEntry]:
+        """更新术语表中的术语"""
+        glossary = self.load_glossary()
+        result = glossary._find_entry(canonical)
+        if not result:
+            return None
+        idx, entry = result
+        if new_canonical is not None:
+            entry.canonical = new_canonical
+        if aliases is not None:
+            entry.aliases = aliases
+        if type is not None:
+            entry.type = type
+        if context is not None:
+            entry.context = context
+        glossary.last_updated = datetime.now()
+        glossary.entries[idx] = entry
+        self.save_glossary()
+        return entry
+
+    def revert_confirmed_to_pending(self, canonical: str) -> bool:
+        """将已确认术语回退到待审核状态"""
+        glossary = self.load_glossary()
+        result = glossary._find_entry(canonical)
+        if not result:
+            return False
+        idx, entry = result
+        pending = self.load_pending()
+        from meeting_agent.models_glossary import TermSuggestion
+        suggestion = TermSuggestion(
+            canonical=entry.canonical,
+            aliases=entry.aliases,
+            type=entry.type,
+            context=entry.context or entry.description,
+            source_meeting=entry.source_meeting,
+        )
+        pending.add(suggestion)
+        self.save_pending()
+        glossary.entries.pop(idx)
+        glossary.last_updated = datetime.now()
+        self.save_glossary()
+        return True
+
+    def revert_rejected_to_pending(self, canonical: str) -> bool:
+        """将已拒绝术语回退到待审核状态"""
+        rejected = self.load_rejected()
+        term = next((r for r in rejected.rejected if r.canonical.lower() == canonical.lower()), None)
+        if not term:
+            return False
+        pending = self.load_pending()
+        from meeting_agent.models_glossary import TermSuggestion
+        suggestion = TermSuggestion(
+            canonical=term.canonical,
+            aliases=term.aliases,
+            type=term.type,
+            context=term.context,
+            source_meeting=term.source_meeting,
+        )
+        pending.add(suggestion)
+        self.save_pending()
+        rejected.rejected = [r for r in rejected.rejected if r.canonical.lower() != canonical.lower()]
+        rejected.last_updated = datetime.now()
+        self.save_rejected()
+        return True
+
     def confirm_term(self, canonical: str) -> bool:
         """确认术语"""
         glossary = self.load_glossary()

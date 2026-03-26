@@ -27,10 +27,12 @@ class GlossaryEntry(BaseModel):
     aliases: list[str] = Field(default_factory=list)  # 别名/常见错误识别
     type: TermType = TermType.OTHER
     description: Optional[str] = None       # 简短描述
+    context: Optional[str] = None           # 使用背景/上下文（来自 AI 建议）
     auto_generated: bool = True             # 是否自动生成
     confirmed_at: Optional[datetime] = None # 确认时间
     confirmed_by: Optional[str] = None      # 确认人
     source_meeting: Optional[str] = None    # 来源会议
+    frequency: Optional[int] = None         # 在建议时的频率（保留以兼容旧数据）
 
 
 class RejectedTerm(BaseModel):

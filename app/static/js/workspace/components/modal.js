@@ -7,10 +7,13 @@ const titleEl = document.getElementById('modalTitle');
 const bodyEl = document.getElementById('modalBody');
 const closeBtn = document.getElementById('modalClose');
 
-closeBtn.addEventListener('click', closeModal);
-backdrop.addEventListener('click', closeModal);
+let _locked = false;
+
+closeBtn.addEventListener('click', () => { if (!_locked) closeModal(); });
+backdrop.addEventListener('click', () => { if (!_locked) closeModal(); });
 
 export function openModal(title, contentHTML) {
+    _locked = false;
     titleEl.textContent = title;
     bodyEl.innerHTML = contentHTML;
     backdrop.classList.remove('hidden');
@@ -18,10 +21,14 @@ export function openModal(title, contentHTML) {
 }
 
 export function closeModal() {
+    _locked = false;
     backdrop.classList.add('hidden');
     modal.classList.add('hidden');
     bodyEl.innerHTML = '';
 }
+
+export function lockModal() { _locked = true; }
+export function unlockModal() { _locked = false; }
 
 export function getModalBody() {
     return bodyEl;

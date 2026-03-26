@@ -1,234 +1,246 @@
 """
 项目上下文管理模块
 
-_context.md 文件用于存储人工维护的解释性内容，
-帮助 LLM 更好理解会议中的专业术语、业务概念等。
+_context.json 存储结构化的 Q&A 条目，帮助 LLM 理解项目专有名词和背景。
+每条 entry = {id, topic, question, answer?, source_meeting?, created_at, answered_at?}
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import secrets
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+from pydantic import BaseModel, Field
 
 from meeting_agent.config import Config
 
 logger = logging.getLogger("meeting_agent.context")
 
 
-CONTEXT_TEMPLATE = """# 项目上下文
+class ContextEntry(BaseModel):
+    """背景说明条目（一个问题及其解答）"""
+    id: str
+    topic: str                              # 简短标题
+    question: str                           # 完整问题描述
+    answer: Optional[str] = None            # 解答（为空则未回答）
+    source_meeting: Optional[str] = None    # 来源会议
+    created_at: datetime = Field(default_factory=datetime.now)
+    answered_at: Optional[datetime] = None
 
-> 此文件用于存储项目的关键信息，帮助 AI 更好地理解会议内容。
-> 请根据实际情况补充和更新以下内容。
-
-## 项目简介
-
-<!-- 描述项目的核心目标和定位 -->
-
-
-## 核心概念
-
-### 概念1
-<!-- 解释这个概念是什么，为什么重要 -->
-
-
-### 概念2
-<!-- 解释这个概念是什么，为什么重要 -->
+    @property
+    def is_answered(self) -> bool:
+        return bool(self.answer and self.answer.strip())
 
 
-## 技术架构
-
-<!-- 简要说明技术栈、架构特点 -->
-
-
-## 团队角色
-
-<!-- 说明团队成员及其职责 -->
-
-
-## 业务流程
-
-<!-- 说明核心业务流程 -->
-
-
-## 常见问题
-
-<!-- 记录常见的问题和解决方案 -->
-
-
-## 备注
-
-<!-- 其他需要说明的内容 -->
-"""
+class ContextStore(BaseModel):
+    """背景说明存储"""
+    version: int = 1
+    last_updated: Optional[datetime] = None
+    entries: list[ContextEntry] = Field(default_factory=list)
 
 
 class ContextManager:
-    """项目上下文管理器"""
+    """项目背景说明管理器"""
 
     def __init__(self, config: Optional[Config] = None):
         self.config = config or Config()
-        self._context_cache: Optional[str] = None
+        self._store: Optional[ContextStore] = None
 
     @property
     def context_file(self) -> Path:
+        return self.config.meetings_dir / "_context.json"
+
+    @property
+    def legacy_md_file(self) -> Path:
         return self.config.meetings_dir / "_context.md"
 
-    def load(self, force_reload: bool = False) -> Optional[str]:
-        """
-        加载项目上下文
+    # ------------------------------------------------------------------ #
+    # Load / Save
+    # ------------------------------------------------------------------ #
 
-        Args:
-            force_reload: 是否强制重新加载
+    def load_store(self, force_reload: bool = False) -> ContextStore:
+        if self._store is not None and not force_reload:
+            return self._store
 
-        Returns:
-            上下文内容或 None
-        """
-        if self._context_cache is not None and not force_reload:
-            return self._context_cache
-
-        if not self.context_file.exists():
-            logger.debug("上下文文件不存在: %s", self.context_file)
-            return None
-
-        try:
-            self._context_cache = self.context_file.read_text(encoding="utf-8")
-            logger.info("加载项目上下文: %s", self.context_file)
-            return self._context_cache
-        except Exception as e:
-            logger.warning("加载上下文失败: %s", e)
-            return None
-
-    def save(self, content: str) -> None:
-        """保存项目上下文"""
-        self.context_file.write_text(content, encoding="utf-8")
-        self._context_cache = content
-        logger.info("保存项目上下文: %s", self.context_file)
-
-    def initialize(self) -> None:
-        """初始化项目上下文文件"""
         if self.context_file.exists():
-            logger.info("上下文文件已存在，跳过初始化")
-            return
+            try:
+                with open(self.context_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self._store = ContextStore(**data)
+                return self._store
+            except Exception as e:
+                logger.warning("加载背景说明失败: %s", e)
 
-        self.save(CONTEXT_TEMPLATE)
-        logger.info("初始化项目上下文: %s", self.context_file)
+        self._store = ContextStore()
+        return self._store
+
+    def save_store(self) -> None:
+        if self._store is None:
+            return
+        self._store.last_updated = datetime.now()
+        with open(self.context_file, "w", encoding="utf-8") as f:
+            json.dump(self._store.model_dump(mode="json"), f, ensure_ascii=False, indent=2)
+        logger.info("保存背景说明: %s", self.context_file)
+
+    # ------------------------------------------------------------------ #
+    # Entry CRUD
+    # ------------------------------------------------------------------ #
+
+    def list_entries(self) -> list[ContextEntry]:
+        return list(self.load_store().entries)
+
+    def get_entry(self, entry_id: str) -> Optional[ContextEntry]:
+        store = self.load_store()
+        return next((e for e in store.entries if e.id == entry_id), None)
+
+    def add_entry(
+        self,
+        topic: str,
+        question: str,
+        answer: Optional[str] = None,
+        source_meeting: Optional[str] = None,
+    ) -> ContextEntry:
+        store = self.load_store()
+        # Deduplicate by topic
+        for existing in store.entries:
+            if existing.topic.lower() == topic.lower():
+                logger.debug("条目已存在，跳过: %s", topic)
+                return existing
+        entry = ContextEntry(
+            id=secrets.token_hex(5),
+            topic=topic,
+            question=question,
+            answer=answer or None,
+            source_meeting=source_meeting,
+            answered_at=datetime.now() if answer else None,
+        )
+        store.entries.append(entry)
+        self.save_store()
+        return entry
+
+    def update_entry(
+        self,
+        entry_id: str,
+        topic: Optional[str] = None,
+        question: Optional[str] = None,
+        answer: Optional[str] = None,
+    ) -> Optional[ContextEntry]:
+        store = self.load_store()
+        entry = next((e for e in store.entries if e.id == entry_id), None)
+        if not entry:
+            return None
+        if topic is not None:
+            entry.topic = topic
+        if question is not None:
+            entry.question = question
+        if answer is not None:
+            was_answered = entry.is_answered
+            entry.answer = answer.strip() or None
+            if entry.answer and not was_answered:
+                entry.answered_at = datetime.now()
+            elif not entry.answer:
+                entry.answered_at = None
+        self.save_store()
+        return entry
+
+    def delete_entry(self, entry_id: str) -> bool:
+        store = self.load_store()
+        before = len(store.entries)
+        store.entries = [e for e in store.entries if e.id != entry_id]
+        if len(store.entries) < before:
+            self.save_store()
+            return True
+        return False
+
+    # ------------------------------------------------------------------ #
+    # Compatibility: append_questions (called from __main__.py)
+    # ------------------------------------------------------------------ #
 
     def append_questions(
         self,
         questions: list[dict[str, str]],
         source_meeting: Optional[str] = None,
     ) -> int:
-        """
-        追加需要人工解释的问题到上下文文件
-
-        Args:
-            questions: 问题列表，每个包含 topic, question, reason
-            source_meeting: 来源会议目录名
-
-        Returns:
-            追加的问题数量
-        """
+        """追加问题列表（兼容旧调用接口）。"""
         if not questions:
             return 0
-
-        existing = self.load() or ""
-
-        # 过滤已存在的问题（检查标题是否已存在）
-        new_questions = []
+        count = 0
+        store = self.load_store()
+        existing_topics = {e.topic.lower() for e in store.entries}
         for q in questions:
             topic = q.get("topic", "未知主题")
-            # 检查是否已存在该主题（作为 ### 标题）
-            if f"### {topic}" in existing:
+            if topic.lower() in existing_topics:
                 logger.debug("问题已存在，跳过: %s", topic)
                 continue
-            new_questions.append(q)
+            entry = ContextEntry(
+                id=secrets.token_hex(5),
+                topic=topic,
+                question=q.get("question", ""),
+                answer=None,
+                source_meeting=source_meeting,
+            )
+            store.entries.append(entry)
+            existing_topics.add(topic.lower())
+            count += 1
+        if count:
+            self.save_store()
+        logger.info("追加 %d 个待解释问题", count)
+        return count
 
-        if not new_questions:
-            return 0
+    def initialize(self) -> None:
+        """初始化（新项目）：如存在旧 md 文件则迁移，否则创建空 store。"""
+        if self.context_file.exists():
+            return
+        self._store = ContextStore()
+        self.save_store()
+        logger.info("初始化背景说明: %s", self.context_file)
 
-        # 构建待解释部分
-        lines = ["\n\n---\n\n## 待补充的解释\n"]
-        if source_meeting:
-            lines.append(f"> 以下问题来自会议: {source_meeting}\n")
+    # ------------------------------------------------------------------ #
+    # Legacy load (used by some callers expecting plain text)
+    # ------------------------------------------------------------------ #
 
-        for q in new_questions:
-            topic = q.get("topic", "未知主题")
-            question = q.get("question", "")
-            reason = q.get("reason", "")
+    def load(self, force_reload: bool = False) -> Optional[str]:
+        """返回已回答条目的纯文本（供 build_context_prompt 使用）。"""
+        return self.build_context_prompt() or None
 
-            lines.append(f"### {topic}\n")
-            lines.append(f"<!-- 问题: {question} -->\n")
-            lines.append(f"<!-- 原因: {reason} -->\n")
-            lines.append("<!-- 请在此处补充解释 -->\n\n")
+    def save(self, content: str) -> None:
+        """兼容旧 textarea 保存接口（无操作，JSON 模式下不再使用）。"""
+        logger.warning("ContextManager.save(str) 已废弃，请使用 update_entry()")
 
-        # 追加到文件
-        new_content = existing + "".join(lines)
-        self.save(new_content)
-
-        logger.info("追加 %d 个待解释问题到: %s", len(questions), self.context_file)
-        return len(questions)
+    # ------------------------------------------------------------------ #
+    # LLM Prompt
+    # ------------------------------------------------------------------ #
 
     def build_context_prompt(self) -> str:
-        """
-        构建用于 LLM 的上下文 prompt
-
-        Returns:
-            用于 prompt 的上下文文本
-        """
-        content = self.load()
-
-        if not content:
+        """构建用于 LLM 的上下文 prompt（仅已回答条目）。"""
+        entries = [e for e in self.list_entries() if e.is_answered]
+        if not entries:
             return ""
 
-        # 过滤掉空行和注释，提取有效内容
-        lines = content.split("\n")
-        effective_lines = []
+        lines = ["## 项目背景说明\n"]
+        for e in entries:
+            lines.append(f"### {e.topic}")
+            lines.append(e.answer)
+            lines.append("")
 
-        for line in lines:
-            # 跳过空行
-            if not line.strip():
-                continue
-            # 跳过 HTML 注释
-            if "<!--" in line and "-->" in line:
-                continue
-            # 跳过只有注释的行
-            stripped = line.strip()
-            if stripped.startswith("<!--") and stripped.endswith("-->"):
-                continue
-            effective_lines.append(line)
-
-        if not effective_lines:
-            return ""
-
-        return f"""## 项目上下文（由用户维护）
-
-{content}
-
-*请参考以上项目上下文来理解会议内容。*
-"""
+        return "\n".join(lines)
 
 
 def get_combined_context(config: Optional[Config] = None) -> str:
-    """
-    获取组合的上下文信息（术语表 + 项目上下文）
-
-    Args:
-        config: 配置对象
-
-    Returns:
-        组合的上下文 prompt
-    """
+    """获取组合上下文信息（术语表 + 背景说明）。"""
     from meeting_agent.glossary import GlossaryManager
 
     parts = []
 
-    # 术语表
     glossary_mgr = GlossaryManager(config)
     glossary_text = glossary_mgr.build_glossary_prompt()
     if glossary_text:
         parts.append(glossary_text)
 
-    # 项目上下文
     context_mgr = ContextManager(config)
     context_text = context_mgr.build_context_prompt()
     if context_text:
