@@ -1033,7 +1033,7 @@
     right: 0;
     top: 0;
     height: 100vh;
-    width: clamp(580px, 45vw, 1200px);
+    width: clamp(640px, 58vw, 1400px);
     background: var(--panel-strong);
     border-left: 1px solid var(--panel-border);
     transform: translateX(100%);
