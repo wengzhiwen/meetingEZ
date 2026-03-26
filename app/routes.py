@@ -191,7 +191,7 @@ def _build_agent_run_command(project_handle, meeting_dir_name, action):
     if action == 'minutes':
         cmd.append('--force-minutes')
     elif action == 'reprocess':
-        cmd.extend(['--force-asr', '--force-minutes'])
+        cmd.append('--force-minutes')  # 仅强制重生成纪要；ASR 由 agent 自行判断（新音频才跑）
 
     return cmd
 
