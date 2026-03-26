@@ -190,6 +190,8 @@ def _build_agent_run_command(project_handle, meeting_dir_name, action):
 
     if action == 'minutes':
         cmd.append('--force-minutes')
+    elif action == 'reprocess':
+        cmd.extend(['--force-asr', '--force-minutes'])
 
     return cmd
 
@@ -816,7 +818,7 @@ def api_workspace_project_glossary(project_id):
                 'source_meeting': getattr(t, 'source_meeting', '') or '',
                 'reason': t.reason or '',
             })
-        terms.sort(key=lambda x: x['canonical'].lower())
+        terms.reverse()
         return jsonify({'project': view_model['project'], 'terms': terms})
     except FileNotFoundError as exc:
         return jsonify({'error': _safe_error(exc)}), 404

@@ -411,6 +411,7 @@ def build_background_editor_view_model(project_id: Optional[str],
                 "answer": e.answer or "",
                 "source_meeting": e.source_meeting or "",
                 "is_answered": e.is_answered,
+                "created_at": e.created_at.isoformat(),
             }
             for e in entries
         ],

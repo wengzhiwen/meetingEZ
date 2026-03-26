@@ -92,7 +92,8 @@ export async function renderBackground(container, projectId) {
 }
 
 function _render(container, data, projectId) {
-    const entries = data.entries || [];
+    const entries = (data.entries || []).slice().sort((a, b) =>
+        (b.created_at || '') > (a.created_at || '') ? 1 : -1);
     const answered   = entries.filter(e => e.is_answered).length;
     const unanswered = entries.filter(e => !e.is_answered).length;
 
@@ -123,7 +124,28 @@ function _render(container, data, projectId) {
 }
 
 function _bindEvents(container, projectId) {
-    const reload = () => renderBackground(container, projectId);
+    const reload = async () => {
+        const activeFilter = container.querySelector('.spa-btn-filter.active')?.dataset.filter || 'all';
+        const scrollEl = container.closest('.spa-tab-content') || container.parentElement;
+        const scrollTop = scrollEl ? scrollEl.scrollTop : 0;
+        try {
+            const data = await api.getBackground(projectId);
+            _render(container, data, projectId);
+            const fb = container.querySelector(`.spa-btn-filter[data-filter="${activeFilter}"]`);
+            if (fb) {
+                container.querySelectorAll('.spa-btn-filter').forEach(b => b.classList.remove('active'));
+                fb.classList.add('active');
+                if (activeFilter !== 'all') {
+                    container.querySelectorAll('.spa-bentry-row').forEach(row => {
+                        row.style.display = row.dataset.state === activeFilter ? '' : 'none';
+                    });
+                }
+            }
+            if (scrollEl) requestAnimationFrame(() => { scrollEl.scrollTop = scrollTop; });
+        } catch (e) {
+            showToast('刷新失败: ' + e.message, 'error');
+        }
+    };
 
     /* ---- Filter ---- */
     container.querySelectorAll('.spa-btn-filter').forEach(btn => {

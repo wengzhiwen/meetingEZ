@@ -268,6 +268,9 @@ function meetingCard(m, projectId) {
                     ${m.has_transcript && m.needs_minutes ? `
                         <button class="spa-btn spa-btn-outline spa-btn-sm btn-process" data-action="minutes">仅处理纪要</button>
                     ` : ''}
+                </div>` : m.has_minutes ? `
+                <div class="spa-meeting-actions">
+                    <button class="spa-btn spa-btn-sm spa-btn-muted btn-process" data-action="reprocess">重新处理</button>
                 </div>` : ''}
 
                 ${renderFileSection(files, projectId)}
@@ -429,7 +432,7 @@ function bindEvents(container, data, projectId) {
             } catch (e) {
                 showToast(e.message, 'error');
                 btn.disabled = false;
-                btn.textContent = action === 'full' ? '完整处理' : '仅处理纪要';
+                btn.textContent = action === 'full' ? '完整处理' : action === 'minutes' ? '仅处理纪要' : '重新处理';
             }
         });
     });

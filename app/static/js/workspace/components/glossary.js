@@ -159,7 +159,28 @@ function _render(container, data, projectId) {
 }
 
 function _bindEvents(container, projectId) {
-    const reload = () => renderGlossary(container, projectId);
+    const reload = async () => {
+        const activeFilter = container.querySelector('.spa-btn-filter.active')?.dataset.filter || 'all';
+        const scrollEl = container.closest('.spa-tab-content') || container.parentElement;
+        const scrollTop = scrollEl ? scrollEl.scrollTop : 0;
+        try {
+            const data = await api.getGlossary(projectId);
+            _render(container, data, projectId);
+            const fb = container.querySelector(`.spa-btn-filter[data-filter="${activeFilter}"]`);
+            if (fb) {
+                container.querySelectorAll('.spa-btn-filter').forEach(b => b.classList.remove('active'));
+                fb.classList.add('active');
+                if (activeFilter !== 'all') {
+                    container.querySelectorAll('.spa-gterm-row').forEach(row => {
+                        row.style.display = row.dataset.state === activeFilter ? '' : 'none';
+                    });
+                }
+            }
+            if (scrollEl) requestAnimationFrame(() => { scrollEl.scrollTop = scrollTop; });
+        } catch (e) {
+            showToast('刷新失败: ' + e.message, 'error');
+        }
+    };
 
     /* ---- Filter buttons ---- */
     container.querySelectorAll('.spa-btn-filter').forEach(btn => {
