@@ -5,6 +5,106 @@ import { api } from '../api.js';
 import { showToast } from '../toast.js';
 import { openFile } from './slide-over.js';
 import { invalidateCache, render as renderProject } from './project-tabs.js';
+import { openModal, closeModal, lockModal, unlockModal, getModalBody } from './modal.js';
+
+function formatSize(bytes) {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1048576).toFixed(1)} MB`;
+}
+
+function uploadXHR(url, formData, onProgress) {
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', url);
+        xhr.upload.addEventListener('progress', (e) => {
+            if (e.lengthComputable) onProgress(e.loaded, e.total);
+        });
+        xhr.addEventListener('load', () => {
+            try {
+                const data = JSON.parse(xhr.responseText);
+                if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+                else reject(new Error(data.error || `请求失败 (${xhr.status})`));
+            } catch { reject(new Error('响应解析失败')); }
+        });
+        xhr.addEventListener('error', () => reject(new Error('网络错误')));
+        xhr.send(formData);
+    });
+}
+
+async function confirmAndUpload(projectId, dir, files) {
+    const rows = Array.from(files).map(f =>
+        `<li class="upload-file-row"><span class="upload-file-name">${f.name.replace(/</g, '&lt;')}</span><span class="upload-file-size">${formatSize(f.size)}</span></li>`
+    ).join('');
+
+    openModal('上传音频文件', `
+        <p style="margin-bottom:0.7rem">即将上传以下 <strong>${files.length}</strong> 个文件：</p>
+        <ul class="upload-file-list">${rows}</ul>
+        <div class="upload-actions">
+            <button class="spa-btn spa-btn-outline spa-btn-sm" id="uploadCancelBtn">取消</button>
+            <button class="spa-btn spa-btn-primary spa-btn-sm" id="uploadConfirmBtn">确认上传</button>
+        </div>
+    `);
+
+    const body = getModalBody();
+    const confirmed = await new Promise(resolve => {
+        body.querySelector('#uploadConfirmBtn').addEventListener('click', () => resolve(true));
+        body.querySelector('#uploadCancelBtn').addEventListener('click', () => resolve(false));
+        document.getElementById('modalClose').addEventListener('click', () => resolve(false), { once: true });
+    });
+
+    if (!confirmed) {
+        closeModal();
+        return false;
+    }
+
+    lockModal();
+    const closeBtn = document.getElementById('modalClose');
+    closeBtn.disabled = true;
+    closeBtn.style.opacity = '0.3';
+    closeBtn.style.pointerEvents = 'none';
+    body.innerHTML = `
+        <p id="uploadStatusText" style="margin-bottom:0.6rem">准备上传...</p>
+        <div class="upload-progress-track">
+            <div class="upload-progress-bar" id="uploadProgressBar"></div>
+        </div>
+        <p id="uploadSpeedText" style="margin-top:0.5rem;font-size:0.82rem;color:var(--muted)"></p>
+    `;
+
+    const fd = new FormData();
+    for (const f of files) fd.append('audio_files', f);
+    const url = `/api/workspace/project/${encodeURIComponent(projectId)}/meeting/${encodeURIComponent(dir)}/audio/upload`;
+
+    let lastLoaded = 0, lastTime = Date.now();
+    try {
+        await uploadXHR(url, fd, (loaded, total) => {
+            const now = Date.now();
+            const dt = (now - lastTime) / 1000;
+            const speed = dt > 0.1 ? (loaded - lastLoaded) / dt : 0;
+            if (dt > 0.1) { lastLoaded = loaded; lastTime = now; }
+            const pct = Math.min(100, Math.round(loaded / total * 100));
+            const bar = document.getElementById('uploadProgressBar');
+            const statusEl = document.getElementById('uploadStatusText');
+            const speedEl = document.getElementById('uploadSpeedText');
+            if (bar) bar.style.width = pct + '%';
+            if (statusEl) statusEl.textContent = `已上传 ${formatSize(loaded)} / ${formatSize(total)}  (${pct}%)`;
+            if (speedEl && speed > 0) speedEl.textContent = `速率：${formatSize(speed)}/s`;
+        });
+        closeModal();
+        return true;
+    } catch (e) {
+        unlockModal();
+        closeBtn.disabled = false;
+        closeBtn.style.opacity = '';
+        closeBtn.style.pointerEvents = '';
+        body.innerHTML = `<p style="color:var(--danger,#e55);margin-bottom:0.8rem">${e.message}</p>
+            <div class="upload-actions">
+                <button class="spa-btn spa-btn-outline spa-btn-sm" id="uploadErrCloseBtn">关闭</button>
+            </div>`;
+        body.querySelector('#uploadErrCloseBtn').addEventListener('click', closeModal);
+        throw e;
+    }
+}
 
 const MEETING_TYPE_LABELS = {
     review: '评审会', weekly: '周会', brainstorm: '头脑风暴',
@@ -33,6 +133,32 @@ function langOptionsWithEmpty(selected) {
     return none + langOptions(selected);
 }
 
+const _pollingTimers = new Map(); // dir -> timerId
+
+function _startPolling(projectId, dir) {
+    if (_pollingTimers.has(dir)) return;
+    const timerId = setInterval(async () => {
+        try {
+            const result = await api.getMeetingProcessStatus(projectId, dir);
+            if (!result.is_processing) {
+                clearInterval(timerId);
+                _pollingTimers.delete(dir);
+                if (result.error) {
+                    showToast('处理失败：' + result.error, 'error');
+                } else {
+                    showToast('处理完成', 'success');
+                }
+                invalidateCache(projectId);
+                const { render } = await import('./project-tabs.js');
+                await render(projectId, 'meetings');
+            }
+        } catch {
+            // 忽略轮询错误，继续轮询
+        }
+    }, 3000);
+    _pollingTimers.set(dir, timerId);
+}
+
 export function renderMeetings(container, data, projectId) {
     // 同步语言选项，与后端 LANGUAGE_OPTIONS 保持一致
     _langPairs = data.language_options || _langPairs;
@@ -47,7 +173,7 @@ export function renderMeetings(container, data, projectId) {
         ${meetings.map(m => meetingCard(m, projectId)).join('')}
     </div>`;
 
-    bindEvents(container, projectId);
+    bindEvents(container, data, projectId);
 }
 
 function meetingCard(m, projectId) {
@@ -60,9 +186,11 @@ function meetingCard(m, projectId) {
             <span class="spa-meeting-expand-icon">&#9654;</span>
             <span class="spa-meeting-title">${esc(m.title)}</span>
             <span class="spa-meeting-date">${esc(m.date)}</span>
-            ${m.needs_asr || m.needs_minutes
-                ? `<span class="spa-meeting-status spa-status-pending">${esc(m.pending_label)}</span>`
-                : ''}
+            ${m.is_processing
+                ? `<span class="spa-meeting-status spa-status-processing">处理中...</span>`
+                : m.needs_asr || m.needs_minutes
+                    ? `<span class="spa-meeting-status spa-status-pending">${esc(m.pending_label)}</span>`
+                    : ''}
         </div>
         <div class="spa-meeting-body">
             <div class="spa-meeting-detail">
@@ -129,7 +257,10 @@ function meetingCard(m, projectId) {
                     </div>
                 </div>
 
-                ${m.needs_asr || m.needs_minutes ? `
+                ${m.is_processing ? `
+                <div class="spa-meeting-actions">
+                    <span class="spa-processing-indicator">&#9679; 处理中，请稍候...</span>
+                </div>` : m.needs_asr || m.needs_minutes ? `
                 <div class="spa-meeting-actions">
                     ${m.needs_asr || m.needs_minutes ? `
                         <button class="spa-btn spa-btn-outline spa-btn-sm btn-process" data-action="full">完整处理</button>
@@ -220,7 +351,7 @@ function renderAudioSection(m, projectId) {
         </div>`;
 }
 
-function bindEvents(container, projectId) {
+function bindEvents(container, data, projectId) {
     // 展开/折叠
     container.querySelectorAll('.spa-meeting-head').forEach(head => {
         head.addEventListener('click', () => {
@@ -288,13 +419,13 @@ function bindEvents(container, projectId) {
             const dir = btn.closest('.spa-meeting-card').dataset.dir;
             const action = btn.dataset.action;
             btn.disabled = true;
-            btn.textContent = '处理中...';
+            btn.textContent = '启动中...';
             try {
                 await api.processMeeting(projectId, dir, action);
-                showToast('处理完成', 'success');
                 invalidateCache(projectId);
                 const { render } = await import('./project-tabs.js');
                 await render(projectId, 'meetings');
+                _startPolling(projectId, dir);
             } catch (e) {
                 showToast(e.message, 'error');
                 btn.disabled = false;
@@ -303,24 +434,30 @@ function bindEvents(container, projectId) {
         });
     });
 
+    // 启动对处理中会议的轮询
+    container.querySelectorAll('.spa-meeting-card').forEach(card => {
+        const dir = card.dataset.dir;
+        const m = (data.meetings || []).find(x => x.dir_name === dir);
+        if (m && m.is_processing) _startPolling(projectId, dir);
+    });
+
     // 音频上传（含空状态和有文件时两种入口）
     container.querySelectorAll('.audio-upload-input').forEach(input => {
         input.addEventListener('change', async () => {
             if (!input.files.length) return;
             const dir = input.closest('.spa-meeting-card').dataset.dir;
-            const label = input.closest('label');
-            if (label) label.style.pointerEvents = 'none';
-            const fd = new FormData();
-            for (const f of input.files) fd.append('audio_files', f);
+            const files = Array.from(input.files);
+            input.value = '';
             try {
-                await api.uploadAudio(projectId, dir, fd);
-                showToast('音频已上传', 'success');
-                invalidateCache(projectId);
-                const { render } = await import('./project-tabs.js');
-                await render(projectId, 'meetings');
+                const uploaded = await confirmAndUpload(projectId, dir, files);
+                if (uploaded) {
+                    showToast('音频已上传', 'success');
+                    invalidateCache(projectId);
+                    const { render } = await import('./project-tabs.js');
+                    await render(projectId, 'meetings');
+                }
             } catch (e) {
                 showToast(e.message, 'error');
-                if (label) label.style.pointerEvents = '';
             }
         });
     });

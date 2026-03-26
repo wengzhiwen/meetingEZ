@@ -22,7 +22,8 @@ from meeting_agent.config import (AUDIO_EXTENSIONS, MEETING_META_FILE,
 from meeting_agent.glossary import GlossaryManager
 from meeting_agent.glossary.context_manager import ContextManager as BackgroundContextManager
 from meeting_agent.memory import ActionsManager, MemoryWriter
-from meeting_agent.models import LanguageMode, MeetingMeta, MeetingType, ProjectConfig
+from meeting_agent.models import (LanguageMode, MeetingMeta, MeetingType,
+                                  ProjectConfig, TeamMember)
 from meeting_agent.models_glossary import GlossaryEntry, TermType
 from meeting_agent.scanner import MeetingScanner
 
@@ -157,7 +158,7 @@ def resolve_meeting_file(project_id: Optional[str],
 def create_project_workspace(
     name: str,
     description: Optional[str] = None,
-    team: Optional[str] = None,
+    team=None,
     start_date: Optional[str] = None,
     base_config: Optional[Config] = None,
 ) -> dict:
@@ -333,7 +334,7 @@ def build_project_detail_view_model(project_id: Optional[str],
     project = {
         **project_card,
         "start_date": str(project_meta.start_date) if project_meta.start_date else "未设置",
-        "team": project_meta.team or [],
+        "team": [m.model_dump(exclude_none=True) for m in (project_meta.team or [])],
         "tags": project_meta.tags or [],
         "background_excerpt": _truncate_text(background_content, limit=260),
         "background_exists": bool(background_content.strip()),
@@ -359,7 +360,7 @@ def build_glossary_editor_view_model(project_id: Optional[str],
     project_meta = _load_or_build_project_meta(handle, scanner)
     glossary = glossary_mgr.load_glossary()
     confirmed_terms = sorted(
-        [entry for entry in glossary.entries if entry.confirmed_at],
+        glossary.entries,
         key=lambda entry: entry.canonical.lower(),
     )
     pending_terms = sorted(glossary_mgr.load_pending().suggestions,
@@ -395,14 +396,24 @@ def build_background_editor_view_model(project_id: Optional[str],
     scanner = MeetingScanner(project_config)
     project_meta = _load_or_build_project_meta(handle, scanner)
 
+    entries = background_mgr.list_entries()
     return {
         "project": {
             "id": handle.project_id,
             "name": project_meta.name,
             "description": project_meta.description or "",
         },
-        "content": background_mgr.load() or "",
-        "file_path": str(background_mgr.context_file),
+        "entries": [
+            {
+                "id": e.id,
+                "topic": e.topic,
+                "question": e.question,
+                "answer": e.answer or "",
+                "source_meeting": e.source_meeting or "",
+                "is_answered": e.is_answered,
+            }
+            for e in entries
+        ],
     }
 
 
@@ -623,6 +634,14 @@ def build_context_pack(
         top_terms = "、".join(entry.canonical for entry in confirmed_terms[:12])
         realtime_prompt_parts.append(f"高优先级术语：{top_terms}")
 
+    # 团队成员昵称→标准名映射
+    nickname_mappings = []
+    for member in (project_meta.team or []):
+        if member.nickname and member.nickname != member.name:
+            nickname_mappings.append(f"{member.nickname}→{member.name}")
+    if nickname_mappings:
+        realtime_prompt_parts.append(f"团队成员别名映射：{'、'.join(nickname_mappings)}")
+
     if recent_meetings:
         realtime_prompt_parts.append(f"近期相关会议：{'；'.join(recent_meetings[:4])}")
 
@@ -716,8 +735,9 @@ def _build_meeting_card(task) -> dict:
         "has_minutes": task.has_minutes,
         "needs_asr": task.needs_asr,
         "needs_minutes": task.needs_minutes,
+        "is_processing": task.is_processing,
         "pending_label": " / ".join(pending_items) if pending_items else "已完成",
-        "status_tone": "pending" if pending_items else "ready",
+        "status_tone": "processing" if task.is_processing else ("pending" if pending_items else "ready"),
     }
 
 
@@ -792,16 +812,45 @@ def _save_project_config(project_dir: Path, project_config: ProjectConfig) -> No
                   default=str)
 
 
-def _parse_team_members(team: Optional[str]) -> list[str]:
-    """将逗号/换行分隔的成员文本转为列表。"""
+def _parse_team_members(team) -> list[TeamMember]:
+    """解析团队成员数据。
+
+    接受两种格式:
+    - list[dict]: [{name, nickname, role}, ...] — 结构化输入
+    - str: 逗号/换行分隔的名字列表 — 简易输入，nickname/role 留空
+    """
     if not team:
         return []
-    members = []
-    for raw in re.split(r"[\n,，]+", team):
-        member = raw.strip()
-        if member and member not in members:
-            members.append(member)
-    return members
+    if isinstance(team, list):
+        result = []
+        seen = set()
+        for item in team:
+            if isinstance(item, dict):
+                name = (item.get('name') or '').strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                result.append(TeamMember(
+                    name=name,
+                    nickname=(item.get('nickname') or '').strip() or None,
+                    role=(item.get('role') or '').strip() or None,
+                ))
+            elif isinstance(item, str) and item.strip():
+                name = item.strip()
+                if name not in seen:
+                    seen.add(name)
+                    result.append(TeamMember(name=name))
+        return result
+    if isinstance(team, str):
+        result = []
+        seen = set()
+        for raw in re.split(r"[\n,，]+", team):
+            name = raw.strip()
+            if name and name not in seen:
+                seen.add(name)
+                result.append(TeamMember(name=name))
+        return result
+    return []
 
 
 def _normalize_language_mode(language_mode: Optional[str],

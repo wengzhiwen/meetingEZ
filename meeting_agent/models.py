@@ -134,12 +134,19 @@ class MeetingMeta(BaseModel):
         return f"单主语言 ({primary})"
 
 
+class TeamMember(BaseModel):
+    """团队成员"""
+    name: str
+    nickname: Optional[str] = None
+    role: Optional[str] = None
+
+
 class ProjectConfig(BaseModel):
     """项目配置"""
     name: str
     description: Optional[str] = None
     start_date: Optional[date] = None
-    team: list[str] = Field(default_factory=list)
+    team: list[TeamMember] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     meeting_types: list[dict[str, str]] = Field(default_factory=list)
 
@@ -212,6 +219,7 @@ class MeetingTask(BaseModel):
     has_minutes: bool = False
     needs_asr: bool = False
     needs_minutes: bool = False
+    is_processing: bool = False
 
     @property
     def dir_name(self) -> str:

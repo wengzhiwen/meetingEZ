@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 import time
 
 import requests
@@ -34,11 +35,11 @@ from app.workspace_service import (DEFAULT_PROJECT_ID, NO_PROJECT_ID,
                                    resolve_meeting_dir,
                                    resolve_meeting_file,
                                    resolve_project_handle,
-                                   update_project_background,
                                    update_project_glossary)
 from meeting_agent.models import LanguageMode, MeetingMeta, MeetingType, ProjectConfig
-from meeting_agent.config import AUDIO_EXTENSIONS, MEETING_META_FILE, Config
+from meeting_agent.config import AUDIO_EXTENSIONS, MEETING_META_FILE, PROCESSING_LOCK_FILE, Config
 from meeting_agent.glossary import GlossaryManager
+from meeting_agent.glossary.context_manager import ContextManager as BackgroundContextManager
 from meeting_agent.scanner import MeetingScanner
 
 main_bp = Blueprint('main', __name__)
@@ -782,37 +783,114 @@ def api_workspace_project_create_meeting(project_id):
 
 @main_bp.route('/api/workspace/project/<project_id>/glossary')
 def api_workspace_project_glossary(project_id):
-    """术语编辑器数据 (JSON)。"""
+    """术语编辑器数据 (JSON) — 返回统一的 terms 列表。"""
     try:
         view_model = build_glossary_editor_view_model(project_id)
-        # 将 Pydantic 对象转为可序列化 dict
-        view_model['confirmed_terms'] = [
-            {'canonical': t.canonical, 'aliases': t.aliases, 'type': t.type.value}
-            for t in view_model['confirmed_terms']
-        ]
-        view_model['pending_terms'] = [
-            {'canonical': t.canonical, 'aliases': t.aliases, 'frequency': t.frequency,
-             'source_meeting': t.source_meeting or ''}
-            for t in view_model['pending_terms']
-        ]
-        view_model['rejected_terms'] = [
-            {'canonical': t.canonical, 'reason': t.reason or ''}
-            for t in view_model['rejected_terms']
-        ]
-        return jsonify(view_model)
+        terms = []
+        for t in view_model['confirmed_terms']:
+            terms.append({
+                'state': 'confirmed',
+                'canonical': t.canonical,
+                'aliases': t.aliases,
+                'type': t.type.value,
+                'context': t.context or t.description or '',
+                'source_meeting': t.source_meeting or '',
+            })
+        for t in view_model['pending_terms']:
+            terms.append({
+                'state': 'pending',
+                'canonical': t.canonical,
+                'aliases': t.aliases,
+                'type': t.type.value,
+                'context': t.context or '',
+                'source_meeting': t.source_meeting or '',
+                'frequency': t.frequency,
+            })
+        for t in view_model['rejected_terms']:
+            terms.append({
+                'state': 'rejected',
+                'canonical': t.canonical,
+                'aliases': getattr(t, 'aliases', []),
+                'type': getattr(t, 'type', 'other') if not hasattr(t.type, 'value') else t.type.value,
+                'context': t.context or '',
+                'source_meeting': getattr(t, 'source_meeting', '') or '',
+                'reason': t.reason or '',
+            })
+        terms.sort(key=lambda x: x['canonical'].lower())
+        return jsonify({'project': view_model['project'], 'terms': terms})
     except FileNotFoundError as exc:
         return jsonify({'error': _safe_error(exc)}), 404
     except Exception as exc:
         return jsonify({'error': _safe_error(exc)}), 500
 
 
-@main_bp.route('/api/workspace/project/<project_id>/glossary', methods=['PUT'])
-def api_workspace_project_glossary_save(project_id):
-    """保存术语表 (JSON)。"""
+@main_bp.route('/api/workspace/project/<project_id>/glossary/entries', methods=['POST'])
+def api_workspace_glossary_add_entry(project_id):
+    """手动添加术语到术语表 (JSON)。"""
     try:
+        handle = resolve_project_handle(project_id)
+        project_config = clone_config_for_dir(Config(), handle.path)
+        glossary_mgr = GlossaryManager(project_config)
         data = request.get_json() or {}
-        update_project_glossary(project_id, data.get('editor_text', ''))
-        return jsonify({'ok': True})
+        canonical = (data.get('canonical') or '').strip()
+        if not canonical:
+            return jsonify({'error': '术语名称不能为空'}), 400
+        aliases_raw = data.get('aliases', [])
+        if isinstance(aliases_raw, str):
+            aliases_raw = [a.strip() for a in aliases_raw.split(',') if a.strip()]
+        from meeting_agent.models_glossary import TermType as _TermType
+        try:
+            term_type = _TermType(data.get('type', 'other'))
+        except ValueError:
+            term_type = _TermType.OTHER
+        entry = glossary_mgr.add_term(canonical=canonical, aliases=aliases_raw, type=term_type)
+        return jsonify({'ok': True, 'canonical': entry.canonical})
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/glossary/entries/<path:canonical>', methods=['PUT'])
+def api_workspace_glossary_update_entry(project_id, canonical):
+    """更新术语表中的术语 (JSON)。"""
+    try:
+        handle = resolve_project_handle(project_id)
+        project_config = clone_config_for_dir(Config(), handle.path)
+        glossary_mgr = GlossaryManager(project_config)
+        data = request.get_json() or {}
+        aliases_raw = data.get('aliases', None)
+        if isinstance(aliases_raw, str):
+            aliases_raw = [a.strip() for a in aliases_raw.split(',') if a.strip()]
+        from meeting_agent.models_glossary import TermType as _TermType
+        term_type = None
+        if 'type' in data:
+            try:
+                term_type = _TermType(data['type'])
+            except ValueError:
+                term_type = _TermType.OTHER
+        entry = glossary_mgr.update_entry(
+            canonical=canonical,
+            new_canonical=data.get('canonical') or None,
+            aliases=aliases_raw,
+            type=term_type,
+            context=data.get('context') or None,
+        )
+        if not entry:
+            return jsonify({'error': '未找到术语'}), 404
+        return jsonify({'ok': True, 'canonical': entry.canonical})
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/glossary/entries/<path:canonical>', methods=['DELETE'])
+def api_workspace_glossary_delete_entry(project_id, canonical):
+    """从术语表中删除术语 (JSON)。"""
+    try:
+        handle = resolve_project_handle(project_id)
+        project_config = clone_config_for_dir(Config(), handle.path)
+        glossary_mgr = GlossaryManager(project_config)
+        if glossary_mgr.remove_entry(canonical):
+            return jsonify({'ok': True})
+        return jsonify({'error': '未找到术语'}), 404
     except Exception as exc:
         return jsonify({'error': _safe_error(exc)}), 400
 
@@ -850,12 +928,36 @@ def api_workspace_glossary_reject(project_id):
         return jsonify({'error': _safe_error(exc)}), 400
 
 
+@main_bp.route('/api/workspace/project/<project_id>/glossary/revert', methods=['POST'])
+def api_workspace_glossary_revert(project_id):
+    """将术语回退到待审核状态 (JSON)。from_state: confirmed | rejected"""
+    try:
+        handle = resolve_project_handle(project_id)
+        project_config = clone_config_for_dir(Config(), handle.path)
+        glossary_mgr = GlossaryManager(project_config)
+        data = request.get_json() or {}
+        canonical = (data.get('canonical') or '').strip()
+        from_state = (data.get('from_state') or '').strip()
+        if not canonical:
+            return jsonify({'error': '缺少 canonical'}), 400
+        if from_state == 'confirmed':
+            ok = glossary_mgr.revert_confirmed_to_pending(canonical)
+        elif from_state == 'rejected':
+            ok = glossary_mgr.revert_rejected_to_pending(canonical)
+        else:
+            return jsonify({'error': '未知的 from_state'}), 400
+        if ok:
+            return jsonify({'ok': True, 'canonical': canonical})
+        return jsonify({'error': '未找到术语'}), 404
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
 @main_bp.route('/api/workspace/project/<project_id>/background')
 def api_workspace_project_background(project_id):
     """背景说明数据 (JSON)。"""
     try:
         view_model = build_background_editor_view_model(project_id)
-        view_model.pop('file_path', None)
         return jsonify(view_model)
     except FileNotFoundError as exc:
         return jsonify({'error': _safe_error(exc)}), 404
@@ -863,13 +965,60 @@ def api_workspace_project_background(project_id):
         return jsonify({'error': _safe_error(exc)}), 500
 
 
-@main_bp.route('/api/workspace/project/<project_id>/background', methods=['PUT'])
-def api_workspace_project_background_save(project_id):
-    """保存背景说明 (JSON)。"""
+@main_bp.route('/api/workspace/project/<project_id>/background/entries', methods=['POST'])
+def api_workspace_background_add_entry(project_id):
+    """新增背景说明条目 (JSON)。"""
     try:
+        handle = resolve_project_handle(project_id)
+        project_config = clone_config_for_dir(Config(), handle.path)
+        mgr = BackgroundContextManager(project_config)
         data = request.get_json() or {}
-        update_project_background(project_id, data.get('content', ''))
-        return jsonify({'ok': True})
+        topic = (data.get('topic') or '').strip()
+        question = (data.get('question') or '').strip()
+        if not topic:
+            return jsonify({'error': '标题不能为空'}), 400
+        entry = mgr.add_entry(
+            topic=topic,
+            question=question,
+            answer=(data.get('answer') or '').strip() or None,
+            source_meeting=data.get('source_meeting') or None,
+        )
+        return jsonify({'ok': True, 'id': entry.id})
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/background/entries/<entry_id>', methods=['PUT'])
+def api_workspace_background_update_entry(project_id, entry_id):
+    """更新背景说明条目 (JSON)。"""
+    try:
+        handle = resolve_project_handle(project_id)
+        project_config = clone_config_for_dir(Config(), handle.path)
+        mgr = BackgroundContextManager(project_config)
+        data = request.get_json() or {}
+        entry = mgr.update_entry(
+            entry_id=entry_id,
+            topic=data.get('topic') or None,
+            question=data.get('question') or None,
+            answer=data.get('answer'),   # allow empty string to clear answer
+        )
+        if not entry:
+            return jsonify({'error': '未找到条目'}), 404
+        return jsonify({'ok': True, 'id': entry.id})
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/background/entries/<entry_id>', methods=['DELETE'])
+def api_workspace_background_delete_entry(project_id, entry_id):
+    """删除背景说明条目 (JSON)。"""
+    try:
+        handle = resolve_project_handle(project_id)
+        project_config = clone_config_for_dir(Config(), handle.path)
+        mgr = BackgroundContextManager(project_config)
+        if mgr.delete_entry(entry_id):
+            return jsonify({'ok': True})
+        return jsonify({'error': '未找到条目'}), 404
     except Exception as exc:
         return jsonify({'error': _safe_error(exc)}), 400
 
@@ -978,10 +1127,43 @@ def api_workspace_meeting_audio_delete(project_id, meeting_dir, filename):
         return jsonify({'error': _safe_error(exc)}), 400
 
 
+def _run_meeting_process_async(lock_file: Path, cmd: list, cwd: str):
+    """在后台线程中运行会议处理，完成后删除锁文件，并将日志写入会议目录。"""
+    log_file = lock_file.parent / '_processing.log'
+    error_file = lock_file.parent / '_processing.error'
+    import logging as _logging
+    _logger = _logging.getLogger('meeting_agent.process')
+    try:
+        _logger.info('开始处理: %s cmd=%s', lock_file.parent.name, ' '.join(cmd))
+        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False,
+                                timeout=1800)
+        output = (result.stdout or '') + (result.stderr or '')
+        log_file.write_text(output, encoding='utf-8')
+        if result.returncode != 0:
+            error_msg = (result.stderr or result.stdout or '处理失败').strip().splitlines()
+            last_line = error_msg[-1] if error_msg else '处理失败'
+            error_file.write_text(last_line, encoding='utf-8')
+            _logger.error('处理失败 (code=%d): %s\n%s', result.returncode, last_line, output[-2000:])
+        else:
+            error_file.unlink(missing_ok=True)
+            _logger.info('处理完成: %s', lock_file.parent.name)
+    except subprocess.TimeoutExpired:
+        error_file.write_text('处理超时（超过 30 分钟）', encoding='utf-8')
+        _logger.error('处理超时: %s', lock_file.parent.name)
+    except Exception as exc:
+        error_file.write_text(str(exc), encoding='utf-8')
+        _logger.error('处理异常: %s %s', lock_file.parent.name, exc)
+    finally:
+        try:
+            lock_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 @main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/process',
                methods=['POST'])
 def api_workspace_meeting_process(project_id, meeting_dir):
-    """触发会议处理 (JSON)。"""
+    """触发会议处理 (JSON) — 异步启动，立即返回。"""
     data = request.get_json() or {}
     action = (data.get('action') or 'full').strip()
     try:
@@ -993,21 +1175,44 @@ def api_workspace_meeting_process(project_id, meeting_dir):
         if not task:
             raise FileNotFoundError(f'未找到会议: {meeting_dir}')
 
+        if task.is_processing:
+            return jsonify({'error': '该会议正在处理中，请稍候'}), 409
+
         if action == 'minutes' and not task.has_transcript:
             raise ValueError('当前会议还没有正式转写，无法只生成会议纪要')
 
-        cmd = _build_agent_run_command(handle, resolved_meeting_dir.name, action)
-        result = subprocess.run(cmd,
-                                cwd=_workspace_root_dir(),
-                                capture_output=True,
-                                text=True,
-                                check=False,
-                                timeout=1800)
-        if result.returncode != 0:
-            message = (result.stderr or result.stdout or '处理失败').strip().splitlines()
-            raise RuntimeError(message[-1] if message else '处理失败')
+        lock_file = resolved_meeting_dir / PROCESSING_LOCK_FILE
+        lock_file.write_text(str(os.getpid()))
 
-        return jsonify({'ok': True, 'message': '会议处理完成'})
+        cmd = _build_agent_run_command(handle, resolved_meeting_dir.name, action)
+        t = threading.Thread(
+            target=_run_meeting_process_async,
+            args=(lock_file, cmd, _workspace_root_dir()),
+            daemon=True,
+        )
+        t.start()
+
+        return jsonify({'ok': True, 'status': 'started'})
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/process/status',
+               methods=['GET'])
+def api_workspace_meeting_process_status(project_id, meeting_dir):
+    """查询会议处理状态 (JSON)。"""
+    try:
+        _, _, resolved_meeting_dir = resolve_meeting_dir(project_id, meeting_dir)
+        lock_file = resolved_meeting_dir / PROCESSING_LOCK_FILE
+        error_file = resolved_meeting_dir / '_processing.error'
+        is_processing = lock_file.exists()
+        error_msg = None
+        if not is_processing and error_file.exists():
+            try:
+                error_msg = error_file.read_text(encoding='utf-8').strip()
+            except Exception:
+                pass
+        return jsonify({'is_processing': is_processing, 'error': error_msg})
     except Exception as exc:
         return jsonify({'error': _safe_error(exc)}), 400
 

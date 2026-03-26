@@ -14,6 +14,7 @@ from meeting_agent.config import (
     AUDIO_EXTENSIONS,
     MEETING_META_FILE,
     MINUTES_FILE,
+    PROCESSING_LOCK_FILE,
     TRANSCRIPT_FILE,
     TRANSCRIPT_PROGRESS_FILE,
     Config,
@@ -93,6 +94,8 @@ class MeetingScanner:
             if transcript_file.stat().st_mtime > minutes_file.stat().st_mtime:
                 needs_minutes = True
 
+        is_processing = (meeting_dir / PROCESSING_LOCK_FILE).exists()
+
         return MeetingTask(
             meeting_dir=meeting_dir,
             meeting_meta=meeting_meta,
@@ -102,6 +105,7 @@ class MeetingScanner:
             has_minutes=has_minutes,
             needs_asr=needs_asr or has_incomplete_asr,
             needs_minutes=needs_minutes,
+            is_processing=is_processing,
         )
 
     def load_project_config(self, project_dir: Optional[Path] = None) -> Optional[ProjectConfig]:

@@ -132,6 +132,7 @@ CONTEXT_FILE = "context.md"
 TIMELINE_FILE = "timeline.md"
 ACTIONS_FILE = "actions.md"
 STATE_FILE = "_state.json"
+PROCESSING_LOCK_FILE = "_processing.lock"
 
 # 支持的音频格式
 AUDIO_EXTENSIONS = {".m4a", ".mp3", ".wav", ".flac", ".ogg", ".aac", ".wma"}

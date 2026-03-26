@@ -35,17 +35,27 @@ export const api = {
 
     getGlossary: (projectId) =>
         request('GET', `/api/workspace/project/${encodeURIComponent(projectId)}/glossary`),
-    saveGlossary: (projectId, editorText) =>
-        request('PUT', `/api/workspace/project/${encodeURIComponent(projectId)}/glossary`, { editor_text: editorText }),
+    addGlossaryEntry: (projectId, data) =>
+        request('POST', `/api/workspace/project/${encodeURIComponent(projectId)}/glossary/entries`, data),
+    updateGlossaryEntry: (projectId, canonical, data) =>
+        request('PUT', `/api/workspace/project/${encodeURIComponent(projectId)}/glossary/entries/${encodeURIComponent(canonical)}`, data),
+    deleteGlossaryEntry: (projectId, canonical) =>
+        request('DELETE', `/api/workspace/project/${encodeURIComponent(projectId)}/glossary/entries/${encodeURIComponent(canonical)}`),
     approveGlossaryTerm: (projectId, canonical) =>
         request('POST', `/api/workspace/project/${encodeURIComponent(projectId)}/glossary/approve`, { canonical }),
     rejectGlossaryTerm: (projectId, canonical, reason) =>
         request('POST', `/api/workspace/project/${encodeURIComponent(projectId)}/glossary/reject`, { canonical, reason }),
+    revertGlossaryTerm: (projectId, canonical, fromState) =>
+        request('POST', `/api/workspace/project/${encodeURIComponent(projectId)}/glossary/revert`, { canonical, from_state: fromState }),
 
     getBackground: (projectId) =>
         request('GET', `/api/workspace/project/${encodeURIComponent(projectId)}/background`),
-    saveBackground: (projectId, content) =>
-        request('PUT', `/api/workspace/project/${encodeURIComponent(projectId)}/background`, { content }),
+    addBackgroundEntry: (projectId, data) =>
+        request('POST', `/api/workspace/project/${encodeURIComponent(projectId)}/background/entries`, data),
+    updateBackgroundEntry: (projectId, entryId, data) =>
+        request('PUT', `/api/workspace/project/${encodeURIComponent(projectId)}/background/entries/${encodeURIComponent(entryId)}`, data),
+    deleteBackgroundEntry: (projectId, entryId) =>
+        request('DELETE', `/api/workspace/project/${encodeURIComponent(projectId)}/background/entries/${encodeURIComponent(entryId)}`),
 
     getAudio: (projectId, meetingDir) =>
         request('GET', `/api/workspace/project/${encodeURIComponent(projectId)}/meeting/${encodeURIComponent(meetingDir)}/audio`),
@@ -58,6 +68,8 @@ export const api = {
 
     processMeeting: (projectId, meetingDir, action = 'full') =>
         request('POST', `/api/workspace/project/${encodeURIComponent(projectId)}/meeting/${encodeURIComponent(meetingDir)}/process`, { action }),
+    getMeetingProcessStatus: (projectId, meetingDir) =>
+        request('GET', `/api/workspace/project/${encodeURIComponent(projectId)}/meeting/${encodeURIComponent(meetingDir)}/process/status`),
 
     getFile: (projectId, meetingDir, filename) =>
         request('GET', `/api/workspace/project/${encodeURIComponent(projectId)}/meeting/${encodeURIComponent(meetingDir)}/files/${encodeURIComponent(filename)}`),
