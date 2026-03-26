@@ -28,6 +28,7 @@ function entryRowHtml(e) {
             ${e.is_answered ? `<div class="spa-bentry-answer">${esc(e.answer)}</div>` : ''}
             <div class="spa-bentry-actions">
                 <button class="spa-btn spa-btn-outline spa-btn-xs btn-b-edit">${e.is_answered ? '编辑' : '回答'}</button>
+                <button class="spa-btn spa-btn-xs spa-btn-muted btn-b-delete-view" title="删除">✕</button>
             </div>
         </div>
         <div class="spa-bentry-edit" style="display:none;">
@@ -198,6 +199,21 @@ function _bindEvents(container, projectId) {
             row.querySelector('.spa-bentry-view').style.display = 'none';
             row.querySelector('.spa-bentry-edit').style.display = '';
             row.querySelector('.bin-answer').focus();
+            return;
+        }
+
+        if (e.target.classList.contains('btn-b-delete-view')) {
+            const topic = row.querySelector('.spa-bentry-topic')?.textContent || entryId;
+            if (!confirm(`确认删除「${topic}」？`)) return;
+            e.target.disabled = true;
+            try {
+                await api.deleteBackgroundEntry(projectId, entryId);
+                showToast('已删除', 'success');
+                await reload();
+            } catch (err) {
+                showToast(err.message, 'error');
+                e.target.disabled = false;
+            }
             return;
         }
 

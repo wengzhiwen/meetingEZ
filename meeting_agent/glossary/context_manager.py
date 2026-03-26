@@ -216,15 +216,25 @@ class ContextManager:
     # ------------------------------------------------------------------ #
 
     def build_context_prompt(self) -> str:
-        """构建用于 LLM 的上下文 prompt（仅已回答条目）。"""
-        entries = [e for e in self.list_entries() if e.is_answered]
-        if not entries:
+        """构建用于 LLM 的上下文 prompt（已回答条目提供答案，待回答条目列出题目避免重复提问）。"""
+        all_entries = self.list_entries()
+        answered   = [e for e in all_entries if e.is_answered]
+        unanswered = [e for e in all_entries if not e.is_answered]
+
+        if not answered and not unanswered:
             return ""
 
         lines = ["## 项目背景说明\n"]
-        for e in entries:
+
+        for e in answered:
             lines.append(f"### {e.topic}")
             lines.append(e.answer)
+            lines.append("")
+
+        if unanswered:
+            lines.append("### 以下问题已记录、待人工解答（请勿重复提问）\n")
+            for e in unanswered:
+                lines.append(f"- {e.topic}：{e.question}")
             lines.append("")
 
         return "\n".join(lines)
