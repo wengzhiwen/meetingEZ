@@ -20,8 +20,9 @@ const HIDE_BEFORE_KEY = 'meetingEZ_hideBefore';
 
 let realtimeClient = null;
 let currentContextPack = null;
+let mediaStreamExtras = null;  // 标签页+麦克风混合时的额外资源
 
-const TRANSLATION_CONTEXT_SIZE = 20;
+const TRANSLATION_CONTEXT_SIZE = 10;
 let translationContext = [];
 
 let volumeAudioContext = null;
@@ -292,6 +293,10 @@ function loadSettings() {
     } else {
         audioSourceMic.checked = true;
     }
+    const tabPlusMicEl = document.getElementById('tabPlusMic');
+    if (tabPlusMicEl) {
+        tabPlusMicEl.checked = localStorage.getItem('meetingEZ_tabPlusMic') === 'true';
+    }
     updateAudioInputVisibility();
 
     const primaryLang = pageLaunchContext.primaryLanguage || localStorage.getItem('meetingEZ_primaryLanguage');
@@ -365,6 +370,10 @@ function setupEventListeners() {
         selectedAudioSource = 'tab';
         localStorage.setItem('meetingEZ_audioSource', 'tab');
         updateAudioInputVisibility();
+    });
+
+    document.getElementById('tabPlusMic')?.addEventListener('change', (e) => {
+        localStorage.setItem('meetingEZ_tabPlusMic', String(e.target.checked));
     });
 
     if (navigator.mediaDevices) {
@@ -482,7 +491,25 @@ async function startMeeting() {
                 }
 
                 displayStream.getVideoTracks().forEach(track => track.stop());
-                mediaStream = new MediaStream([tabAudioTrack]);
+
+                const wantMic = !!document.getElementById('tabPlusMic')?.checked;
+                if (wantMic) {
+                    const micStream = await navigator.mediaDevices.getUserMedia({
+                        audio: buildAudioConstraints({ echoCancellation: true })
+                    });
+
+                    const mixCtx = new AudioContext({ sampleRate: 24000 });
+                    const tabSource = mixCtx.createMediaStreamSource(new MediaStream([tabAudioTrack]));
+                    const micSource = mixCtx.createMediaStreamSource(micStream);
+                    const dest = mixCtx.createMediaStreamDestination();
+                    tabSource.connect(dest);
+                    micSource.connect(dest);
+
+                    mediaStreamExtras = { mixCtx, micStream, tabAudioTrack };
+                    mediaStream = dest.stream;
+                } else {
+                    mediaStream = new MediaStream([tabAudioTrack]);
+                }
             } catch (error) {
                 if (error.name === 'NotAllowedError') {
                     throw new Error('用户取消了标签页共享。');
@@ -490,18 +517,7 @@ async function startMeeting() {
                 throw error;
             }
         } else {
-            const audioConstraints = {
-                echoCancellation: false,
-                noiseSuppression: false,
-                autoGainControl: false,
-                channelCount: 1
-            };
-
-            if (selectedAudioDevice) {
-                audioConstraints.deviceId = { exact: selectedAudioDevice };
-            }
-
-            mediaStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+            mediaStream = await navigator.mediaDevices.getUserMedia({ audio: buildAudioConstraints() });
         }
 
         startVolumeMonitor(mediaStream);
@@ -540,7 +556,7 @@ async function initRealtimeConnection() {
     realtimeClient = new RealtimeTranscriptionClass({
         model: 'gpt-4o-transcribe',
         language: primaryLang,
-        prompt: buildRealtimePrompt(),
+        prompt: '', // 不向 ASR 注入增强内容，过长的 prompt 在静音时会产生严重幻觉
 
         onConnected: () => {
             console.log('Realtime 连接成功');
@@ -695,6 +711,19 @@ async function stopMeeting(options = {}) {
             mediaStream = null;
         }
 
+        if (mediaStreamExtras) {
+            if (mediaStreamExtras.micStream) {
+                mediaStreamExtras.micStream.getTracks().forEach(track => track.stop());
+            }
+            if (mediaStreamExtras.tabAudioTrack) {
+                try { mediaStreamExtras.tabAudioTrack.stop(); } catch (e) { console.warn('停止标签页音轨失败:', e); }
+            }
+            if (mediaStreamExtras.mixCtx) {
+                try { mediaStreamExtras.mixCtx.close(); } catch (e) { console.warn('关闭混音 AudioContext 失败:', e); }
+            }
+            mediaStreamExtras = null;
+        }
+
         clearTranslationContext();
 
         isConnected = false;
@@ -717,9 +746,44 @@ async function stopMeeting(options = {}) {
         hideLoading();
         showError('停止会议失败: ' + error.message);
     }
+
+    await autoSaveTranscriptsToProject();
+}
+
+// ---- 自动保存转写结果到项目 ----
+
+async function autoSaveTranscriptsToProject() {
+    const { projectId, meetingDir } = pageLaunchContext;
+    if (!projectId || !meetingDir || isQuickModeProject(projectId)) return;
+    if (transcripts.length === 0) return;
+
+    const filename = 'realtime_transcript.json';
+    const url = `/api/workspace/project/${encodeURIComponent(projectId)}/meeting/${encodeURIComponent(meetingDir)}/files/${encodeURIComponent(filename)}`;
+    try {
+        const resp = await fetch(url, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                content: JSON.stringify({ version: STORAGE_VERSION, items: transcripts })
+            })
+        });
+        if (resp.ok) {
+            console.log(`转写结果已自动保存到项目: ${filename}`);
+        } else {
+            console.warn('自动保存转写结果失败:', resp.status);
+        }
+    } catch (err) {
+        console.warn('自动保存转写结果异常:', err);
+    }
 }
 
 // ---- 音量监测 ----
+
+function buildAudioConstraints({ echoCancellation = false } = {}) {
+    const c = { echoCancellation, noiseSuppression: false, autoGainControl: false, channelCount: 1 };
+    if (selectedAudioDevice) c.deviceId = { exact: selectedAudioDevice };
+    return c;
+}
 
 function startVolumeMonitor(stream) {
     try {
@@ -953,27 +1017,6 @@ function buildMeetingContextSummary() {
     return parts.join('\n');
 }
 
-function buildRealtimePrompt() {
-    const parts = [];
-    if (currentContextPack?.realtimePrompt) {
-        parts.push(currentContextPack.realtimePrompt);
-    }
-
-    const mergedGlossary = buildMergedGlossary();
-    if (mergedGlossary) {
-        const condensed = mergedGlossary
-            .split('\n')
-            .map((line) => line.trim())
-            .filter(Boolean)
-            .slice(0, 16)
-            .join('；');
-        if (condensed) {
-            parts.push(`术语参考：${condensed}`);
-        }
-    }
-
-    return parts.join(' ');
-}
 
 function updateContextPackPreview() {
     const statusEl = document.getElementById('contextPackStatus');
@@ -1192,13 +1235,13 @@ function updateControls() {
 
 function updateAudioInputVisibility() {
     const audioInputContainer = document.getElementById('audioInputContainer');
-    const tabAudioHint = document.getElementById('tabAudioHint');
+    const tabAudioOptions = document.getElementById('tabAudioOptions');
     if (selectedAudioSource === 'microphone') {
         audioInputContainer.style.display = 'flex';
-        if (tabAudioHint) tabAudioHint.style.display = 'none';
+        if (tabAudioOptions) tabAudioOptions.style.display = 'none';
     } else {
         audioInputContainer.style.display = 'none';
-        if (tabAudioHint) tabAudioHint.style.display = 'block';
+        if (tabAudioOptions) tabAudioOptions.style.display = 'block';
     }
 }
 
