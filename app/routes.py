@@ -43,7 +43,7 @@ from meeting_agent.glossary.context_manager import ContextManager as BackgroundC
 from meeting_agent.scanner import MeetingScanner
 
 main_bp = Blueprint('main', __name__)
-TRANSCRIPTION_MODEL = 'gpt-4o-transcribe'
+TRANSCRIPTION_MODEL = os.getenv('TRANSCRIPTION_MODEL', 'gpt-4o-transcribe')
 TRANSLATION_MODEL = os.getenv('TRANSLATION_MODEL', 'gpt-5.4-mini-2026-03-17')
 TRANSLATION_REASONING_EFFORT = os.getenv('TRANSLATION_REASONING_EFFORT', 'low').strip()
 MEETING_TYPE_OPTIONS = [

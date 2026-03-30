@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     # 智谱 AI ASR
     zhipu_api_key: str = ""
     zhipu_api_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
+    zhipu_asr_model: str = "glm-asr-2512"
 
     # OpenAI GPT
     openai_api_key: str = ""

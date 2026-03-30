@@ -26,6 +26,7 @@ class ASREngine:
         self.config = config or Config()
         self.api_key = self.config.zhipu_api_key
         self.base_url = self.config.settings.zhipu_api_base_url
+        self.asr_model = self.config.settings.zhipu_asr_model
         self.chunk_seconds = self.config.settings.asr_chunk_seconds
         self.overlap_seconds = self.config.settings.asr_overlap_seconds
 
@@ -183,7 +184,7 @@ class ASREngine:
         try:
             with open(audio_path, "rb") as f:
                 files = {"file": (audio_path.name, f)}
-                data = {"model": "glm-asr-2512", "stream": "false"}
+                data = {"model": self.asr_model, "stream": "false"}
                 response = requests.post(
                     endpoint,
                     headers=headers,
@@ -341,7 +342,7 @@ class ASREngine:
 
         with open(chunk_path, "rb") as f:
             files = {"file": (chunk_path.name, f)}
-            data = {"model": "glm-asr-2512", "stream": "false"}
+            data = {"model": self.asr_model, "stream": "false"}
             response = requests.post(
                 endpoint,
                 headers=headers,
