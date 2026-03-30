@@ -211,4 +211,5 @@ marimo/_lsp/
 __marimo__/
 
 # Local Data
-projects/.claude/
+projects/
+.claude/
