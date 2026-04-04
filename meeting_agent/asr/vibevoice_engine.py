@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from meeting_agent.config import Config, TRANSCRIPT_FILE
+from meeting_agent.progress import update_chunks as _update_chunks_progress
 from meeting_agent.models import Transcript, TranscriptSegment
 
 logger = logging.getLogger("meeting_agent.asr.vibevoice")
@@ -374,16 +375,26 @@ def _open_chat_completion(
     payload: Dict[str, Any],
     timeout: int,
 ):
+    import socket as _socket
     url = base_url.rstrip("/") + "/v1/chat/completions"
-    return urllib.request.urlopen(
-        urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        ),
-        timeout=timeout,
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
+    resp = urllib.request.urlopen(req, timeout=timeout)
+    # 设置 socket 级别读取超时，防止流式连接无限挂起
+    # urlopen 的 timeout 只管连接建立，这里确保每次 read 也有超时
+    try:
+        sock = resp.fp
+        if hasattr(sock, 'raw'):
+            sock = sock.raw
+        if hasattr(sock, '_sock'):
+            sock._sock.settimeout(float(timeout))
+    except Exception:
+        pass
+    return resp
 
 
 def stream_chat_completion(
@@ -438,6 +449,11 @@ def stream_chat_completion(
         try:
             with _open_chat_completion(base_url, payload, timeout) as response:
                 for raw_line in response:
+                    # 读取超时检测：urlopen 的 timeout 只管连接，流式读取需自行检测
+                    if (datetime.now() - request_start).total_seconds() > timeout:
+                        raise TimeoutError(
+                            f"VibeVoice 流式读取超时（{timeout}s 无完整响应）"
+                        )
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data: "):
                         continue
@@ -511,7 +527,8 @@ def stream_chat_completion(
                         elapsed, len(result_text),
                     )
                     return result_text
-        except (urllib.error.HTTPError, urllib.error.URLError) as http_exc:
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError,
+                OSError) as http_exc:
             elapsed = (datetime.now() - request_start).total_seconds() if request_start else 0
             logger.error(
                 "VibeVoice API 请求失败: elapsed=%.1fs, error=%s",
@@ -609,6 +626,7 @@ class VibeVoiceASREngine:
         force: bool = False,
     ) -> Optional[Transcript]:
         """转写音频文件列表"""
+        self._meeting_dir = meeting_dir
         if not audio_files:
             logger.warning("没有音频文件需要转写")
             return None
@@ -799,9 +817,8 @@ class VibeVoiceASREngine:
                         regions.insert(0, (next_start, remaining_duration))
 
                     region_idx += 1
+                    _update_chunks_progress(self._meeting_dir, region_idx, total_chunks)
                     continue
-
-                parsed = parse_json_output(raw_text)
                 if parsed is None:
                     raise RuntimeError(
                         f"第 {region_idx + 1} 个长片段输出不是合法 JSON"
@@ -815,8 +832,7 @@ class VibeVoiceASREngine:
                 chunk_segments_list.append(normalized)
                 chunk_offsets.append(chunk_offset)
                 region_idx += 1
-
-            # 合并分片结果
+                _update_chunks_progress(self._meeting_dir, region_idx, total_chunks)
             merged = merge_chunk_segments(
                 chunk_segments=chunk_segments_list,
                 chunk_offsets=chunk_offsets,
