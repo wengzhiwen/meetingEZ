@@ -723,6 +723,28 @@
     margin-left: 1.2rem;
     padding-top: 0.1rem;
 }
+.spa-progress-audio-chunks {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.25rem;
+    font-size: 0.72rem;
+    color: #6b7280;
+}
+.spa-progress-bar {
+    flex: 1;
+    max-width: 120px;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 2px;
+    overflow: hidden;
+}
+.spa-progress-bar-fill {
+    height: 100%;
+    background: #63b3ed;
+    border-radius: 2px;
+    transition: width 0.3s ease;
+}
 
 .spa-meeting-body {
     max-height: 0;
