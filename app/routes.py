@@ -1237,6 +1237,9 @@ def api_workspace_meeting_process_status(project_id, meeting_dir):
                methods=['POST'])
 def api_workspace_asr_retry(project_id, meeting_dir):
     """立即重试 VibeVoice ASR。"""
+    import logging as _logging
+    _logging.getLogger('meeting_agent.process').info(
+        'ASR 重试请求: project=%s, meeting=%s', project_id, meeting_dir)
     try:
         handle, project_config, resolved_meeting_dir = resolve_meeting_dir(
             project_id, meeting_dir)
@@ -1268,6 +1271,9 @@ def api_workspace_asr_retry(project_id, meeting_dir):
                methods=['POST'])
 def api_workspace_asr_fallback(project_id, meeting_dir):
     """降级到智谱 ASR。"""
+    import logging as _logging
+    _logging.getLogger('meeting_agent.process').warning(
+        'ASR 降级请求: project=%s, meeting=%s, fallback=zhipu', project_id, meeting_dir)
     try:
         handle, project_config, resolved_meeting_dir = resolve_meeting_dir(
             project_id, meeting_dir)

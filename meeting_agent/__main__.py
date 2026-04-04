@@ -148,6 +148,10 @@ def cmd_run(args):
 
         # 1. ASR
         if task.needs_asr and task.audio_files:
+            logger.info(
+                "开始 ASR: meeting=%s, audio_files=%s",
+                task.dir_name, [f.name for f in task.audio_files],
+            )
             with Progress(
                     SpinnerColumn(),
                     TextColumn("[progress.description]{task.description}"),
@@ -162,16 +166,22 @@ def cmd_run(args):
                         force=getattr(args, 'force_asr', False),
                     )
                 except ASRBlockedException as e:
+                    logger.warning("ASR 被阻塞: meeting=%s, %s", task.dir_name, e)
                     console.print(f"[red]ASR 失败，已阻塞等待重试[/red]")
                     console.print(f"[yellow]{e}[/yellow]")
                     console.print("[dim]可通过 Web GUI 立即重试或降级到智谱 ASR[/dim]")
                     continue
 
             if not transcript:
+                logger.error("ASR 失败（无结果）: meeting=%s", task.dir_name)
                 console.print("[red]ASR 失败[/red]")
                 continue
 
             console.print(f"[green]✓ ASR 完成: {len(transcript.segments)} 个片段[/green]")
+            logger.info(
+                "ASR 完成: meeting=%s, segments=%d, duration=%.2fs",
+                task.dir_name, len(transcript.segments), transcript.duration,
+            )
 
         # 2. 生成纪要
         # 检查转写文件是否存在（可能在本次 ASR 中刚生成）

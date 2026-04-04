@@ -54,16 +54,26 @@ class ASRRouter:
 
         # 确定本次使用的引擎
         provider = provider_override or (state.provider if state else "vibevoice")
+        logger.info(
+            "ASR 路由决策: meeting=%s, provider=%s, state=%s, force=%s",
+            meeting_dir.name, provider,
+            state.status if state else "无", force,
+        )
 
         # 如果状态为 blocked，检查是否到了重试时间
         if state and state.status == "blocked" and provider == "vibevoice":
             if state.next_retry_at:
                 next_retry = datetime.fromisoformat(state.next_retry_at)
                 if datetime.now(timezone.utc) < next_retry:
+                    logger.warning(
+                        "VibeVoice 处于 blocked 状态，尚未到重试时间: next_retry=%s, retry_count=%d",
+                        state.next_retry_at, state.retry_count,
+                    )
                     raise ASRBlockedException(
                         f"VibeVoice ASR 失败，等待重试（下次: {state.next_retry_at}）",
                         state=state,
                     )
+                logger.info("blocked 状态已到重试时间，继续执行")
 
         # 已成功的不再重复
         if state and state.status == "succeeded" and not force:
@@ -71,6 +81,7 @@ class ASRRouter:
             pass
 
         # 更新状态为 running
+        logger.info("更新 ASR 状态为 running: provider=%s", provider)
         state = state or ASRState(
             provider=provider,
             created_at=datetime.now(timezone.utc).isoformat(),
@@ -89,6 +100,11 @@ class ASRRouter:
                 result = self.vibevoice.transcribe(audio_files, meeting_dir, force=force)
 
             # 成功
+            seg_count = len(result.segments) if result else 0
+            logger.info(
+                "ASR 转写成功: provider=%s, segments=%d, duration=%.2fs",
+                provider, seg_count, result.duration if result else 0,
+            )
             state.status = "succeeded"
             state.last_error = None
             state.updated_at = datetime.now(timezone.utc).isoformat()
@@ -104,6 +120,10 @@ class ASRRouter:
 
             if provider == "vibevoice":
                 # VibeVoice 失败 → 进入 blocked + 指数退避
+                logger.warning(
+                    "VibeVoice 失败，进入指数退避: retry_count=%d, error=%s",
+                    state.retry_count + 1, error_msg[:200],
+                )
                 state.retry_count += 1
                 delay = min(
                     self.config.settings.asr_initial_retry_delay * (2 ** (state.retry_count - 1)),
@@ -133,6 +153,7 @@ class ASRRouter:
 
     def retry_now(self, meeting_dir: Path) -> ASRState:
         """重置重试计时器，允许立即重试 VibeVoice"""
+        logger.info("手动重试: meeting=%s, 重置 blocked 状态", meeting_dir.name)
         state = self._load_state(meeting_dir)
         if not state:
             state = ASRState(created_at=datetime.now(timezone.utc).isoformat())
@@ -145,6 +166,7 @@ class ASRRouter:
 
     def fallback_to_zhipu(self, meeting_dir: Path) -> ASRState:
         """切换到智谱 ASR"""
+        logger.warning("手动降级: meeting=%s, 切换到智谱 ASR", meeting_dir.name)
         state = self._load_state(meeting_dir)
         if not state:
             state = ASRState(created_at=datetime.now(timezone.utc).isoformat())

@@ -400,6 +400,7 @@ def stream_chat_completion(
     detector = RepetitionDetector()
     accumulated_text = ""
     retry_count = 0
+    request_start = None
 
     while retry_count <= max_retries:
         messages = _build_messages(data_url, prompt_text)
@@ -428,6 +429,12 @@ def stream_chat_completion(
 
         printed = ""
         new_text = ""
+        request_start = datetime.now()
+        logger.info(
+            "VibeVoice API 请求: url=%s, model=%s, retry=%d, accumulated_chars=%d",
+            base_url.rstrip("/") + "/v1/chat/completions", model, retry_count,
+            len(accumulated_text),
+        )
         try:
             with _open_chat_completion(base_url, payload, timeout) as response:
                 for raw_line in response:
@@ -497,8 +504,19 @@ def stream_chat_completion(
                         break
 
                 else:
-                    return accumulated_text + new_text
-        except (urllib.error.HTTPError, urllib.error.URLError):
+                    result_text = accumulated_text + new_text
+                    elapsed = (datetime.now() - request_start).total_seconds() if request_start else 0
+                    logger.info(
+                        "VibeVoice API 响应完成: elapsed=%.1fs, output_chars=%d",
+                        elapsed, len(result_text),
+                    )
+                    return result_text
+        except (urllib.error.HTTPError, urllib.error.URLError) as http_exc:
+            elapsed = (datetime.now() - request_start).total_seconds() if request_start else 0
+            logger.error(
+                "VibeVoice API 请求失败: elapsed=%.1fs, error=%s",
+                elapsed, http_exc,
+            )
             raise
 
     raise RuntimeError("模型输出恢复失败")
@@ -520,6 +538,12 @@ def transcribe_single_audio(
     mime = guess_mime_type(audio_path)
     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
     data_url = f"data:{mime};base64,{audio_b64}"
+    logger.info(
+        "准备 VibeVoice 请求: audio=%s, size=%.2fKB, duration=%ss, base64=%.2fKB",
+        audio_path.name, len(audio_bytes) / 1024,
+        f"{duration_seconds:.2f}" if duration_seconds else "未知",
+        len(audio_b64) / 1024,
+    )
     return stream_chat_completion(
         base_url=base_url,
         data_url=data_url,
@@ -661,6 +685,7 @@ class VibeVoiceASREngine:
         time_offset: float = 0.0,
     ) -> list[TranscriptSegment]:
         """单次提交转写"""
+        logger.info("VibeVoice 短音频直接提交: %s", audio_path.name)
         raw_text = transcribe_single_audio(
             audio_path=audio_path,
             base_url=self.base_url,
@@ -681,6 +706,11 @@ class VibeVoiceASREngine:
     ) -> list[TranscriptSegment]:
         """长音频分片转写"""
         step_seconds = self.max_audio_seconds - self.overlap_seconds
+        total_chunks = int(total_duration / step_seconds) + 1
+        logger.info(
+            "VibeVoice 长音频分片: duration=%.2fs, chunk_size=%ds, overlap=%ds, 预计%d片",
+            total_duration, self.max_audio_seconds, self.overlap_seconds, total_chunks,
+        )
         all_segments: list[TranscriptSegment] = []
 
         with tempfile.TemporaryDirectory(prefix="vibevoice_asr_") as temp_dir_str:
