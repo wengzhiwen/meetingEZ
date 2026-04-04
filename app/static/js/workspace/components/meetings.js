@@ -140,6 +140,8 @@ function _startPolling(projectId, dir) {
     const timerId = setInterval(async () => {
         try {
             const result = await api.getMeetingProcessStatus(projectId, dir);
+            // 更新进度 UI
+            _updateProgressUI(dir, result);
             if (!result.is_processing) {
                 clearInterval(timerId);
                 _pollingTimers.delete(dir);
@@ -155,8 +157,39 @@ function _startPolling(projectId, dir) {
         } catch {
             // 忽略轮询错误，继续轮询
         }
-    }, 3000);
+    }, 2000);
     _pollingTimers.set(dir, timerId);
+}
+
+function _updateProgressUI(dir, result) {
+    const card = document.querySelector(`.spa-meeting-card[data-dir="${dir}"]`);
+    if (!card || !result.progress) return;
+
+    const steps = result.progress.steps || [];
+    let stepsHtml = steps.map(step => {
+        const isActive = step.status === 'in_progress';
+        const isDone = step.status === 'completed';
+        const isFailed = step.status === 'failed';
+        const icon = isDone ? '&#10003;' : isFailed ? '&#10007;' : isActive ? '&#9679;' : '&#9675;';
+        const cls = isDone ? 'done' : isFailed ? 'failed' : isActive ? 'active' : 'pending';
+        let detail = '';
+        if (isActive && step.chunks_total) {
+            const completed = step.chunks_completed || 0;
+            detail = `<span class="spa-progress-chunks">${completed}/${step.chunks_total} 片段</span>`;
+        }
+        const elapsed = step.elapsed_seconds != null
+            ? `<span class="spa-progress-elapsed">${step.elapsed_seconds}s</span>` : '';
+        return `<div class="spa-progress-step spa-progress-${cls}">
+            <span class="spa-progress-icon">${icon}</span>
+            <span class="spa-progress-label">${esc(step.label)}</span>
+            ${detail}${elapsed}
+        </div>`;
+    }).join('');
+
+    const container = card.querySelector('.spa-processing-indicator');
+    if (container && container.parentElement) {
+        container.parentElement.innerHTML = `<div class="spa-progress-panel"><div class="spa-progress-steps">${stepsHtml}</div></div>`;
+    }
 }
 
 export function renderMeetings(container, data, projectId) {

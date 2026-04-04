@@ -25,6 +25,10 @@ from meeting_agent.llm import LLMClient
 from meeting_agent.memory import MemoryWriter
 from meeting_agent.glossary import GlossaryManager, ContextManager, get_combined_context
 from meeting_agent.models_glossary import TermType
+from meeting_agent.progress import (
+    clear_progress, complete_step, fail_step, init_progress, set_step,
+    update_chunks, STEP_ASR, STEP_PRE_HINT, STEP_ANALYZING, STEP_MEMORY,
+)
 
 console = Console()
 logger = logging.getLogger("meeting_agent")
@@ -152,9 +156,11 @@ def cmd_run(args):
 
     for task in pending_tasks:
         console.print(Panel(f"[bold]{task.dir_name}[/bold]", expand=False))
+        init_progress(task.meeting_dir)
 
         # 1. ASR
         if task.needs_asr and task.audio_files:
+            set_step(task.meeting_dir, STEP_ASR, "音频转写中")
             logger.info(
                 "开始 ASR: meeting=%s, audio_files=%s",
                 task.dir_name, [f.name for f in task.audio_files],
@@ -174,6 +180,7 @@ def cmd_run(args):
                     )
                 except ASRBlockedException as e:
                     logger.warning("ASR 被阻塞: meeting=%s, %s", task.dir_name, e)
+                    fail_step(task.meeting_dir, STEP_ASR, str(e))
                     console.print(f"[red]ASR 失败，已阻塞等待重试[/red]")
                     console.print(f"[yellow]{e}[/yellow]")
                     console.print("[dim]可通过 Web GUI 立即重试或降级到智谱 ASR[/dim]")
@@ -181,6 +188,7 @@ def cmd_run(args):
 
             if not transcript:
                 logger.error("ASR 失败（无结果）: meeting=%s", task.dir_name)
+                fail_step(task.meeting_dir, STEP_ASR, "无转写结果")
                 console.print("[red]ASR 失败[/red]")
                 continue
 
@@ -189,6 +197,7 @@ def cmd_run(args):
                 "ASR 完成: meeting=%s, segments=%d, duration=%.2fs",
                 task.dir_name, len(transcript.segments), transcript.duration,
             )
+            complete_step(task.meeting_dir, STEP_ASR)
 
         # 2. 生成纪要
         # 检查转写文件是否存在（可能在本次 ASR 中刚生成）
@@ -241,6 +250,7 @@ def cmd_run(args):
             # 生成会议前提示
             pre_hint = None
             if meeting_meta:
+                set_step(task.meeting_dir, STEP_PRE_HINT)
                 with Progress(
                         SpinnerColumn(),
                         TextColumn("[progress.description]{task.description}"),
@@ -254,8 +264,10 @@ def cmd_run(args):
                     )
                     if pre_hint:
                         memory_writer.save_pre_meeting_hint(pre_hint, task.meeting_dir)
+                complete_step(task.meeting_dir, STEP_PRE_HINT)
 
             # 调用 GPT 分析
+            set_step(task.meeting_dir, STEP_ANALYZING)
             with Progress(
                     SpinnerColumn(),
                     TextColumn("[progress.description]{task.description}"),
@@ -275,6 +287,7 @@ def cmd_run(args):
                 )
 
             if not result:
+                fail_step(task.meeting_dir, STEP_ANALYZING, "GPT 分析失败")
                 console.print("[red]GPT 分析失败[/red]")
                 continue
 
@@ -328,15 +341,19 @@ def cmd_run(args):
                         f"[green]✓ 添加 {questions_count} 个待解释问题到 _context.md[/green]")
 
             # 保存结果
+            complete_step(task.meeting_dir, STEP_ANALYZING)
             if meeting_meta:
+                set_step(task.meeting_dir, STEP_MEMORY)
                 memory_writer.process_analysis_result(
                     result=result,
                     meeting_meta=meeting_meta,
                     meeting_dir=task.meeting_dir,
                     project_dir=project_dir,
                 )
+                complete_step(task.meeting_dir, STEP_MEMORY)
 
             console.print(f"[green]✓ 纪要生成完成[/green]")
+            clear_progress(task.meeting_dir)
 
         console.print()
 

@@ -37,7 +37,7 @@ from app.workspace_service import (DEFAULT_PROJECT_ID, NO_PROJECT_ID,
                                    resolve_project_handle,
                                    update_project_glossary)
 from meeting_agent.models import LanguageMode, MeetingMeta, MeetingType, ProjectConfig
-from meeting_agent.config import AUDIO_EXTENSIONS, ASR_STATE_FILE, MEETING_META_FILE, PROCESSING_LOCK_FILE, Config
+from meeting_agent.config import AUDIO_EXTENSIONS, ASR_STATE_FILE, MEETING_META_FILE, PROCESSING_LOCK_FILE, PROCESSING_PROGRESS_FILE, Config
 from meeting_agent.glossary import GlossaryManager
 from meeting_agent.glossary.context_manager import ContextManager as BackgroundContextManager
 from meeting_agent.scanner import MeetingScanner
@@ -1133,6 +1133,13 @@ def _run_meeting_process_async(lock_file: Path, cmd: list, cwd: str):
     """在后台线程中运行会议处理，完成后删除锁文件，并将日志写入会议目录。"""
     log_file = lock_file.parent / '_processing.log'
     error_file = lock_file.parent / '_processing.error'
+    # 清理残留的 progress 文件
+    progress_file = lock_file.parent / PROCESSING_PROGRESS_FILE
+    if progress_file.exists():
+        try:
+            progress_file.unlink()
+        except OSError:
+            pass
     import logging as _logging
     _logger = _logging.getLogger('meeting_agent.process')
     try:
@@ -1229,10 +1236,20 @@ def api_workspace_meeting_process_status(project_id, meeting_dir):
             except Exception:
                 pass
 
+        # 处理进度
+        progress = None
+        progress_file = resolved_meeting_dir / PROCESSING_PROGRESS_FILE
+        if is_processing and progress_file.exists():
+            try:
+                progress = json.loads(progress_file.read_text(encoding='utf-8'))
+            except Exception:
+                pass
+
         return jsonify({
             'is_processing': is_processing,
             'error': error_msg,
             'asr_state': asr_state,
+            'progress': progress,
         })
     except Exception as exc:
         return jsonify({'error': _safe_error(exc)}), 400

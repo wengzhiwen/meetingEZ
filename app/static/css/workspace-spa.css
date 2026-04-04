@@ -680,6 +680,43 @@
     animation: spa-processing-pulse 1.5s ease-in-out infinite;
 }
 
+/* --- Processing progress panel --- */
+.spa-progress-panel {
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+}
+.spa-progress-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+.spa-progress-step {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.82rem;
+}
+.spa-progress-step.spa-progress-done { color: #22c55e; }
+.spa-progress-step.spa-progress-active { color: #63b3ed; font-weight: 600; }
+.spa-progress-step.spa-progress-active .spa-progress-icon {
+    animation: spa-processing-pulse 1.5s ease-in-out infinite;
+}
+.spa-progress-step.spa-progress-pending { color: #6b7280; }
+.spa-progress-step.spa-progress-failed { color: #ef4444; }
+.spa-progress-chunks {
+    font-size: 0.75rem;
+    background: rgba(99, 179, 237, 0.12);
+    color: #63b3ed;
+    padding: 0.1rem 0.45rem;
+    border-radius: 4px;
+}
+.spa-progress-elapsed {
+    font-size: 0.75rem;
+    color: #6b7280;
+    margin-left: auto;
+}
+
 .spa-meeting-body {
     max-height: 0;
     overflow: hidden;

@@ -147,6 +147,7 @@ TIMELINE_FILE = "timeline.md"
 ACTIONS_FILE = "actions.md"
 STATE_FILE = "_state.json"
 PROCESSING_LOCK_FILE = "_processing.lock"
+PROCESSING_PROGRESS_FILE = "_processing_progress.json"
 ASR_STATE_FILE = "_asr_state.json"
 
 # 支持的音频格式
