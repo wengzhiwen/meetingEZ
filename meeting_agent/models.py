@@ -182,6 +182,7 @@ class TranscriptSegment(BaseModel):
     start: float
     end: float
     text: str
+    speaker: Optional[str] = None  # 说话人标识（VibeVoice 提供，仅供参考）
 
 
 class Transcript(BaseModel):
@@ -220,6 +221,7 @@ class MeetingTask(BaseModel):
     needs_asr: bool = False
     needs_minutes: bool = False
     is_processing: bool = False
+    asr_state: Optional[dict] = None  # ASR 重试/降级状态
 
     @property
     def dir_name(self) -> str:
@@ -268,3 +270,14 @@ class ProjectStatus(BaseModel):
     completed_actions: int = 0
     overdue_actions: int = 0
     last_updated: Optional[datetime] = None
+
+
+class ASRState(BaseModel):
+    """ASR 处理状态（重试/降级跟踪）"""
+    provider: str = "vibevoice"           # vibevoice | zhipu
+    status: str = "pending"               # pending | running | failed | blocked | succeeded
+    retry_count: int = 0
+    next_retry_at: Optional[str] = None   # ISO timestamp
+    last_error: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None

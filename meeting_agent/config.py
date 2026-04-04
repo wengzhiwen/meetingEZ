@@ -38,9 +38,22 @@ class Settings(BaseSettings):
     default_language: str = "zh-CN"
     timezone: str = "Asia/Shanghai"
 
-    # ASR 配置
+    # ASR 配置（智谱）
     asr_chunk_seconds: float = 30.0
     asr_overlap_seconds: float = 2.0
+
+    # VibeVoice ASR（本地部署，支持说话人分离）
+    vibevoice_base_url: str = "http://100.83.7.45:8000"
+    vibevoice_model: str = "vibevoice"
+    vibevoice_max_tokens: int = 32768
+    vibevoice_timeout: int = 12000
+    vibevoice_max_audio_seconds: int = 600
+    vibevoice_overlap_seconds: int = 15
+
+    # ASR 重试配置（VibeVoice 失败时）
+    asr_max_retries: int = 5
+    asr_initial_retry_delay: float = 30.0
+    asr_max_retry_delay: float = 3600.0
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -134,6 +147,7 @@ TIMELINE_FILE = "timeline.md"
 ACTIONS_FILE = "actions.md"
 STATE_FILE = "_state.json"
 PROCESSING_LOCK_FILE = "_processing.lock"
+ASR_STATE_FILE = "_asr_state.json"
 
 # 支持的音频格式
 AUDIO_EXTENSIONS = {".m4a", ".mp3", ".wav", ".flac", ".ogg", ".aac", ".wma"}
