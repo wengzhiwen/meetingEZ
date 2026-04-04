@@ -75,6 +75,7 @@ def set_step(
     step_key: str,
     detail: Optional[str] = None,
     chunks_total: Optional[int] = None,
+    audio_total: Optional[int] = None,
 ) -> None:
     """标记当前步骤为 in_progress，自动完成前序步骤。"""
     data = _read_progress(meeting_dir)
@@ -94,6 +95,9 @@ def set_step(
             if chunks_total is not None:
                 step["chunks_total"] = chunks_total
                 step["chunks_completed"] = 0
+            if audio_total is not None:
+                step["audio_total"] = audio_total
+                step["audio_index"] = 0
         elif step["status"] == "pending":
             # 前序未执行的步骤直接跳过标记
             pass

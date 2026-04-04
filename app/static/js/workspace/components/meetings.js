@@ -172,27 +172,36 @@ function _updateProgressUI(dir, result) {
         const isFailed = step.status === 'failed';
         const icon = isDone ? '&#10003;' : isFailed ? '&#10007;' : isActive ? '&#9679;' : '&#9675;';
         const cls = isDone ? 'done' : isFailed ? 'failed' : isActive ? 'active' : 'pending';
-        let detail = '';
-        if (isActive && step.chunks_total) {
-            const completed = step.chunks_completed || 0;
-            detail = `<span class="spa-progress-chunks">${completed}/${step.chunks_total} 片段</span>`;
-        }
         const elapsed = step.elapsed_seconds != null
             ? `<span class="spa-progress-elapsed">${step.elapsed_seconds}s</span>` : '';
-        // 音频文件子信息
+        // ASR 音频子信息：音频序号 + 文件名 + 时长 + 分片进度
         let audioInfo = '';
-        if (isActive && step.audio_total) {
+        if (isActive && step.key === 'asr' && step.audio_total) {
             const audioIdx = step.audio_index || 1;
-            let parts = [`音频 ${audioIdx}/${step.audio_total}`];
-            if (step.audio_name) parts.push(step.audio_name);
-            if (step.audio_duration) parts.push(`${step.audio_duration}s`);
-            audioInfo = `<div class="spa-progress-audio-info">${parts.join(' · ')}</div>`;
+            const audioName = step.audio_name || '';
+            const audioDur = step.audio_duration ? `${step.audio_duration}s` : '';
+            const chunksCompleted = step.chunks_completed || 0;
+            const chunksTotal = step.chunks_total || 0;
+            let line1 = `音频 ${audioIdx}/${step.audio_total}`;
+            if (audioName) line1 += ` · ${audioName}`;
+            if (audioDur) line1 += ` · ${audioDur}`;
+            let line2 = '';
+            if (chunksTotal > 1) {
+                const pct = Math.round(chunksCompleted / chunksTotal * 100);
+                line2 = `<div class="spa-progress-audio-chunks">
+                    <div class="spa-progress-bar"><div class="spa-progress-bar-fill" style="width:${pct}%"></div></div>
+                    <span>分片 ${chunksCompleted}/${chunksTotal}</span>
+                </div>`;
+            }
+            audioInfo = `<div class="spa-progress-audio-info">${line1}${line2}</div>`;
+        } else if (isActive && step.chunks_total) {
+            const completed = step.chunks_completed || 0;
+            audioInfo = `<span class="spa-progress-chunks">${completed}/${step.chunks_total} 片段</span>`;
         }
         return `<div class="spa-progress-step spa-progress-${cls}">
             <span class="spa-progress-icon">${icon}</span>
             <span class="spa-progress-label">${esc(step.label)}</span>
-            ${detail}${elapsed}
-            ${audioInfo}
+            ${audioInfo}${elapsed}
         </div>`;
     }).join('');
 

@@ -160,7 +160,10 @@ def cmd_run(args):
 
         # 1. ASR
         if task.needs_asr and task.audio_files:
-            set_step(task.meeting_dir, STEP_ASR, "音频转写中")
+            set_step(
+                task.meeting_dir, STEP_ASR, "音频转写中",
+                audio_total=len(task.audio_files),
+            )
             logger.info(
                 "开始 ASR: meeting=%s, audio_files=%s",
                 task.dir_name, [f.name for f in task.audio_files],
