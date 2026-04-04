@@ -43,6 +43,15 @@ class PromptBuilder:
 
 - 使用标准名称，如果识别到别名请映射到标准名称
 - 如果识别到新人，在输出中标注
+
+## 说话人信息
+
+- 转写文本中可能包含说话人标识（如 "Speaker 0", "Speaker 1" 等）
+- 这些标识由 ASR 引擎自动推断，仅供参考，**不完全可靠**
+- 可能出现同一人被分配多个 Speaker ID，或不同人被合并为同一 ID 的情况
+- 请结合内容语义、上下文和参会人员名单综合判断实际发言者
+- 在纪要和行动项中，优先使用参会人员姓名而非 Speaker ID
+- 如果无法确定发言者，不要强行分配，可以用模糊描述
 """
 
     @classmethod
@@ -56,6 +65,7 @@ class PromptBuilder:
         pre_hint: Optional[str] = None,
         people_info: Optional[str] = None,
         glossary_context: Optional[str] = None,
+        has_speaker_info: bool = False,
     ) -> str:
         """构建分析 Prompt"""
 
@@ -117,8 +127,14 @@ class PromptBuilder:
 - **特别关注**: {notes}""")
 
         # 转写文本
+        speaker_note = ""
+        if has_speaker_info:
+            speaker_note = (
+                "\n> **注意**：以下转写文本包含 ASR 引擎自动推断的说话人标识（Speaker 0/1/...），"
+                "仅供参考，可能存在误判。请结合参会人员名单和上下文综合判断。\n"
+            )
         sections.append(f"""## 转写文本
-
+{speaker_note}
 {transcript_text}""")
 
         # 输出要求

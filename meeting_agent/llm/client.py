@@ -51,6 +51,7 @@ class LLMClient:
         pre_hint: Optional[str] = None,
         people_info: Optional[str] = None,
         glossary_context: Optional[str] = None,
+        has_speaker_info: bool = False,
     ) -> Optional[GPTAnalysisResult]:
         """
         分析会议内容，生成纪要和更新
@@ -64,6 +65,7 @@ class LLMClient:
             pre_hint: 会议前提示
             people_info: 人员信息
             glossary_context: 术语表和人工维护的上下文 (_context.md)
+            has_speaker_info: 转写文本是否包含说话人信息
 
         Returns:
             GPTAnalysisResult 或 None
@@ -78,6 +80,7 @@ class LLMClient:
             pre_hint=pre_hint,
             people_info=people_info,
             glossary_context=glossary_context,
+            has_speaker_info=has_speaker_info,
         )
 
         # 调用 GPT
