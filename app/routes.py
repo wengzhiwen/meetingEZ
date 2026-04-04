@@ -1137,15 +1137,20 @@ def _run_meeting_process_async(lock_file: Path, cmd: list, cwd: str):
     _logger = _logging.getLogger('meeting_agent.process')
     try:
         _logger.info('开始处理: %s cmd=%s', lock_file.parent.name, ' '.join(cmd))
-        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False,
-                                timeout=1800)
-        output = (result.stdout or '') + (result.stderr or '')
-        log_file.write_text(output, encoding='utf-8')
+        with open(log_file, 'w', encoding='utf-8') as log_fh:
+            result = subprocess.run(
+                cmd, cwd=cwd,
+                stdout=log_fh, stderr=subprocess.STDOUT,
+                check=False, timeout=1800,
+            )
         if result.returncode != 0:
-            error_msg = (result.stderr or result.stdout or '处理失败').strip().splitlines()
-            last_line = error_msg[-1] if error_msg else '处理失败'
+            # 读取日志末尾作为错误摘要
+            output = log_file.read_text(encoding='utf-8')
+            error_lines = output.strip().splitlines()
+            last_line = error_lines[-1] if error_lines else '处理失败'
             error_file.write_text(last_line, encoding='utf-8')
-            _logger.error('处理失败 (code=%d): %s\n%s', result.returncode, last_line, output[-2000:])
+            _logger.error('处理失败 (code=%d): %s\n%s', result.returncode, last_line,
+                          output[-2000:])
         else:
             error_file.unlink(missing_ok=True)
             _logger.info('处理完成: %s', lock_file.parent.name)

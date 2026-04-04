@@ -45,11 +45,18 @@ def _fmt_ts(seconds) -> str:
 def setup_logging(verbose: bool = False):
     """配置日志"""
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(message)s",
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    logging.basicConfig(level=level, format=fmt._fmt, datefmt=fmt.datefmt)
+
+    # 同时写入 logs/meetingez.log（与 Web 应用共享）
+    log_dir = Path(__file__).resolve().parent.parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+    fh = logging.FileHandler(log_dir / "meetingez.log", encoding="utf-8")
+    fh.setFormatter(fmt)
+    logging.getLogger("meeting_agent").addHandler(fh)
 
 
 def cmd_run(args):
