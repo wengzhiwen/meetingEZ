@@ -75,15 +75,25 @@ def _recover_orphaned_processing():
 
 def create_app():
     """创建并配置 Flask 应用"""
-    # 配置 meeting_agent 日志输出到 stderr（Gunicorn 会捕获）
-    _handler = logging.StreamHandler()
-    _handler.setFormatter(logging.Formatter(
+    # 配置 meeting_agent 日志同时输出到 stderr 和文件
+    _fmt = logging.Formatter(
         "%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-    ))
+    )
     _agent_logger = logging.getLogger("meeting_agent")
     _agent_logger.setLevel(logging.INFO)
-    _agent_logger.addHandler(_handler)
+
+    # stderr handler — Gunicorn --log-level INFO 时可见
+    _stderr = logging.StreamHandler()
+    _stderr.setFormatter(_fmt)
+    _agent_logger.addHandler(_stderr)
+
+    # 文件 handler — 不受 Gunicorn log-level 限制，始终记录
+    _log_dir = Path(__file__).resolve().parent.parent / "logs"
+    _log_dir.mkdir(exist_ok=True)
+    _file = logging.FileHandler(_log_dir / "meetingez.log", encoding="utf-8")
+    _file.setFormatter(_fmt)
+    _agent_logger.addHandler(_file)
 
     app = Flask(__name__,
                 template_folder='../templates',
