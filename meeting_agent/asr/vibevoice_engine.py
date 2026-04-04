@@ -22,7 +22,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from meeting_agent.config import Config, TRANSCRIPT_FILE
-from meeting_agent.progress import update_chunks as _update_chunks_progress
+from meeting_agent.progress import (
+    update_chunks as _update_chunks_progress,
+    update_audio as _update_audio_progress,
+)
 from meeting_agent.models import Transcript, TranscriptSegment
 
 logger = logging.getLogger("meeting_agent.asr.vibevoice")
@@ -641,11 +644,18 @@ class VibeVoiceASREngine:
         audio_file_names = []
         time_offset = 0.0
 
-        for audio_file in sorted(audio_files):
+        for audio_idx, audio_file in enumerate(sorted(audio_files), 1):
             logger.info("VibeVoice 处理音频: %s", audio_file.name)
             audio_file_names.append(audio_file.name)
 
             duration = get_duration_seconds(audio_file) or 0.0
+            _update_audio_progress(
+                self._meeting_dir,
+                audio_index=audio_idx,
+                audio_total=len(audio_files),
+                audio_name=audio_file.name,
+                audio_duration=duration,
+            )
             if duration <= 0:
                 logger.warning("无法获取音频时长，跳过: %s", audio_file)
                 continue

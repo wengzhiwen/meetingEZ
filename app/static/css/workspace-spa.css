@@ -716,6 +716,13 @@
     color: #6b7280;
     margin-left: auto;
 }
+.spa-progress-audio-info {
+    font-size: 0.75rem;
+    color: #63b3ed;
+    opacity: 0.85;
+    margin-left: 1.2rem;
+    padding-top: 0.1rem;
+}
 
 .spa-meeting-body {
     max-height: 0;

@@ -179,10 +179,20 @@ function _updateProgressUI(dir, result) {
         }
         const elapsed = step.elapsed_seconds != null
             ? `<span class="spa-progress-elapsed">${step.elapsed_seconds}s</span>` : '';
+        // 音频文件子信息
+        let audioInfo = '';
+        if (isActive && step.audio_total) {
+            const audioIdx = step.audio_index || 1;
+            let parts = [`音频 ${audioIdx}/${step.audio_total}`];
+            if (step.audio_name) parts.push(step.audio_name);
+            if (step.audio_duration) parts.push(`${step.audio_duration}s`);
+            audioInfo = `<div class="spa-progress-audio-info">${parts.join(' · ')}</div>`;
+        }
         return `<div class="spa-progress-step spa-progress-${cls}">
             <span class="spa-progress-icon">${icon}</span>
             <span class="spa-progress-label">${esc(step.label)}</span>
             ${detail}${elapsed}
+            ${audioInfo}
         </div>`;
     }).join('');
 

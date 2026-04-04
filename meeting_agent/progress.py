@@ -145,6 +145,30 @@ def update_chunks(meeting_dir: Path, completed: int, total: int) -> None:
     _write_atomic(_progress_file(meeting_dir), data)
 
 
+def update_audio(
+    meeting_dir: Path,
+    audio_index: int,
+    audio_total: int,
+    audio_name: str,
+    audio_duration: Optional[float] = None,
+) -> None:
+    """更新 ASR 当前处理的音频文件信息。"""
+    data = _read_progress(meeting_dir)
+    if not data:
+        return
+
+    for step in data["steps"]:
+        if step["key"] == STEP_ASR and step["status"] == "in_progress":
+            step["audio_index"] = audio_index
+            step["audio_total"] = audio_total
+            step["audio_name"] = audio_name
+            if audio_duration is not None:
+                step["audio_duration"] = round(audio_duration, 1)
+            break
+
+    _write_atomic(_progress_file(meeting_dir), data)
+
+
 def fail_step(meeting_dir: Path, step_key: str, error: str) -> None:
     """标记步骤为 failed。"""
     data = _read_progress(meeting_dir)
