@@ -829,6 +829,8 @@ class VibeVoiceASREngine:
                     region_idx += 1
                     _update_chunks_progress(self._meeting_dir, region_idx, total_chunks)
                     continue
+
+                parsed = parse_json_output(raw_text)
                 if parsed is None:
                     raise RuntimeError(
                         f"第 {region_idx + 1} 个长片段输出不是合法 JSON"
