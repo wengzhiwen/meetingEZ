@@ -710,6 +710,37 @@
     flex-wrap: wrap;
 }
 
+/* ---- ASR blocked banner ---- */
+.spa-asr-blocked-banner {
+    background: rgba(234, 179, 8, 0.08);
+    border: 1px solid rgba(234, 179, 8, 0.25);
+    border-radius: 8px;
+    padding: 0.8rem 1rem;
+    margin-bottom: 0.6rem;
+}
+.spa-asr-blocked-info {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    color: var(--warning, #eab308);
+    margin-bottom: 0.4rem;
+}
+.spa-asr-blocked-icon {
+    font-size: 1rem;
+}
+.spa-asr-blocked-meta {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.78rem;
+    color: var(--muted);
+    margin-bottom: 0.6rem;
+}
+.spa-asr-blocked-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
 /* ---- File list inside meeting ---- */
 .spa-file-list {
     display: flex;

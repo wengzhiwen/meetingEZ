@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from meeting_agent.config import (
+    ASR_STATE_FILE,
     AUDIO_EXTENSIONS,
     MEETING_META_FILE,
     MINUTES_FILE,
@@ -96,6 +97,16 @@ class MeetingScanner:
 
         is_processing = (meeting_dir / PROCESSING_LOCK_FILE).exists()
 
+        # 读取 ASR 重试/降级状态
+        asr_state = None
+        asr_state_file = meeting_dir / ASR_STATE_FILE
+        if asr_state_file.exists():
+            try:
+                with open(asr_state_file, "r", encoding="utf-8") as f:
+                    asr_state = json.load(f)
+            except Exception as e:
+                logger.warning("读取 ASR 状态失败 %s: %s", meeting_dir.name, e)
+
         return MeetingTask(
             meeting_dir=meeting_dir,
             meeting_meta=meeting_meta,
@@ -106,6 +117,7 @@ class MeetingScanner:
             needs_asr=needs_asr or has_incomplete_asr,
             needs_minutes=needs_minutes,
             is_processing=is_processing,
+            asr_state=asr_state,
         )
 
     def load_project_config(self, project_dir: Optional[Path] = None) -> Optional[ProjectConfig]:

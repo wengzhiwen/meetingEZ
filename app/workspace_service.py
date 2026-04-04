@@ -737,6 +737,7 @@ def _build_meeting_card(task) -> dict:
         "needs_asr": task.needs_asr,
         "needs_minutes": task.needs_minutes,
         "is_processing": task.is_processing,
+        "asr_state": task.asr_state,
         "pending_label": " / ".join(pending_items) if pending_items else "已完成",
         "status_tone": "processing" if task.is_processing else ("pending" if pending_items else "ready"),
     }

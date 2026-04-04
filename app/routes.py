@@ -37,7 +37,7 @@ from app.workspace_service import (DEFAULT_PROJECT_ID, NO_PROJECT_ID,
                                    resolve_project_handle,
                                    update_project_glossary)
 from meeting_agent.models import LanguageMode, MeetingMeta, MeetingType, ProjectConfig
-from meeting_agent.config import AUDIO_EXTENSIONS, MEETING_META_FILE, PROCESSING_LOCK_FILE, Config
+from meeting_agent.config import AUDIO_EXTENSIONS, ASR_STATE_FILE, MEETING_META_FILE, PROCESSING_LOCK_FILE, Config
 from meeting_agent.glossary import GlossaryManager
 from meeting_agent.glossary.context_manager import ContextManager as BackgroundContextManager
 from meeting_agent.scanner import MeetingScanner
@@ -1214,7 +1214,88 @@ def api_workspace_meeting_process_status(project_id, meeting_dir):
                 error_msg = error_file.read_text(encoding='utf-8').strip()
             except Exception:
                 pass
-        return jsonify({'is_processing': is_processing, 'error': error_msg})
+
+        # ASR 重试/降级状态
+        asr_state = None
+        asr_state_file = resolved_meeting_dir / ASR_STATE_FILE
+        if asr_state_file.exists():
+            try:
+                asr_state = json.loads(asr_state_file.read_text(encoding='utf-8'))
+            except Exception:
+                pass
+
+        return jsonify({
+            'is_processing': is_processing,
+            'error': error_msg,
+            'asr_state': asr_state,
+        })
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/asr/retry',
+               methods=['POST'])
+def api_workspace_asr_retry(project_id, meeting_dir):
+    """立即重试 VibeVoice ASR。"""
+    try:
+        handle, project_config, resolved_meeting_dir = resolve_meeting_dir(
+            project_id, meeting_dir)
+
+        lock_file = resolved_meeting_dir / PROCESSING_LOCK_FILE
+        if lock_file.exists():
+            return jsonify({'error': '该会议正在处理中，请稍候'}), 409
+
+        from meeting_agent.asr.router import ASRRouter
+        asr_router = ASRRouter(project_config)
+        asr_router.retry_now(resolved_meeting_dir)
+
+        # 触发后台处理
+        lock_file.write_text(str(os.getpid()))
+        cmd = _build_agent_run_command(handle, resolved_meeting_dir.name, 'full')
+        t = threading.Thread(
+            target=_run_meeting_process_async,
+            args=(lock_file, cmd, _workspace_root_dir()),
+            daemon=True,
+        )
+        t.start()
+
+        return jsonify({'ok': True, 'status': 'started'})
+    except Exception as exc:
+        return jsonify({'error': _safe_error(exc)}), 400
+
+
+@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/asr/fallback',
+               methods=['POST'])
+def api_workspace_asr_fallback(project_id, meeting_dir):
+    """降级到智谱 ASR。"""
+    try:
+        handle, project_config, resolved_meeting_dir = resolve_meeting_dir(
+            project_id, meeting_dir)
+
+        lock_file = resolved_meeting_dir / PROCESSING_LOCK_FILE
+        if lock_file.exists():
+            return jsonify({'error': '该会议正在处理中，请稍候'}), 409
+
+        from meeting_agent.asr.router import ASRRouter
+        asr_router = ASRRouter(project_config)
+        asr_router.fallback_to_zhipu(resolved_meeting_dir)
+
+        # 删除旧的 zhipu progress 文件（如果存在），让转写从头开始
+        progress_file = resolved_meeting_dir / 'transcript.json.progress'
+        if progress_file.exists():
+            progress_file.unlink(missing_ok=True)
+
+        # 触发后台处理
+        lock_file.write_text(str(os.getpid()))
+        cmd = _build_agent_run_command(handle, resolved_meeting_dir.name, 'full')
+        t = threading.Thread(
+            target=_run_meeting_process_async,
+            args=(lock_file, cmd, _workspace_root_dir()),
+            daemon=True,
+        )
+        t.start()
+
+        return jsonify({'ok': True, 'status': 'started'})
     except Exception as exc:
         return jsonify({'error': _safe_error(exc)}), 400
 

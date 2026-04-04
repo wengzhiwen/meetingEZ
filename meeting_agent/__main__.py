@@ -20,7 +20,7 @@ from rich.panel import Panel
 from meeting_agent import __version__
 from meeting_agent.config import Config, MEETING_META_FILE
 from meeting_agent.scanner import MeetingScanner
-from meeting_agent.asr import ASREngine
+from meeting_agent.asr.router import ASRRouter, ASRBlockedException
 from meeting_agent.llm import LLMClient
 from meeting_agent.memory import MemoryWriter
 from meeting_agent.glossary import GlossaryManager, ContextManager, get_combined_context
@@ -28,6 +28,18 @@ from meeting_agent.models_glossary import TermType
 
 console = Console()
 logger = logging.getLogger("meeting_agent")
+
+
+def _fmt_ts(seconds) -> str:
+    """将秒数格式化为 [HH:MM:SS]"""
+    try:
+        s = float(seconds)
+    except (TypeError, ValueError):
+        return "??:??:??"
+    h = int(s // 3600)
+    m = int((s % 3600) // 60)
+    sec = int(s % 60)
+    return f"{h:02d}:{m:02d}:{sec:02d}"
 
 
 def setup_logging(verbose: bool = False):
@@ -44,7 +56,7 @@ def cmd_run(args):
     """运行 Agent"""
     config = Config()
     scanner = MeetingScanner(config)
-    asr_engine = ASREngine(config)
+    asr_router = ASRRouter(config)
     llm_client = LLMClient(config)
     memory_writer = MemoryWriter(config)
 
@@ -143,11 +155,17 @@ def cmd_run(args):
             ) as progress:
                 progress.add_task("执行 ASR 转写...", total=None)
 
-                transcript = asr_engine.transcribe(
-                    audio_files=task.audio_files,
-                    meeting_dir=task.meeting_dir,
-                    force=getattr(args, 'force_asr', False),
-                )
+                try:
+                    transcript = asr_router.transcribe(
+                        audio_files=task.audio_files,
+                        meeting_dir=task.meeting_dir,
+                        force=getattr(args, 'force_asr', False),
+                    )
+                except ASRBlockedException as e:
+                    console.print(f"[red]ASR 失败，已阻塞等待重试[/red]")
+                    console.print(f"[yellow]{e}[/yellow]")
+                    console.print("[dim]可通过 Web GUI 立即重试或降级到智谱 ASR[/dim]")
+                    continue
 
             if not transcript:
                 console.print("[red]ASR 失败[/red]")
@@ -169,8 +187,16 @@ def cmd_run(args):
             with open(transcript_file, "r", encoding="utf-8") as f:
                 transcript_data = json.load(f)
 
-            transcript_text = "\n".join(seg["text"]
-                                        for seg in transcript_data.get("segments", []))
+            # 构建转写文本（含说话人信息时格式化输出）
+            segments = transcript_data.get("segments", [])
+            has_speaker = any(seg.get("speaker") for seg in segments)
+            if has_speaker:
+                transcript_text = "\n".join(
+                    f"[{_fmt_ts(seg.get('start', 0))}] Speaker {seg.get('speaker', '?')}: {seg['text']}"
+                    for seg in segments
+                )
+            else:
+                transcript_text = "\n".join(seg["text"] for seg in segments)
 
             # 加载上下文
             context_md, actions_md, recent_minutes = memory_writer.get_context_for_meeting(
@@ -228,6 +254,7 @@ def cmd_run(args):
                     recent_minutes=recent_minutes,
                     pre_hint=pre_hint if meeting_meta else None,
                     glossary_context=glossary_context,
+                    has_speaker_info=has_speaker,
                 )
 
             if not result:
