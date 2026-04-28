@@ -8,7 +8,71 @@
  * - server_vad 做分段检测
  * - 按 item_id 管理 live/final 状态
  */
-console.log('realtime-transcription.js loaded, build: 90812');
+console.log('realtime-transcription.js loaded, build: 90813');
+
+const REALTIME_STATUS = {
+    IDLE: 'idle',
+    CONNECTING: 'connecting',
+    LISTENING: 'listening',
+    RECONNECTING: 'reconnecting',
+    ERROR: 'error'
+};
+
+function inferRealtimeErrorCode(error) {
+    const name = error?.name || '';
+    const message = String(error?.message || error?.error?.message || error || '').toLowerCase();
+    if (name === 'NotAllowedError') {
+        return message.includes('secure') || message.includes('https') ? 'insecure_context' : 'permission_denied';
+    }
+    if (['NotFoundError', 'NotReadableError', 'OverconstrainedError'].includes(name)) {
+        return 'device_unavailable';
+    }
+    if (name === 'NotSupportedError' || message.includes('rtcpeerconnection') || message.includes('mediadevices')) {
+        return 'unsupported_browser';
+    }
+    if (message.includes('client secret') || message.includes('401') || message.includes('403')) {
+        return 'auth_error';
+    }
+    if (message.includes('sdp') || message.includes('realtime/calls') || message.includes('failed to fetch')) {
+        return 'network_error';
+    }
+    if (message.includes('超时') || message.includes('timed out') || message.includes('timeout')) {
+        return 'timeout';
+    }
+    return 'unknown';
+}
+
+function normalizeRealtimeError(error) {
+    const rawMessage = error?.message || error?.error?.message || String(error || '未知 Realtime 错误');
+    return {
+        code: error?.code || inferRealtimeErrorCode(error),
+        message: rawMessage,
+        cause: error
+    };
+}
+
+function extractLogprobs(payload) {
+    const direct = payload?.logprobs;
+    const nested = payload?.item?.input_audio_transcription?.logprobs;
+    const value = direct || nested || [];
+    return Array.isArray(value) ? value : [];
+}
+
+function estimateConfidence(logprobs) {
+    const values = logprobs
+        .map((entry) => {
+            if (typeof entry === 'number') return entry;
+            if (entry && typeof entry.logprob === 'number') return entry.logprob;
+            if (entry && typeof entry.log_prob === 'number') return entry.log_prob;
+            return null;
+        })
+        .filter((value) => typeof value === 'number' && Number.isFinite(value));
+    if (!values.length) {
+        return null;
+    }
+    const avgLogprob = values.reduce((sum, value) => sum + value, 0) / values.length;
+    return Math.max(0, Math.min(1, Math.exp(avgLogprob)));
+}
 
 class RealtimeTranscription {
     constructor(options = {}) {
@@ -22,6 +86,9 @@ class RealtimeTranscription {
         this.reconnectDelay = 2000;
         this._intentionalClose = false;
         this._reconnectTimer = null;
+        this.status = REALTIME_STATUS.IDLE;
+        this.lastError = null;
+        this._turnCounter = 0;
 
         // 配置
         this.options = {
@@ -36,13 +103,33 @@ class RealtimeTranscription {
             onSpeechStopped: options.onSpeechStopped || null,
             onError: options.onError || null,
             onConnected: options.onConnected || null,
-            onDisconnected: options.onDisconnected || null
+            onDisconnected: options.onDisconnected || null,
+            onStatusChange: options.onStatusChange || null
         };
 
         // 按 item_id 管理的转写条目
-        // { [item_id]: { live: string, final: string|null, timestamp: number } }
+        // { [item_id]: { live: string, final: string|null, timestamp: number, order: number|null } }
         this.items = {};
         this.metrics = {};
+    }
+
+    _setStatus(status, detail = {}) {
+        if (this.status === status && !detail.force) {
+            return;
+        }
+        this.status = status;
+        if (this.options.onStatusChange) {
+            this.options.onStatusChange({ status, ...detail });
+        }
+    }
+
+    _emitError(error) {
+        const normalized = normalizeRealtimeError(error);
+        this.lastError = normalized;
+        this._setStatus(REALTIME_STATUS.ERROR, { error: normalized, force: true });
+        if (this.options.onError) {
+            this.options.onError(normalized);
+        }
     }
 
     /**
@@ -60,6 +147,7 @@ class RealtimeTranscription {
         this._clearReconnectTimer();
         this._cleanup(true);
         this.isConnecting = true;
+        this._setStatus(REALTIME_STATUS.CONNECTING, { attempt: this.reconnectAttempts + 1 });
 
         try {
             // 1. 从后端获取 ephemeral client secret（API Key 由后端环境变量提供）
@@ -75,7 +163,7 @@ class RealtimeTranscription {
 
             if (sessionResp.status === 401) {
                 window.location.href = '/login';
-                return;
+                throw { code: 'auth_error', message: '登录已失效，请重新登录' };
             }
             if (!sessionResp.ok) {
                 const errText = await sessionResp.text();
@@ -165,7 +253,8 @@ class RealtimeTranscription {
             console.error('Realtime: 连接失败', error);
             this.isConnecting = false;
             this._cleanup(true);
-            throw error;
+            this._emitError(error);
+            throw normalizeRealtimeError(error);
         }
     }
 
@@ -178,6 +267,7 @@ class RealtimeTranscription {
             this.isConnected = true;
             this.isConnecting = false;
             this.reconnectAttempts = 0;
+            this._setStatus(REALTIME_STATUS.LISTENING);
 
             if (this.options.onConnected) {
                 this.options.onConnected();
@@ -202,6 +292,7 @@ class RealtimeTranscription {
 
         this.dc.onerror = (event) => {
             console.error('Realtime: DataChannel 错误', event);
+            this._emitError(new Error('Realtime DataChannel 发生错误'));
         };
 
         this.dc.onmessage = (event) => {
@@ -235,14 +326,31 @@ class RealtimeTranscription {
                     break;
 
                 case 'input_audio_buffer.speech_started':
-                    if (!this.metrics[data.item_id]) {
+                    if (data.item_id && !this.metrics[data.item_id]) {
                         this.metrics[data.item_id] = {};
                     }
-                    this.metrics[data.item_id].speechStartedAt = performance.now();
+                    if (data.item_id) {
+                        this.metrics[data.item_id].speechStartedAt = performance.now();
+                        if (!this.items[data.item_id]) {
+                            this.items[data.item_id] = { live: '', final: null, timestamp: Date.now(), order: null };
+                        }
+                    }
                     if (this.options.onSpeechStarted) {
                         this.options.onSpeechStarted(data.item_id);
                     }
                     break;
+
+                case 'input_audio_buffer.committed': {
+                    const itemId = data.item_id;
+                    if (itemId) {
+                        if (!this.items[itemId]) {
+                            this.items[itemId] = { live: '', final: null, timestamp: Date.now(), order: null };
+                        }
+                        this.items[itemId].previousItemId = data.previous_item_id || null;
+                        this.items[itemId].order = this.items[itemId].order ?? this._turnCounter++;
+                    }
+                    break;
+                }
 
                 case 'input_audio_buffer.speech_stopped':
                     if (this.options.onSpeechStopped) {
@@ -254,7 +362,7 @@ class RealtimeTranscription {
                     const itemId = data.item_id;
                     const delta = data.delta || '';
                     if (!this.items[itemId]) {
-                        this.items[itemId] = { live: '', final: null, timestamp: Date.now() };
+                        this.items[itemId] = { live: '', final: null, timestamp: Date.now(), order: this._turnCounter++ };
                     }
                     this.items[itemId].live += delta;
                     if (!this.metrics[itemId]) {
@@ -271,7 +379,7 @@ class RealtimeTranscription {
                     }
 
                     if (this.options.onTranscriptDelta) {
-                        this.options.onTranscriptDelta(delta, itemId, this.items[itemId].live);
+                        this.options.onTranscriptDelta(delta, itemId, this.items[itemId].live, this.items[itemId]);
                     }
                     break;
                 }
@@ -280,9 +388,12 @@ class RealtimeTranscription {
                     const itemId = data.item_id;
                     const transcript = data.transcript || '';
                     if (!this.items[itemId]) {
-                        this.items[itemId] = { live: '', final: null, timestamp: Date.now() };
+                        this.items[itemId] = { live: '', final: null, timestamp: Date.now(), order: this._turnCounter++ };
                     }
                     this.items[itemId].final = transcript;
+                    this.items[itemId].logprobs = extractLogprobs(data);
+                    this.items[itemId].confidence = estimateConfidence(this.items[itemId].logprobs);
+                    this.items[itemId].lowConfidence = this.items[itemId].confidence !== null && this.items[itemId].confidence < 0.75;
                     if (!this.metrics[itemId]) {
                         this.metrics[itemId] = {};
                     }
@@ -295,20 +406,19 @@ class RealtimeTranscription {
                             : null,
                         msFromFirstDelta: this.metrics[itemId].firstDeltaAt
                             ? Math.round(this.metrics[itemId].completedAt - this.metrics[itemId].firstDeltaAt)
-                            : null
+                            : null,
+                        confidence: this.items[itemId].confidence
                     });
 
                     if (this.options.onTranscriptComplete) {
-                        this.options.onTranscriptComplete(transcript, itemId);
+                        this.options.onTranscriptComplete(transcript, itemId, this.items[itemId]);
                     }
                     break;
                 }
 
                 case 'error':
                     console.error('Realtime: API 错误', data.error);
-                    if (this.options.onError) {
-                        this.options.onError(data.error);
-                    }
+                    this._emitError(data.error || data);
                     break;
 
                 default:
@@ -326,6 +436,7 @@ class RealtimeTranscription {
         this._intentionalClose = true;
         this._clearReconnectTimer();
         this._cleanup(false);
+        this._setStatus(REALTIME_STATUS.IDLE);
         console.log('Realtime: 已断开连接');
     }
 
@@ -362,6 +473,7 @@ class RealtimeTranscription {
     _attemptReconnect() {
         if (this.reconnectAttempts >= this.maxReconnectAttempts) {
             console.log('Realtime: 达到最大重连次数');
+            this._emitError(new Error('Realtime 连接已断开，自动重连次数已用尽'));
             return;
         }
 
@@ -369,6 +481,11 @@ class RealtimeTranscription {
         const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
 
         console.log(`Realtime: ${delay}ms 后重连 (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+        this._setStatus(REALTIME_STATUS.RECONNECTING, {
+            attempt: this.reconnectAttempts,
+            maxAttempts: this.maxReconnectAttempts,
+            delay
+        });
 
         this._reconnectTimer = setTimeout(async () => {
             if (!this.isConnected && !this._intentionalClose && this.localStream) {
@@ -376,6 +493,9 @@ class RealtimeTranscription {
                     await this.connect(this.localStream);
                 } catch (err) {
                     console.error('Realtime: 重连失败', err);
+                    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+                        this._attemptReconnect();
+                    }
                 }
             }
         }, delay);
@@ -453,8 +573,14 @@ class RealtimeTranscription {
     getFinalTranscripts() {
         return Object.entries(this.items)
             .filter(([, item]) => item.final !== null)
-            .sort(([, a], [, b]) => a.timestamp - b.timestamp)
-            .map(([itemId, item]) => ({ itemId, text: item.final, timestamp: item.timestamp }));
+            .sort(([, a], [, b]) => (a.order ?? a.timestamp) - (b.order ?? b.timestamp))
+            .map(([itemId, item]) => ({
+                itemId,
+                text: item.final,
+                timestamp: item.timestamp,
+                order: item.order,
+                confidence: item.confidence
+            }));
     }
 
     /**

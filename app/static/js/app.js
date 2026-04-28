@@ -177,10 +177,37 @@ function normalizeStoredTranscriptEntry(entry) {
             secondaryTranslation: entry.secondaryTranslation || null,
             postProcessing: !!entry.postProcessing,
             pendingCorrection: !!entry.pendingCorrection,
-            pendingTranslation: !!entry.pendingTranslation
+            pendingTranslation: !!entry.pendingTranslation,
+            realtimeOrder: Number.isFinite(entry.realtimeOrder) ? entry.realtimeOrder : null,
+            confidence: Number.isFinite(entry.confidence) ? entry.confidence : null,
+            lowConfidence: !!entry.lowConfidence
         };
     }
     return { ...entry, channel: entry.channel || 'primary' };
+}
+
+function getRealtimeErrorMessage(error) {
+    const code = error?.code || 'unknown';
+    const messages = {
+        permission_denied: '麦克风权限被拒绝，请在浏览器地址栏重新授权。',
+        insecure_context: '当前页面需要 HTTPS 或 localhost 才能使用实时音频。',
+        device_unavailable: '找不到可用麦克风，或设备正被其他应用占用。',
+        unsupported_browser: '当前浏览器不支持实时转写所需的 WebRTC 能力。',
+        auth_error: 'Realtime 鉴权失败，请检查 OPENAI_API_KEY 或登录状态。',
+        network_error: 'Realtime 网络连接失败，请检查网络后重试。',
+        timeout: 'Realtime 连接超时，请稍后重试。'
+    };
+    return messages[code] || error?.message || 'Realtime 连接异常';
+}
+
+function insertTranscriptInRealtimeOrder(entry) {
+    transcripts.push(entry);
+    transcripts.sort((a, b) => {
+        const left = Number.isFinite(a.realtimeOrder) ? a.realtimeOrder : Number.MAX_SAFE_INTEGER;
+        const right = Number.isFinite(b.realtimeOrder) ? b.realtimeOrder : Number.MAX_SAFE_INTEGER;
+        if (left !== right) return left - right;
+        return String(a.timestamp || '').localeCompare(String(b.timestamp || ''));
+    });
 }
 
 function addToTranslationContext(text, language) {
@@ -572,6 +599,21 @@ async function initRealtimeConnection() {
             }
         },
 
+        onStatusChange: ({ status, attempt, maxAttempts, delay, error }) => {
+            console.log('Realtime status changed:', { status, attempt, maxAttempts, delay, error });
+            if (status === 'connecting') {
+                updateAudioStatus('连接中', '');
+            } else if (status === 'listening') {
+                updateAudioStatus('已连接', 'active');
+            } else if (status === 'reconnecting') {
+                const waitSeconds = delay ? Math.ceil(delay / 1000) : 0;
+                updateAudioStatus('重连中', '');
+                showStatus(`连接中断，${waitSeconds || 1} 秒后重连 (${attempt}/${maxAttempts})`, 'error');
+            } else if (status === 'error' && error) {
+                updateAudioStatus('连接异常', '');
+            }
+        },
+
         onSpeechStarted: (itemId) => {
             currentStreamingTextMap.primary = '正在识别...';
             currentTranscriptIdMap.primary = itemId;
@@ -596,12 +638,14 @@ async function initRealtimeConnection() {
             updateStreamingDisplay('primary');
         },
 
-        onTranscriptComplete: async (transcript, itemId) => {
+        onTranscriptComplete: async (transcript, itemId, realtimeItem = {}) => {
             if (!transcript || !transcript.trim()) return;
 
             if (isHallucinationText(transcript)) {
-                currentStreamingTextMap.primary = '';
-                currentTranscriptIdMap.primary = null;
+                if (currentTranscriptIdMap.primary === itemId) {
+                    currentStreamingTextMap.primary = '';
+                    currentTranscriptIdMap.primary = null;
+                }
                 return;
             }
 
@@ -620,17 +664,24 @@ async function initRealtimeConnection() {
                 secondaryTranslation: null,
                 postProcessing: false,
                 pendingCorrection: false,
-                pendingTranslation: false
+                pendingTranslation: false,
+                realtimeOrder: Number.isFinite(realtimeItem.order) ? realtimeItem.order : null,
+                confidence: Number.isFinite(realtimeItem.confidence) ? realtimeItem.confidence : null,
+                lowConfidence: !!realtimeItem.lowConfidence
             };
-            transcripts.push(newTranscript);
+            insertTranscriptInRealtimeOrder(newTranscript);
             saveTranscripts();
             rebuildTranslationContext();
 
-            currentStreamingTextMap.primary = '';
-            currentTranscriptIdMap.primary = null;
+            if (currentTranscriptIdMap.primary === itemId) {
+                currentStreamingTextMap.primary = '';
+                currentTranscriptIdMap.primary = null;
+            }
             console.log('UI [perf] transcript committed', {
                 itemId: newTranscript.id,
-                chars: normalized.length
+                chars: normalized.length,
+                order: newTranscript.realtimeOrder,
+                confidence: newTranscript.confidence
             });
             updateDisplay(channel);
 
@@ -679,7 +730,7 @@ async function initRealtimeConnection() {
 
         onError: (error) => {
             console.error('Realtime 错误:', error);
-            showStatus('Realtime 错误: ' + (error.message || JSON.stringify(error)), 'error');
+            showStatus(getRealtimeErrorMessage(error), 'error');
         }
     });
 
@@ -909,6 +960,9 @@ function renderStructuredTranscriptEntry(entry) {
     }
     if (entry.correctionApplied) {
         notes.push('已应用智能修正');
+    }
+    if (entry.lowConfidence) {
+        notes.push('识别置信度偏低，建议会后复核');
     }
     const noteBlock = notes.length > 0
         ? `<div class="transcript-note">${escapeHtml(notes.join(' · '))}</div>`
@@ -1179,6 +1233,9 @@ function downloadTranscript() {
             content += `原始转写: ${t.rawTranscript || '-'}\n`;
             content += `智能修正: ${t.correctedTranscript || '-'}\n`;
             content += `翻译(主语言): ${t.primaryTranslation || '-'}\n`;
+            if (Number.isFinite(t.confidence)) {
+                content += `识别置信度: ${Math.round(t.confidence * 100)}%\n`;
+            }
             content += `翻译(第二语言): ${t.secondaryTranslation || '-'}\n\n`;
         } else if (t.isTranslation) {
             content += `翻译结果: ${t.text || '-'}\n\n`;
