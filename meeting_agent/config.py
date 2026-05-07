@@ -19,10 +19,19 @@ load_dotenv()
 class Settings(BaseSettings):
     """应用配置"""
 
-    # 智谱 AI ASR
+    # 智谱 AI ASR（OpenRouter 不可用时降级）
     zhipu_api_key: str = ""
     zhipu_api_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
     zhipu_asr_model: str = "glm-asr-2512"
+
+    # OpenRouter ASR (Google Chirp 3)
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_asr_model: str = "google/chirp-3"
+    openrouter_asr_language: str = ""
+    openrouter_asr_timeout: int = 120
+    openrouter_site_url: str = ""
+    openrouter_site_name: str = "MeetingEZ"
 
     # OpenAI GPT
     openai_api_key: str = ""
@@ -38,11 +47,11 @@ class Settings(BaseSettings):
     default_language: str = "zh-CN"
     timezone: str = "Asia/Shanghai"
 
-    # ASR 配置（智谱）
+    # ASR 分块配置
     asr_chunk_seconds: float = 30.0
     asr_overlap_seconds: float = 2.0
 
-    # VibeVoice ASR（本地部署，支持说话人分离）
+    # VibeVoice ASR（暂时屏蔽，保留配置以便后续恢复）
     vibevoice_base_url: str = "http://100.83.7.45:8000"
     vibevoice_model: str = "vibevoice"
     vibevoice_max_tokens: int = 32768
@@ -50,7 +59,7 @@ class Settings(BaseSettings):
     vibevoice_max_audio_seconds: int = 600
     vibevoice_overlap_seconds: int = 15
 
-    # ASR 重试配置（VibeVoice 失败时）
+    # ASR 重试配置（历史 VibeVoice blocked 状态兼容）
     asr_max_retries: int = 5
     asr_initial_retry_delay: float = 30.0
     asr_max_retry_delay: float = 3600.0
@@ -121,6 +130,10 @@ class Config:
     @property
     def zhipu_api_key(self) -> str:
         return self.settings.zhipu_api_key
+
+    @property
+    def openrouter_api_key(self) -> str:
+        return self.settings.openrouter_api_key
 
     @property
     def openai_api_key(self) -> str:

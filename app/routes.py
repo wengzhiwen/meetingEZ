@@ -1258,7 +1258,7 @@ def api_workspace_meeting_process_status(project_id, meeting_dir):
 @main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/asr/retry',
                methods=['POST'])
 def api_workspace_asr_retry(project_id, meeting_dir):
-    """立即重试 VibeVoice ASR。"""
+    """立即重试 OpenRouter Chirp 3 ASR。"""
     import logging as _logging
     _logging.getLogger('meeting_agent.process').info(
         'ASR 重试请求: project=%s, meeting=%s', project_id, meeting_dir)

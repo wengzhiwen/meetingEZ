@@ -316,7 +316,7 @@ function meetingCard(m, projectId) {
                 <div class="spa-asr-blocked-banner">
                     <div class="spa-asr-blocked-info">
                         <span class="spa-asr-blocked-icon">&#9888;</span>
-                        <span>VoiceVoice ASR 转写失败: ${esc(m.asr_state.last_error || '未知错误')}</span>
+                        <span>ASR 转写失败: ${esc(m.asr_state.last_error || '未知错误')}</span>
                     </div>
                     <div class="spa-asr-blocked-meta">
                         ${m.asr_state.next_retry_at ? `<span>下次自动重试: ${esc(_formatRetryTime(m.asr_state.next_retry_at))}</span>` : ''}
@@ -512,7 +512,7 @@ function bindEvents(container, data, projectId) {
             btn.textContent = '启动中...';
             try {
                 await api.retryASR(projectId, dir);
-                showToast('已触发 VibeVoice ASR 重试', 'success');
+                showToast('已触发 ASR 重试', 'success');
                 invalidateCache(projectId);
                 const { render } = await import('./project-tabs.js');
                 await render(projectId, 'meetings');

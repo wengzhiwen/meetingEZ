@@ -286,7 +286,7 @@ class ASREngine:
                     continue
 
                 chunk_duration = min(self.chunk_seconds, duration - chunk_start)
-                chunk_file = chunks_dir / f"chunk_{idx:04d}.mp3"
+                chunk_file = chunks_dir / f"chunk_{idx:04d}{self._chunk_extension()}"
 
                 # 检查分片是否已存在（缓存复用）
                 if use_cache and chunk_file.exists() and chunk_file.stat().st_size > 0:
@@ -352,6 +352,10 @@ class ASREngine:
             )
         response.raise_for_status()
         return response.json()
+
+    def _chunk_extension(self) -> str:
+        """分片文件扩展名。"""
+        return ".mp3"
 
     def _split_chunk(
         self,

@@ -274,7 +274,7 @@ class ProjectStatus(BaseModel):
 
 class ASRState(BaseModel):
     """ASR 处理状态（重试/降级跟踪）"""
-    provider: str = "vibevoice"           # vibevoice | zhipu
+    provider: str = "openrouter"          # openrouter | zhipu | vibevoice(legacy)
     status: str = "pending"               # pending | running | failed | blocked | succeeded
     retry_count: int = 0
     next_retry_at: Optional[str] = None   # ISO timestamp
