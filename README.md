@@ -7,14 +7,16 @@
 - OpenAI Realtime API WebRTC transcription session
 - 极小 Flask 后端签发 `client secret`
 - 后端代理翻译请求，前端不再保存 API Key
+- 可选 OpenAI Realtime Translation Beta，用于左右双栏显示原文转写与双语实时翻译
 
 ## 当前特性
 
 - 控制台首页：默认先进入控制台，再选择项目模式或快速模式
-- 实时转写：`gpt-4o-transcribe`
+- 实时转写：`gpt-realtime-whisper`
 - 连接方式：WebRTC + DataChannel
-- 分段策略：`semantic_vad`，`eagerness: "high"`
+- 分段策略：`gpt-realtime-whisper` 低延迟流式输出，`delay: "low"`，不发送 `turn_detection`
 - 后置翻译：默认 `gpt-5.4-mini-2026-03-17`，可用 `TRANSLATION_MODEL` 覆盖
+- 实时翻译实验模式：可选 `gpt-realtime-translate`，一路 `gpt-realtime-whisper` 输出混合原文转写，另开两路 translation session 分别译入第一语言和第二语言
 - 推理强度：默认 `low`，可用 `TRANSLATION_REASONING_EFFORT` 覆盖，仅对支持 reasoning 的翻译模型生效
 - 访问控制：可选 `ACCESS_CODE` 登录页
 - 项目协同：项目模式下可加载术语、近期会议和待办摘要增强实时处理

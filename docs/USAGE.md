@@ -179,7 +179,7 @@ python run.py
 
 ### 连续讲话为什么以前会卡到说完才出字？
 
-当前实现已经改成 `semantic_vad + eagerness: high`，比旧的纯静音切段更适合长句连续讲话。
+当前默认实时模型为 `gpt-realtime-whisper`，并发送 `delay: "low"` 获取低延迟流式 transcript deltas。该模型当前不接受 `turn_detection` 字段。
 
 ## 浏览器要求
 

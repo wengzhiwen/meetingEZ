@@ -1,4 +1,4 @@
-console.log('app.js loaded, build: 83156');
+console.log('app.js loaded, build: 20260509k');
 // MeetingEZ - 基于 OpenAI Realtime API (WebRTC) 的实时转写
 // API Key 由后端从环境变量读取，前端不接触
 
@@ -13,14 +13,23 @@ let testStream = null;
 let testAudioContext = null;
 let isTestingMicrophone = false;
 let currentStreamingTextMap = { primary: '' };
-let currentTranscriptIdMap = { primary: null };
+let currentTranscriptIdMap = { primary: null, secondary: null };
 const STORAGE_KEY = 'meetingEZ_transcripts';
 const STORAGE_VERSION = 2;
 const HIDE_BEFORE_KEY = 'meetingEZ_hideBefore';
 
 let realtimeClient = null;
+let realtimeTranslationClients = [];
 let currentContextPack = null;
 let mediaStreamExtras = null;  // 标签页+麦克风混合时的额外资源
+let realtimeTranslationOutputMap = {};
+let realtimeTranslationLastAttachedLengthMap = {};
+let realtimeTranslationBufferMap = {};
+let realtimeTranslationTargetLanguages = [];
+let realtimePaneLiveMap = {
+    primary: { original: '', translation: '' },
+    secondary: { original: '', translation: '' }
+};
 
 const TRANSLATION_CONTEXT_SIZE = 10;
 let translationContext = [];
@@ -41,6 +50,16 @@ const pageLaunchContext = {
     primaryLanguage: document.body?.dataset.sessionPrimaryLanguage || '',
     secondaryLanguage: document.body?.dataset.sessionSecondaryLanguage || ''
 };
+const modelInfoData = (() => {
+    const el = document.getElementById('modelInfoData');
+    if (!el?.textContent) return {};
+    try {
+        return JSON.parse(el.textContent);
+    } catch (error) {
+        console.warn('模型信息解析失败:', error);
+        return {};
+    }
+})();
 
 function getProcessingSettings() {
     return {
@@ -52,6 +71,86 @@ function getProcessingSettings() {
 
 function getLanguageMode() {
     return document.getElementById('languageMode')?.value || DEFAULT_LANGUAGE_MODE;
+}
+
+function getTranslationMode() {
+    return document.getElementById('translationMode')?.value || 'postprocess';
+}
+
+function normalizeRealtimeTranslationLanguage(value) {
+    const normalized = (value || '').trim().toLowerCase().split('-')[0];
+    const supported = new Set(['es', 'pt', 'fr', 'ja', 'ru', 'zh', 'de', 'ko', 'hi', 'id', 'vi', 'it', 'en']);
+    return supported.has(normalized) ? normalized : '';
+}
+
+function getSubtitleLanguageLabel(language) {
+    const normalized = normalizeRealtimeTranslationLanguage(language) || (language || '').trim().toLowerCase();
+    const labels = {
+        zh: 'ZH',
+        ja: 'JA',
+        en: 'EN',
+        ko: 'KO',
+        es: 'ES',
+        fr: 'FR',
+        de: 'DE',
+        ru: 'RU',
+        pt: 'PT',
+        it: 'IT',
+        hi: 'HI',
+        id: 'ID',
+        vi: 'VI'
+    };
+    return labels[normalized] || (normalized ? normalized.toUpperCase() : 'TEXT');
+}
+
+function getTranscriptContainerForChannel(channel = 'primary') {
+    if (transcriptSplit && transcriptSplit.style.display !== 'none') {
+        return channel === 'secondary' ? transcriptRight : transcriptLeft;
+    }
+    return transcriptContent;
+}
+
+function resetRealtimePaneLiveMap() {
+    realtimePaneLiveMap = {
+        primary: { original: '', translation: '' },
+        secondary: { original: '', translation: '' }
+    };
+}
+
+function clearRealtimePaneLive(role) {
+    if (!role) {
+        resetRealtimePaneLiveMap();
+        return;
+    }
+    ['primary', 'secondary'].forEach((channel) => {
+        realtimePaneLiveMap[channel][role] = '';
+    });
+}
+
+function updateTranslationModelInfo() {
+    const mode = getTranslationMode();
+    const info = mode === 'realtime_beta'
+        ? modelInfoData.realtime_translation
+        : modelInfoData.translation;
+    if (!info) return;
+
+    const purposeEl = document.getElementById('translationModelPurpose');
+    const apiEl = document.getElementById('translationModelApi');
+    const nameEl = document.getElementById('translationModelName');
+    const metaEl = document.getElementById('translationModelMeta');
+
+    if (purposeEl) purposeEl.textContent = info.purpose || '';
+    if (apiEl) apiEl.textContent = info.api || '';
+    if (nameEl) nameEl.textContent = info.model || '';
+    if (!metaEl) return;
+
+    if (mode === 'realtime_beta') {
+        metaEl.textContent = info.input_model ? `input transcription: ${info.input_model}` : '';
+    } else if (info.reasoning_effort?.effort) {
+        metaEl.textContent = `reasoning: ${info.reasoning_effort.effort}`;
+    } else {
+        metaEl.textContent = '';
+    }
 }
 
 function getSelectedWorkspaceProject() {
@@ -128,6 +227,19 @@ function isStructuredTranscript(entry) {
     );
 }
 
+function isRealtimeTranslationPair(entry) {
+    return !!entry && entry.isRealtimeTranslationPair && entry.translations &&
+        typeof entry.translations === 'object';
+}
+
+function isRealtimeTranslationPaneEntry(entry) {
+    return !!entry && entry.isRealtimeTranslationPaneEntry;
+}
+
+function isRealtimeTranscriptionPaneEntry(entry) {
+    return !!entry && entry.isRealtimeTranscriptionPaneEntry;
+}
+
 function getDisplayTranscriptText(entry) {
     if (!entry) return '';
     if (isStructuredTranscript(entry)) {
@@ -164,6 +276,40 @@ function rebuildTranslationContext() {
 
 function normalizeStoredTranscriptEntry(entry) {
     if (!entry || typeof entry !== 'object') return null;
+    if (isRealtimeTranscriptionPaneEntry(entry)) {
+        return {
+            id: entry.id || Date.now() + Math.random(),
+            timestamp: entry.timestamp || new Date().toISOString(),
+            channel: entry.channel || 'primary',
+            paneRole: 'original',
+            language: entry.language || entry.originalLanguage || '',
+            text: entry.text || entry.rawTranscript || '',
+            rawTranscript: entry.rawTranscript || entry.text || '',
+            isRealtimeTranscriptionPaneEntry: true
+        };
+    }
+    if (isRealtimeTranslationPaneEntry(entry)) {
+        return {
+            id: entry.id || Date.now() + Math.random(),
+            timestamp: entry.timestamp || new Date().toISOString(),
+            channel: entry.channel || 'primary',
+            paneRole: 'translation',
+            language: entry.language || '',
+            text: entry.text || '',
+            isTranslation: true,
+            isRealtimeTranslationPaneEntry: true
+        };
+    }
+    if (isRealtimeTranslationPair(entry)) {
+        return {
+            id: entry.id || Date.now() + Math.random(),
+            timestamp: entry.timestamp || new Date().toISOString(),
+            channel: entry.channel || 'primary',
+            isRealtimeTranslationPair: true,
+            languageOrder: Array.isArray(entry.languageOrder) ? entry.languageOrder : Object.keys(entry.translations || {}),
+            translations: entry.translations || {}
+        };
+    }
     if (isStructuredTranscript(entry)) {
         return {
             id: entry.id || Date.now() + Math.random(),
@@ -208,6 +354,143 @@ function insertTranscriptInRealtimeOrder(entry) {
         if (left !== right) return left - right;
         return String(a.timestamp || '').localeCompare(String(b.timestamp || ''));
     });
+}
+
+function splitTranscriptSentences(text) {
+    const normalized = normalizeText(text);
+    if (!normalized) return [];
+
+    const sentences = [];
+    let start = 0;
+    const boundaryChars = new Set(['。', '！', '？', '.', '!', '?', '；', ';', '\n']);
+    for (let i = 0; i < normalized.length; i++) {
+        if (!boundaryChars.has(normalized[i])) continue;
+
+        let end = i + 1;
+        while (end < normalized.length && /["'”’」』）\]\s]/u.test(normalized[end])) {
+            end++;
+        }
+
+        const segment = normalized.slice(start, end).trim();
+        if (segment) sentences.push(segment);
+        start = end;
+    }
+
+    const tail = normalized.slice(start).trim();
+    if (tail) sentences.push(tail);
+    const roughSegments = (sentences.length ? sentences : [normalized]).flatMap(splitLongTranscriptSegment);
+    return groupSubtitleSegments(roughSegments);
+}
+
+function splitLongTranscriptSegment(segment) {
+    const maxChars = 110;
+    if (segment.length <= maxChars) return [segment];
+
+    const parts = [];
+    let rest = segment.trim();
+    while (rest.length > maxChars) {
+        const windowText = rest.slice(0, maxChars);
+        const softBreak = Math.max(
+            windowText.lastIndexOf('，'),
+            windowText.lastIndexOf(','),
+            windowText.lastIndexOf('、'),
+            windowText.lastIndexOf(' ')
+        );
+        const end = softBreak > 40 ? softBreak + 1 : maxChars;
+        parts.push(rest.slice(0, end).trim());
+        rest = rest.slice(end).trim();
+    }
+    if (rest) parts.push(rest);
+    return parts.filter(Boolean);
+}
+
+function groupSubtitleSegments(segments) {
+    const grouped = [];
+    let current = [];
+    const maxSentences = 3;
+    const maxChars = 150;
+
+    segments.forEach((segment) => {
+        const normalized = (segment || '').trim();
+        if (!normalized) return;
+        const nextText = [...current, normalized].join(' ');
+        if (current.length > 0 && (current.length >= maxSentences || nextText.length > maxChars)) {
+            grouped.push(current.join(' '));
+            current = [];
+        }
+        current.push(normalized);
+    });
+
+    if (current.length) grouped.push(current.join(' '));
+    return grouped;
+}
+
+function buildTranscriptEntryFromSegment(segment, itemId, realtimeItem, index = 0, overrides = {}) {
+    const baseOrder = Number.isFinite(realtimeItem.order) ? realtimeItem.order : null;
+    const language = overrides.language || detectLanguage(segment);
+    const channel = overrides.channel || 'primary';
+    return {
+        id: index === 0 ? (itemId || Date.now() + Math.random()) : `${itemId || Date.now()}-${index + 1}`,
+        timestamp: new Date().toISOString(),
+        channel,
+        paneRole: overrides.paneRole || null,
+        language,
+        originalLanguage: language,
+        rawTranscript: segment,
+        text: overrides.text || segment,
+        correctedTranscript: null,
+        correctionApplied: false,
+        primaryTranslation: null,
+        secondaryTranslation: null,
+        postProcessing: false,
+        pendingCorrection: false,
+        pendingTranslation: false,
+        isRealtimeTranscriptionPaneEntry: !!overrides.isRealtimeTranscriptionPaneEntry,
+        realtimeOrder: Number.isFinite(baseOrder) ? baseOrder + index / 1000 : null,
+        confidence: Number.isFinite(realtimeItem.confidence) ? realtimeItem.confidence : null,
+        lowConfidence: !!realtimeItem.lowConfidence
+    };
+}
+
+function runPostProcessingForTranscript(entry, languageMode) {
+    try {
+        const primaryLang = document.getElementById('primaryLanguage')?.value || 'zh';
+        const secondaryLang = (document.getElementById('secondaryLanguage')?.value || '').trim();
+        const translationMode = getTranslationMode();
+        const shouldRunPostTranslation = secondaryLang && translationMode !== 'realtime_beta';
+        const processingSettings = getProcessingSettings();
+        if (!processingSettings.enableCorrection && !shouldRunPostTranslation) return;
+
+        entry.postProcessing = true;
+        entry.pendingCorrection = processingSettings.enableCorrection;
+        entry.pendingTranslation = !!shouldRunPostTranslation;
+        saveTranscripts();
+        updateDisplay(entry.channel || 'primary');
+
+        postProcessText(entry.rawTranscript, {
+            primaryLanguage: primaryLang,
+            secondaryLanguage: shouldRunPostTranslation ? secondaryLang : '',
+            languageMode,
+            originalLanguageHint: entry.originalLanguage,
+            enableCorrection: processingSettings.enableCorrection,
+            enableGlossary: processingSettings.enableGlossary,
+            glossary: processingSettings.glossary
+        }).then((structured) => {
+            applyPostProcessToTranscript(entry.id, structured);
+        }).catch((ppErr) => {
+            const currentEntry = transcripts.find(t => t.id === entry.id);
+            if (currentEntry) {
+                currentEntry.postProcessing = false;
+                currentEntry.pendingCorrection = false;
+                currentEntry.pendingTranslation = false;
+                saveTranscripts();
+                updateDisplay(currentEntry.channel || 'primary');
+            }
+            console.warn('后置处理失败，保留原文:', ppErr);
+        });
+    } catch (ppErr) {
+        console.warn('后置处理初始化失败，保留原文:', ppErr);
+    }
 }
 
 function addToTranslationContext(text, language) {
@@ -357,6 +640,11 @@ function loadSettings() {
     const enableGlossary = localStorage.getItem('meetingEZ_enableGlossary') === 'true';
     document.getElementById('enableGlossary').checked = enableGlossary;
 
+    const translationMode = localStorage.getItem('meetingEZ_translationMode') || 'postprocess';
+    const translationModeSelect = document.getElementById('translationMode');
+    if (translationModeSelect) translationModeSelect.value = translationMode;
+    updateTranslationModelInfo();
+
     const glossaryInput = document.getElementById('glossaryInput');
     if (glossaryInput) {
         glossaryInput.value = localStorage.getItem('meetingEZ_glossary') || '';
@@ -431,6 +719,11 @@ function setupEventListeners() {
     document.getElementById('languageMode').addEventListener('change', (e) => {
         localStorage.setItem('meetingEZ_languageMode', e.target.value);
         void loadWorkspaceContextPack({ silent: true });
+    });
+
+    document.getElementById('translationMode')?.addEventListener('change', (e) => {
+        localStorage.setItem('meetingEZ_translationMode', e.target.value);
+        updateTranslationModelInfo();
     });
 
     document.getElementById('workspaceProject').addEventListener('change', (e) => {
@@ -522,7 +815,7 @@ async function startMeeting() {
                 const wantMic = !!document.getElementById('tabPlusMic')?.checked;
                 if (wantMic) {
                     const micStream = await navigator.mediaDevices.getUserMedia({
-                        audio: buildAudioConstraints({ echoCancellation: true })
+                        audio: buildAudioConstraints({ echoCancellation: false })
                     });
 
                     const mixCtx = new AudioContext({ sampleRate: 24000 });
@@ -531,8 +824,18 @@ async function startMeeting() {
                     const dest = mixCtx.createMediaStreamDestination();
                     tabSource.connect(dest);
                     micSource.connect(dest);
+                    if (mixCtx.state === 'suspended') {
+                        await mixCtx.resume();
+                    }
 
-                    mediaStreamExtras = { mixCtx, micStream, tabAudioTrack };
+                    mediaStreamExtras = {
+                        mixCtx,
+                        micStream,
+                        tabAudioTrack,
+                        tabSource,
+                        micSource,
+                        mixDestination: dest
+                    };
                     mediaStream = dest.stream;
                 } else {
                     mediaStream = new MediaStream([tabAudioTrack]);
@@ -550,7 +853,15 @@ async function startMeeting() {
         startVolumeMonitor(mediaStream);
         meetingStartedAt = Date.now();
         await loadWorkspaceContextPack({ silent: true });
-        await initRealtimeConnection();
+        if (getTranslationMode() === 'realtime_beta') {
+            enableSplitView(true);
+            await Promise.all([
+                initRealtimeBetaTranscriptionConnection(),
+                initRealtimeTranslationConnections()
+            ]);
+        } else {
+            await initRealtimeConnection();
+        }
 
         isConnected = true;
         isRecording = true;
@@ -562,7 +873,7 @@ async function startMeeting() {
         hideLoading();
         showStatus('会议已开始', 'success');
 
-        enableSplitView(false);
+        enableSplitView(getTranslationMode() === 'realtime_beta');
     } catch (error) {
         console.error('开始会议失败:', error);
         hideLoading();
@@ -572,22 +883,27 @@ async function startMeeting() {
 }
 
 // 初始化 Realtime WebRTC 连接（不再需要 API Key）
-async function initRealtimeConnection() {
-    const primaryLang = document.getElementById('primaryLanguage').value || null;
+async function initRealtimeConnection(options = {}) {
+    const betaMode = options.beta === true;
+    const targetChannel = options.channel || 'primary';
+    const transcriptKey = betaMode ? targetChannel : 'primary';
+    const primaryLang = Object.prototype.hasOwnProperty.call(options, 'language')
+        ? options.language
+        : (document.getElementById('primaryLanguage').value || null);
     const languageMode = getLanguageMode();
     const RealtimeTranscriptionClass = window.RealtimeTranscription;
     if (typeof RealtimeTranscriptionClass !== 'function') {
         throw new Error('RealtimeTranscription 未正确加载');
     }
 
-    realtimeClient = new RealtimeTranscriptionClass({
-        model: 'gpt-4o-transcribe',
+    const client = new RealtimeTranscriptionClass({
+        model: 'gpt-realtime-whisper',
         language: primaryLang,
         prompt: '', // 不向 ASR 注入增强内容，过长的 prompt 在静音时会产生严重幻觉
 
         onConnected: () => {
-            console.log('Realtime 连接成功');
-            showStatus('实时转写已连接', 'success');
+            console.log('Realtime 连接成功', { language: primaryLang, channel: targetChannel });
+            showStatus(betaMode ? '实时原文转写已连接' : '实时转写已连接', 'success');
             updateMeetingStatus('进行中', 'active');
             updateAudioStatus('已连接', 'active');
         },
@@ -615,116 +931,101 @@ async function initRealtimeConnection() {
         },
 
         onSpeechStarted: (itemId) => {
-            currentStreamingTextMap.primary = '正在识别...';
-            currentTranscriptIdMap.primary = itemId;
+            currentTranscriptIdMap[transcriptKey] = itemId;
+            if (betaMode) {
+                realtimePaneLiveMap[targetChannel].original = '';
+                updateDisplay(targetChannel);
+            } else {
+                currentStreamingTextMap.primary = '正在识别...';
+                updateStreamingDisplay('primary');
+            }
             console.log('UI [perf] speech started', {
                 itemId,
                 msFromMeetingStart: meetingStartedAt ? Math.round(Date.now() - meetingStartedAt) : null
             });
-            updateStreamingDisplay('primary');
         },
 
         onSpeechStopped: () => {},
 
         onTranscriptDelta: (delta, itemId, liveText) => {
             if (!delta) return;
-            currentStreamingTextMap.primary = liveText;
-            currentTranscriptIdMap.primary = itemId;
+            currentTranscriptIdMap[transcriptKey] = itemId;
+            if (betaMode) {
+                realtimePaneLiveMap[targetChannel].original = liveText;
+                updateDisplay(targetChannel);
+            } else {
+                currentStreamingTextMap.primary = liveText;
+                updateStreamingDisplay('primary');
+            }
             console.log('UI [perf] delta render', {
                 itemId,
                 deltaChars: delta.length,
                 liveChars: liveText.length
             });
-            updateStreamingDisplay('primary');
         },
 
         onTranscriptComplete: async (transcript, itemId, realtimeItem = {}) => {
             if (!transcript || !transcript.trim()) return;
 
             if (isHallucinationText(transcript)) {
-                if (currentTranscriptIdMap.primary === itemId) {
-                    currentStreamingTextMap.primary = '';
-                    currentTranscriptIdMap.primary = null;
+                if (currentTranscriptIdMap[transcriptKey] === itemId) {
+                    if (betaMode) {
+                        realtimePaneLiveMap[targetChannel].original = '';
+                        updateDisplay(targetChannel);
+                    } else {
+                        currentStreamingTextMap.primary = '';
+                    }
+                    currentTranscriptIdMap[transcriptKey] = null;
                 }
                 return;
             }
 
-            const channel = 'primary';
-            const normalized = normalizeText(transcript);
-
-            const newTranscript = {
-                id: itemId || Date.now() + Math.random(),
-                timestamp: new Date().toISOString(),
-                channel,
-                originalLanguage: detectLanguage(normalized),
-                rawTranscript: normalized,
-                correctedTranscript: null,
-                correctionApplied: false,
-                primaryTranslation: null,
-                secondaryTranslation: null,
-                postProcessing: false,
-                pendingCorrection: false,
-                pendingTranslation: false,
-                realtimeOrder: Number.isFinite(realtimeItem.order) ? realtimeItem.order : null,
-                confidence: Number.isFinite(realtimeItem.confidence) ? realtimeItem.confidence : null,
-                lowConfidence: !!realtimeItem.lowConfidence
-            };
-            insertTranscriptInRealtimeOrder(newTranscript);
+            const segments = splitTranscriptSentences(transcript);
+            const newTranscripts = segments.map((segment, index) => {
+                const language = detectLanguage(segment);
+                const channel = betaMode ? targetChannel : 'primary';
+                const entry = buildTranscriptEntryFromSegment(segment, itemId, realtimeItem, index, {
+                    language,
+                    channel,
+                    paneRole: betaMode ? 'original' : null,
+                    isRealtimeTranscriptionPaneEntry: betaMode
+                });
+                if (!betaMode) {
+                    applyRealtimeTranslationDraftToTranscript(entry);
+                }
+                insertTranscriptInRealtimeOrder(entry);
+                return entry;
+            });
             saveTranscripts();
             rebuildTranslationContext();
 
-            if (currentTranscriptIdMap.primary === itemId) {
-                currentStreamingTextMap.primary = '';
-                currentTranscriptIdMap.primary = null;
+            if (currentTranscriptIdMap[transcriptKey] === itemId) {
+                if (betaMode) {
+                    realtimePaneLiveMap[targetChannel].original = '';
+                } else {
+                    currentStreamingTextMap.primary = '';
+                }
+                currentTranscriptIdMap[transcriptKey] = null;
             }
             console.log('UI [perf] transcript committed', {
-                itemId: newTranscript.id,
-                chars: normalized.length,
-                order: newTranscript.realtimeOrder,
-                confidence: newTranscript.confidence
+                itemId,
+                chars: transcript.length,
+                segments: newTranscripts.length,
+                order: realtimeItem.realtimeOrder,
+                confidence: realtimeItem.confidence
             });
-            updateDisplay(channel);
-
-            if (document.getElementById('autoScroll').classList.contains('btn-primary')) {
-                scrollToBottom();
+            if (betaMode) {
+                updateDisplay(targetChannel);
+            } else {
+                updateDisplay('primary');
             }
 
-            // 后置翻译（通过后端代理）
-            try {
-                const primaryLang = document.getElementById('primaryLanguage')?.value || 'zh';
-                const secondaryLang = (document.getElementById('secondaryLanguage')?.value || '').trim();
-                const processingSettings = getProcessingSettings();
-                if (processingSettings.enableCorrection || secondaryLang) {
-                    newTranscript.postProcessing = true;
-                    newTranscript.pendingCorrection = processingSettings.enableCorrection;
-                    newTranscript.pendingTranslation = !!secondaryLang;
-                    saveTranscripts();
-                    updateDisplay(channel);
+            if (document.getElementById('autoScroll').classList.contains('btn-primary')) {
+                scrollToBottom(betaMode ? targetChannel : 'primary');
+            }
 
-                    postProcessText(normalized, {
-                        primaryLanguage: primaryLang,
-                        secondaryLanguage: secondaryLang,
-                        languageMode,
-                        originalLanguageHint: newTranscript.originalLanguage,
-                        enableCorrection: processingSettings.enableCorrection,
-                        enableGlossary: processingSettings.enableGlossary,
-                        glossary: processingSettings.glossary
-                    }).then((structured) => {
-                        applyPostProcessToTranscript(newTranscript.id, structured);
-                    }).catch((ppErr) => {
-                        const currentEntry = transcripts.find(t => t.id === newTranscript.id);
-                        if (currentEntry) {
-                            currentEntry.postProcessing = false;
-                            currentEntry.pendingCorrection = false;
-                            currentEntry.pendingTranslation = false;
-                            saveTranscripts();
-                            updateDisplay(channel);
-                        }
-                        console.warn('后置处理失败，保留原文:', ppErr);
-                    });
-                }
-            } catch (ppErr) {
-                console.warn('后置处理初始化失败，保留原文:', ppErr);
+            if (!betaMode) {
+                newTranscripts.forEach((entry) => runPostProcessingForTranscript(entry, languageMode));
             }
         },
 
@@ -735,7 +1036,247 @@ async function initRealtimeConnection() {
     });
 
     // 不再传 apiKey，后端从环境变量读取
-    await realtimeClient.connect(mediaStream);
+    await client.connect(mediaStream);
+    realtimeClient = client;
+}
+
+async function initRealtimeBetaTranscriptionConnection() {
+    const primaryLang = normalizeRealtimeTranslationLanguage(document.getElementById('primaryLanguage')?.value || '');
+    const secondaryLang = normalizeRealtimeTranslationLanguage(document.getElementById('secondaryLanguage')?.value || '');
+    if (!primaryLang || !secondaryLang || primaryLang === secondaryLang) {
+        throw new Error('Realtime Translation Beta 需要不同的第一语言和第二语言');
+    }
+    await initRealtimeConnection({ beta: true, language: null, channel: 'primary' });
+}
+
+async function initRealtimeTranslationConnections() {
+    if (getTranslationMode() !== 'realtime_beta') {
+        return;
+    }
+
+    const RealtimeTranslationClass = window.RealtimeTranslation;
+    if (typeof RealtimeTranslationClass !== 'function') {
+        throw new Error('RealtimeTranslation 未正确加载');
+    }
+
+    const primaryLang = normalizeRealtimeTranslationLanguage(document.getElementById('primaryLanguage')?.value || '');
+    const secondaryLang = normalizeRealtimeTranslationLanguage(document.getElementById('secondaryLanguage')?.value || '');
+    if (!primaryLang || !secondaryLang || primaryLang === secondaryLang) {
+        showStatus('Realtime Translation Beta 需要不同的第一语言和第二语言', 'error');
+        return;
+    }
+
+    realtimeTranslationClients = [];
+    realtimeTranslationOutputMap = {};
+    realtimeTranslationLastAttachedLengthMap = {};
+    realtimeTranslationBufferMap = {};
+    resetRealtimePaneLiveMap();
+    currentStreamingTextMap.primary = '';
+    currentStreamingTextMap.secondary = '';
+    enableSplitView(true);
+    updateStreamingDisplay('primary');
+    updateStreamingDisplay('secondary');
+
+    realtimeTranslationTargetLanguages = [primaryLang, secondaryLang];
+    const targets = realtimeTranslationTargetLanguages.map((language) => ({
+        language,
+        label: `译为 ${language}`
+    }));
+
+    const connectTasks = targets.map(async (target) => {
+        const client = new RealtimeTranslationClass({
+            targetLanguage: target.language,
+            label: target.label,
+            onConnected: () => {
+                console.log(`Realtime Translation Beta connected: ${target.language}`);
+                renderRealtimeTranslationBeta();
+            },
+            onDisconnected: () => {
+                console.log(`Realtime Translation Beta disconnected: ${target.language}`);
+            },
+            onInputDelta: () => {},
+            onOutputDelta: (delta) => {
+                realtimeTranslationOutputMap[target.language] =
+                    (realtimeTranslationOutputMap[target.language] || '') + delta;
+                realtimeTranslationBufferMap[target.language] =
+                    (realtimeTranslationBufferMap[target.language] || '') + delta;
+                commitRealtimeTranslationSegments(target.language);
+                renderRealtimeTranslationBeta();
+            },
+            onError: (error) => {
+                console.error(`Realtime Translation Beta error [${target.language}]:`, error);
+                showStatus(`Realtime Translation Beta 异常: ${error.message || error}`, 'error');
+            }
+        });
+        realtimeTranslationClients.push(client);
+        await client.connect(mediaStream);
+    });
+
+    const results = await Promise.allSettled(connectTasks);
+    const failures = results.filter(result => result.status === 'rejected');
+    if (failures.length) {
+        console.warn('Realtime Translation Beta 部分连接失败:', failures);
+        if (failures.length === targets.length) {
+            throw new Error('Realtime Translation Beta 全部连接失败');
+        }
+        showStatus(`Realtime Translation Beta ${failures.length} 路连接失败，其余翻译继续`, 'error');
+    } else {
+        showStatus('Realtime Translation Beta 已连接', 'success');
+    }
+}
+
+function renderRealtimeTranslationBeta() {
+    updateDisplay('secondary');
+}
+
+function buildRealtimePaneLiveLines(channel = 'primary', role = 'original') {
+    const text = realtimePaneLiveMap[channel]?.[role] || '';
+    if (!text.trim()) return [];
+    const language = role === 'translation'
+        ? (realtimeTranslationTargetLanguages[0] || '')
+        : detectLanguage(text);
+    return [{
+        language,
+        label: getSubtitleLanguageLabel(language),
+        text
+    }];
+}
+
+function createRealtimeTranslationPaneEntry(targetLang, text) {
+    return {
+        id: `rt-translate-${targetLang}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        timestamp: new Date().toISOString(),
+        channel: 'secondary',
+        paneRole: 'translation',
+        language: targetLang,
+        text,
+        isTranslation: true,
+        isRealtimeTranslationPaneEntry: true
+    };
+}
+
+function commitRealtimeTranslationPaneSegments(targetLang, segments) {
+    if (!segments.length) return;
+    segments.forEach((segment) => {
+        insertTranscriptInRealtimeOrder(createRealtimeTranslationPaneEntry(targetLang, segment));
+    });
+    saveTranscripts();
+    updateControls();
+    updateDisplay('secondary');
+    if (document.getElementById('autoScroll')?.classList.contains('btn-primary')) {
+        scrollToBottom('secondary');
+    }
+}
+
+function updateRealtimeTranslationSplitHeaders() {
+    if (transcriptLeft) transcriptLeft.dataset.languageLabel = 'WHISPER';
+    if (transcriptRight) transcriptRight.dataset.languageLabel = 'TRANSLATE';
+}
+
+function splitCommittedRealtimeTranslationBuffer(targetLang, flush = false) {
+    const buffer = realtimeTranslationBufferMap[targetLang] || '';
+    const segments = splitTranscriptSentences(buffer);
+    if (!segments.length) return [];
+
+    if (flush) {
+        realtimeTranslationBufferMap[targetLang] = '';
+        return segments;
+    }
+
+    const last = segments[segments.length - 1] || '';
+    const endsAtBoundary = /[。！？.!?；;\n]\s*$/u.test(buffer);
+    const committed = endsAtBoundary ? segments : segments.slice(0, -1);
+    realtimeTranslationBufferMap[targetLang] = endsAtBoundary ? '' : last;
+    return committed;
+}
+
+function commitRealtimeTranslationSegments(targetLang, options = {}) {
+    const segments = splitCommittedRealtimeTranslationBuffer(targetLang, options.flush === true);
+    if (!segments.length) return;
+
+    const fullLength = (realtimeTranslationOutputMap[targetLang] || '').length;
+    commitRealtimeTranslationPaneSegments(targetLang, segments);
+    realtimeTranslationLastAttachedLengthMap[targetLang] = fullLength;
+}
+
+function flushRealtimeTranslationBuffers() {
+    Object.keys(realtimeTranslationBufferMap).forEach((targetLang) => {
+        commitRealtimeTranslationSegments(targetLang, { flush: true });
+    });
+    renderRealtimeTranslationBeta();
+}
+
+function applyRealtimeTranslationDraftToTranscript(entry) {
+    if (getTranslationMode() !== 'realtime_beta' || !entry) return;
+
+    const primaryLang = normalizeRealtimeTranslationLanguage(document.getElementById('primaryLanguage')?.value || '');
+    const secondaryLang = normalizeRealtimeTranslationLanguage(document.getElementById('secondaryLanguage')?.value || '');
+    const originalLang = normalizeRealtimeTranslationLanguage(entry.originalLanguage || detectLanguage(getDisplayTranscriptText(entry)));
+    const targetLang = originalLang && _isSameRealtimeLanguage(originalLang, secondaryLang)
+        ? primaryLang
+        : secondaryLang;
+    if (!targetLang) return;
+
+    if ((realtimeTranslationBufferMap[targetLang] || '').trim()) {
+        return;
+    }
+
+    const fullText = realtimeTranslationOutputMap[targetLang] || '';
+    const previousLength = realtimeTranslationLastAttachedLengthMap[targetLang] || 0;
+    const nextText = fullText.slice(previousLength).trim();
+    if (!nextText) return;
+
+    if (_isSameRealtimeLanguage(targetLang, primaryLang)) {
+        entry.primaryTranslation = nextText;
+    } else {
+        entry.secondaryTranslation = nextText;
+    }
+    entry.postProcessing = false;
+    entry.pendingTranslation = false;
+    realtimeTranslationLastAttachedLengthMap[targetLang] = fullText.length;
+}
+
+function _isSameRealtimeLanguage(left, right) {
+    return normalizeRealtimeTranslationLanguage(left) === normalizeRealtimeTranslationLanguage(right);
+}
+
+function commitActiveStreamingTranscriptBeforeStop() {
+    const text = (currentStreamingTextMap.primary || '').trim();
+    if (!text || text === '正在识别...') return;
+    if (isHallucinationText(text)) return;
+
+    const itemId = currentTranscriptIdMap.primary || `streaming-${Date.now()}`;
+    splitTranscriptSentences(text).forEach((segment, index) => {
+        insertTranscriptInRealtimeOrder(buildTranscriptEntryFromSegment(segment, itemId, {}, index));
+    });
+    saveTranscripts();
+    rebuildTranslationContext();
+}
+
+function commitRealtimePaneLiveBeforeStop() {
+    ['primary', 'secondary'].forEach((channel) => {
+        const originalText = (realtimePaneLiveMap[channel]?.original || '').trim();
+        if (originalText && !isHallucinationText(originalText)) {
+            const language = detectLanguage(originalText);
+            splitTranscriptSentences(originalText).forEach((segment, index) => {
+                insertTranscriptInRealtimeOrder(buildTranscriptEntryFromSegment(
+                    segment,
+                    `streaming-original-${channel}-${Date.now()}`,
+                    {},
+                    index,
+                    {
+                        language,
+                        channel,
+                        paneRole: 'original',
+                        isRealtimeTranscriptionPaneEntry: true
+                    }
+                ));
+            });
+        }
+    });
+    saveTranscripts();
+    rebuildTranslationContext();
+    resetRealtimePaneLiveMap();
 }
 
 // 停止会议
@@ -749,11 +1290,19 @@ async function stopMeeting(options = {}) {
         }
 
         isRecording = false;
+        if (getTranslationMode() === 'realtime_beta') {
+            commitRealtimePaneLiveBeforeStop();
+        } else {
+            commitActiveStreamingTranscriptBeforeStop();
+        }
+        flushRealtimeTranslationBuffers();
 
         if (realtimeClient) {
             realtimeClient.disconnect();
             realtimeClient = null;
         }
+        realtimeTranslationClients.forEach(client => client.disconnect());
+        realtimeTranslationClients = [];
 
         stopVolumeMonitor();
 
@@ -781,8 +1330,16 @@ async function stopMeeting(options = {}) {
         meetingStartedAt = null;
         stopMeetingTimer();
         currentStreamingTextMap.primary = '';
+        currentStreamingTextMap.secondary = '';
         currentTranscriptIdMap.primary = null;
+        currentTranscriptIdMap.secondary = null;
+        realtimeTranslationOutputMap = {};
+        realtimeTranslationLastAttachedLengthMap = {};
+        realtimeTranslationBufferMap = {};
+        realtimeTranslationTargetLanguages = [];
+        resetRealtimePaneLiveMap();
         updateDisplay('primary');
+        updateDisplay('secondary');
         updateControls();
         updateMeetingStatus('已结束', '');
         updateAudioStatus('未连接', '');
@@ -894,13 +1451,7 @@ function isHallucinationText(text) {
         /^[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]{5,}$/,
     ];
 
-    if (text.length < 2 || text.length > 500) return true;
-
-    const primaryLang = document.getElementById('primaryLanguage')?.value || 'en';
-    if (primaryLang === 'ja' || primaryLang === 'zh') {
-        const englishWords = text.match(/\b[a-zA-Z]{3,}\b/g) || [];
-        if (englishWords.length > 3) return true;
-    }
+    if (text.length < 2) return true;
 
     const charCounts = {};
     for (let char of text.toLowerCase()) {
@@ -920,7 +1471,6 @@ function updateStreamingDisplay(channel = 'primary') {
     transcriptLeft = transcriptLeft || document.getElementById('transcriptLeft');
     transcriptRight = transcriptRight || document.getElementById('transcriptRight');
 
-    const text = currentStreamingTextMap[channel];
     const container = transcriptSplit && transcriptSplit.style.display !== 'none'
         ? (channel === 'secondary' ? transcriptRight : transcriptLeft)
         : tc;
@@ -928,27 +1478,183 @@ function updateStreamingDisplay(channel = 'primary') {
     const old = container.querySelector(`#streaming-transcript-${channel}`);
     if (old) old.remove();
 
-    if (text && text.trim()) {
-        const el = document.createElement('div');
-        el.className = 'streaming-text';
-        el.id = `streaming-transcript-${channel}`;
-        el.textContent = `${text} [${new Date().toLocaleTimeString()}]`;
-        container.appendChild(el);
+    let html = '';
+    if (getTranslationMode() === 'realtime_beta') {
+        return;
+    } else {
+        const text = currentStreamingTextMap[channel];
+        if (text && text.trim()) {
+            const language = channel === 'secondary'
+                ? document.getElementById('secondaryLanguage')?.value
+                : document.getElementById('primaryLanguage')?.value;
+            html = renderSubtitleEntry([{
+                language: language || 'text',
+                label: getSubtitleLanguageLabel(language || 'text'),
+                text
+            }], new Date().toISOString(), {
+                id: `streaming-transcript-${channel}`,
+                live: true
+            });
+        }
+    }
+
+    if (html) {
+        container.insertAdjacentHTML('beforeend', html);
 
         if (document.getElementById('autoScroll').classList.contains('btn-primary')) {
-            scrollToBottom();
+            scrollToBottom(channel);
         }
     }
 }
 
+function renderSubtitleEntry(lines, timestamp, options = {}) {
+    const time = new Date(timestamp || Date.now()).toLocaleTimeString();
+    const idAttr = options.id ? ` id="${escapeHtml(options.id)}"` : '';
+    const className = ['subtitle-entry', options.live ? 'subtitle-live' : '', options.extraClass || '']
+        .filter(Boolean).join(' ');
+    const rows = (lines || [])
+        .filter(line => line && (line.text || line.pending))
+        .map(line => `
+            <div class="subtitle-line ${line.pending ? 'is-pending' : ''}">
+                <div class="subtitle-label">${escapeHtml(line.label || getSubtitleLanguageLabel(line.language))}</div>
+                <div class="subtitle-text">${escapeHtml(line.text || '...')}</div>
+            </div>
+        `).join('');
+
+    return `
+        <div${idAttr} class="${className}">
+            ${rows}
+            <div class="subtitle-meta">${time}</div>
+        </div>
+    `;
+}
+
 function renderLegacyTranscriptEntry(entry) {
-    const time = new Date(entry.timestamp).toLocaleTimeString();
-    const textClass = entry.isTranslation ? 'translation-text' : '';
-    return `<div class="${textClass}">${escapeHtml(entry.text)} [${time}]</div>`;
+    return renderSubtitleEntry([{
+        language: entry.language || 'text',
+        label: entry.isTranslation ? 'TR' : getSubtitleLanguageLabel(entry.language || 'text'),
+        text: entry.text || ''
+    }], entry.timestamp, {
+        extraClass: entry.isTranslation ? 'subtitle-translation' : ''
+    });
+}
+
+function renderRealtimeTranscriptionPaneEntry(entry) {
+    return renderSubtitleEntry([{
+        language: entry.language || entry.originalLanguage || 'text',
+        label: getSubtitleLanguageLabel(entry.language || entry.originalLanguage || 'text'),
+        text: entry.text || entry.rawTranscript || ''
+    }], entry.timestamp);
+}
+
+function renderRealtimeTranslationPaneEntry(entry) {
+    return renderSubtitleEntry([{
+        language: entry.language || 'text',
+        label: getSubtitleLanguageLabel(entry.language || 'text'),
+        text: entry.text || ''
+    }], entry.timestamp);
+}
+
+function renderRealtimeTranslationPairEntry(entry) {
+    const order = Array.isArray(entry.languageOrder) && entry.languageOrder.length
+        ? entry.languageOrder
+        : Object.keys(entry.translations || {});
+    const lines = order.map(lang => ({
+        language: lang,
+        label: getSubtitleLanguageLabel(lang),
+        text: entry.translations?.[lang] || '...',
+        pending: !entry.translations?.[lang]
+    }));
+    return renderSubtitleEntry(lines, entry.timestamp, {
+        extraClass: 'realtime-translation-pair'
+    });
+}
+
+function renderRealtimePaneSection(title, entries, liveLines, liveId) {
+    const body = entries.map(renderTranscriptEntry).join('');
+    const live = liveLines?.length
+        ? renderSubtitleEntry(liveLines, new Date().toISOString(), { id: liveId, live: true })
+        : '';
+    const empty = !body && !live
+        ? '<div class="subtitle-empty">等待字幕...</div>'
+        : '';
+    return `
+        <section class="subtitle-section">
+            <div class="subtitle-section-title">${escapeHtml(title)}</div>
+            ${body}
+            ${live}
+            ${empty}
+        </section>
+    `;
+}
+
+function renderTranscriptEntry(transcript) {
+    if (isRealtimeTranscriptionPaneEntry(transcript)) {
+        return renderRealtimeTranscriptionPaneEntry(transcript);
+    }
+    if (isRealtimeTranslationPair(transcript)) {
+        return renderRealtimeTranslationPairEntry(transcript);
+    }
+    if (isRealtimeTranslationPaneEntry(transcript)) {
+        return renderRealtimeTranslationPaneEntry(transcript);
+    }
+    if (isStructuredTranscript(transcript)) {
+        return renderStructuredTranscriptEntry(transcript);
+    }
+    return renderLegacyTranscriptEntry(transcript);
+}
+
+function renderRealtimeSplitPane(channel, entries) {
+    if (getTranslationMode() === 'realtime_beta') {
+        if (channel === 'primary') {
+            const originalEntries = entries.filter(entry =>
+                entry.paneRole === 'original' || isRealtimeTranscriptionPaneEntry(entry));
+            return renderRealtimePaneSection(
+                '原文转写',
+                originalEntries,
+                buildRealtimePaneLiveLines('primary', 'original'),
+                'streaming-transcript-primary-original'
+            );
+        }
+
+        return realtimeTranslationTargetLanguages.map((lang) => {
+            const translationEntries = entries.filter(entry =>
+                (entry.paneRole === 'translation' || isRealtimeTranslationPaneEntry(entry)) &&
+                normalizeRealtimeTranslationLanguage(entry.language) === normalizeRealtimeTranslationLanguage(lang));
+            const liveText = (realtimeTranslationBufferMap[lang] || '').trim();
+            const liveLines = liveText
+                ? [{ language: lang, label: getSubtitleLanguageLabel(lang), text: liveText }]
+                : [];
+            return renderRealtimePaneSection(
+                `译为 ${getSubtitleLanguageLabel(lang)}`,
+                translationEntries,
+                liveLines,
+                `streaming-translation-${lang}`
+            );
+        }).join('');
+    }
+
+    const originalEntries = entries.filter(entry =>
+        entry.paneRole === 'original' || isRealtimeTranscriptionPaneEntry(entry));
+    const translationEntries = entries.filter(entry =>
+        entry.paneRole === 'translation' || isRealtimeTranslationPaneEntry(entry));
+    return [
+        renderRealtimePaneSection(
+            '原文转写',
+            originalEntries,
+            buildRealtimePaneLiveLines(channel, 'original'),
+            `streaming-transcript-${channel}-original`
+        ),
+        renderRealtimePaneSection(
+            '翻译',
+            translationEntries,
+            buildRealtimePaneLiveLines(channel, 'translation'),
+            `streaming-transcript-${channel}-translation`
+        )
+    ].join('');
 }
 
 function renderStructuredTranscriptEntry(entry) {
-    const time = new Date(entry.timestamp).toLocaleTimeString();
     const mainText = getDisplayTranscriptText(entry);
     const notes = [];
     if (entry.postProcessing) {
@@ -964,31 +1670,32 @@ function renderStructuredTranscriptEntry(entry) {
     if (entry.lowConfidence) {
         notes.push('识别置信度偏低，建议会后复核');
     }
-    const noteBlock = notes.length > 0
-        ? `<div class="transcript-note">${escapeHtml(notes.join(' · '))}</div>`
-        : '';
-
-    const translationRows = [
-        entry.primaryTranslation
-            ? `<div class="transcript-translation-row"><span class="transcript-label">主译</span><span>${escapeHtml(entry.primaryTranslation)}</span></div>`
-            : '',
-        entry.secondaryTranslation
-            ? `<div class="transcript-translation-row"><span class="transcript-label">次译</span><span>${escapeHtml(entry.secondaryTranslation)}</span></div>`
-            : ''
-    ].filter(Boolean).join('');
-
-    const translationBlock = translationRows
-        ? `<div class="transcript-translation">${translationRows}</div>`
-        : '';
-
-    return `
-        <div class="transcript-entry">
-            <div class="transcript-main">${escapeHtml(mainText)}</div>
-            ${translationBlock}
-            ${noteBlock}
-            <div class="transcript-meta">${time}</div>
-        </div>
-    `;
+    const lines = [];
+    if (mainText) {
+        lines.push({
+            language: entry.originalLanguage || 'text',
+            label: getSubtitleLanguageLabel(entry.originalLanguage || 'text'),
+            text: mainText
+        });
+    }
+    if (entry.primaryTranslation) {
+        lines.push({
+            language: document.getElementById('primaryLanguage')?.value || 'primary',
+            label: getSubtitleLanguageLabel(document.getElementById('primaryLanguage')?.value || 'primary'),
+            text: entry.primaryTranslation
+        });
+    }
+    if (entry.secondaryTranslation) {
+        lines.push({
+            language: document.getElementById('secondaryLanguage')?.value || 'secondary',
+            label: getSubtitleLanguageLabel(document.getElementById('secondaryLanguage')?.value || 'secondary'),
+            text: entry.secondaryTranslation
+        });
+    }
+    if (notes.length) {
+        lines.push({ language: 'note', label: 'NOTE', text: notes.join(' · '), pending: true });
+    }
+    return renderSubtitleEntry(lines, entry.timestamp);
 }
 
 function updateDisplay(channel = 'primary') {
@@ -997,7 +1704,8 @@ function updateDisplay(channel = 'primary') {
     transcriptLeft = transcriptLeft || document.getElementById('transcriptLeft');
     transcriptRight = transcriptRight || document.getElementById('transcriptRight');
 
-    if (transcripts.length === 0 && !currentStreamingTextMap.primary) {
+    const splitVisible = transcriptSplit && transcriptSplit.style.display !== 'none';
+    if (!splitVisible && transcripts.length === 0 && !currentStreamingTextMap.primary && !currentStreamingTextMap.secondary) {
         tc.innerHTML = `
             <div class="welcome-message">
                 <p>欢迎使用 MeetingEZ！</p>
@@ -1010,15 +1718,12 @@ function updateDisplay(channel = 'primary') {
     const hideBefore = localStorage.getItem(HIDE_BEFORE_KEY);
     const displayTranscripts = transcripts
         .filter(t => !hideBefore || t.timestamp > hideBefore)
+        .filter(t => splitVisible ? t.channel === channel : true)
         .slice(-50);
 
-    const contentHtml = displayTranscripts
-        .filter(t => (transcriptSplit && transcriptSplit.style.display !== 'none') ? t.channel === channel : true)
-        .map(transcript => (
-            isStructuredTranscript(transcript)
-                ? renderStructuredTranscriptEntry(transcript)
-                : renderLegacyTranscriptEntry(transcript)
-        )).join('');
+    const contentHtml = splitVisible
+        ? renderRealtimeSplitPane(channel, displayTranscripts)
+        : displayTranscripts.map(renderTranscriptEntry).join('');
 
     if (transcriptSplit && transcriptSplit.style.display !== 'none') {
         if (channel === 'secondary') {
@@ -1026,11 +1731,17 @@ function updateDisplay(channel = 'primary') {
         } else {
             transcriptLeft.innerHTML = contentHtml;
         }
+        if (document.getElementById('autoScroll').classList.contains('btn-primary')) {
+            scrollToBottom(channel);
+        }
     } else {
         tc.innerHTML = contentHtml;
         updateStreamingDisplay(channel);
+        if (channel !== 'secondary' && currentStreamingTextMap.secondary) {
+            updateStreamingDisplay('secondary');
+        }
         if (document.getElementById('autoScroll').classList.contains('btn-primary')) {
-            scrollToBottom();
+            scrollToBottom(channel);
         }
     }
 }
@@ -1184,9 +1895,11 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-function scrollToBottom() {
-    const container = (transcriptSplit && transcriptSplit.style.display !== 'none')
-        ? transcriptLeft : transcriptContent;
+function scrollToBottom(channel = 'primary') {
+    transcriptSplit = transcriptSplit || document.getElementById('transcriptSplit');
+    transcriptLeft = transcriptLeft || document.getElementById('transcriptLeft');
+    transcriptRight = transcriptRight || document.getElementById('transcriptRight');
+    const container = getTranscriptContainerForChannel(channel);
     if (!container) return;
     requestAnimationFrame(() => { container.scrollTop = container.scrollHeight; });
 }
@@ -1229,7 +1942,17 @@ function downloadTranscript() {
 
     transcripts.forEach((t, i) => {
         content += `[${i + 1}] ${new Date(t.timestamp).toLocaleString()}\n`;
-        if (isStructuredTranscript(t)) {
+        if (isRealtimeTranslationPair(t)) {
+            const order = Array.isArray(t.languageOrder) && t.languageOrder.length
+                ? t.languageOrder
+                : Object.keys(t.translations || {});
+            order.forEach((lang) => {
+                if (t.translations?.[lang]) {
+                    content += `译为 ${lang}: ${t.translations[lang]}\n`;
+                }
+            });
+            content += '\n';
+        } else if (isStructuredTranscript(t)) {
             content += `原始转写: ${t.rawTranscript || '-'}\n`;
             content += `智能修正: ${t.correctedTranscript || '-'}\n`;
             content += `翻译(主语言): ${t.primaryTranslation || '-'}\n`;
@@ -1262,7 +1985,10 @@ function clearTranscript() {
     if (confirm('确定要清空所有记录吗？')) {
         transcripts = [];
         currentStreamingTextMap.primary = '';
+        currentStreamingTextMap.secondary = '';
         currentTranscriptIdMap.primary = null;
+        currentTranscriptIdMap.secondary = null;
+        resetRealtimePaneLiveMap();
         localStorage.setItem(HIDE_BEFORE_KEY, new Date().toISOString());
 
         document.getElementById('transcriptContent').innerHTML = `
@@ -1271,6 +1997,8 @@ function clearTranscript() {
                 <p>点击底部开始按钮开始实时转写，或返回控制台切换会议流程。</p>
             </div>
         `;
+        if (transcriptLeft) transcriptLeft.innerHTML = '';
+        if (transcriptRight) transcriptRight.innerHTML = '';
         rebuildTranslationContext();
         updateControls();
         setTimeout(() => saveTranscripts(), 0);
@@ -1321,7 +2049,7 @@ function updateFontSize() {
 }
 
 function disableSettings() {
-    ['audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize', 'audioSourceMic', 'audioSourceTab', 'enableCorrection', 'enableGlossary', 'glossaryInput', 'languageMode', 'workspaceProject'].forEach(id => {
+    ['audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize', 'audioSourceMic', 'audioSourceTab', 'enableCorrection', 'enableGlossary', 'glossaryInput', 'languageMode', 'workspaceProject', 'translationMode'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.disabled = true;
     });
@@ -1332,7 +2060,7 @@ function disableSettings() {
 }
 
 function enableSettings() {
-    ['audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize', 'audioSourceMic', 'audioSourceTab', 'enableCorrection', 'enableGlossary', 'glossaryInput', 'languageMode', 'workspaceProject'].forEach(id => {
+    ['audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize', 'audioSourceMic', 'audioSourceTab', 'enableCorrection', 'enableGlossary', 'glossaryInput', 'languageMode', 'workspaceProject', 'translationMode'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.disabled = false;
     });
@@ -1350,9 +2078,13 @@ function enableSplitView(enabled) {
     if (enabled) {
         content.style.display = 'none';
         transcriptSplit.style.display = 'grid';
+        updateRealtimeTranslationSplitHeaders();
+        updateDisplay('primary');
+        updateDisplay('secondary');
     } else {
         transcriptSplit.style.display = 'none';
         content.style.display = 'block';
+        updateDisplay('primary');
     }
 }
 
@@ -1510,7 +2242,8 @@ function toggleAutoScroll() {
         btn.classList.replace('btn-outline', 'btn-primary');
         btn.textContent = '滚\u2713';
         localStorage.setItem('meetingEZ_autoScroll', 'true');
-        scrollToBottom();
+        scrollToBottom('primary');
+        scrollToBottom('secondary');
     }
 }
 

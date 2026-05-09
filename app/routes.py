@@ -43,9 +43,16 @@ from meeting_agent.glossary.context_manager import ContextManager as BackgroundC
 from meeting_agent.scanner import MeetingScanner
 
 main_bp = Blueprint('main', __name__)
-TRANSCRIPTION_MODEL = os.getenv('TRANSCRIPTION_MODEL', 'gpt-4o-transcribe')
+TRANSCRIPTION_MODEL = os.getenv('TRANSCRIPTION_MODEL', 'gpt-realtime-whisper')
 TRANSLATION_MODEL = os.getenv('TRANSLATION_MODEL', 'gpt-5.4-mini-2026-03-17')
 TRANSLATION_REASONING_EFFORT = os.getenv('TRANSLATION_REASONING_EFFORT', 'low').strip()
+REALTIME_TRANSLATION_MODEL = os.getenv('REALTIME_TRANSLATION_MODEL',
+                                       'gpt-realtime-translate')
+REALTIME_TRANSLATION_INPUT_MODEL = os.getenv('REALTIME_TRANSLATION_INPUT_MODEL',
+                                             'gpt-realtime-whisper')
+REALTIME_TRANSLATION_LANGUAGES = {
+    'es', 'pt', 'fr', 'ja', 'ru', 'zh', 'de', 'ko', 'hi', 'id', 'vi', 'it', 'en'
+}
 MEETING_TYPE_OPTIONS = [
     ('review', '评审会'),
     ('weekly', '周会'),
@@ -93,6 +100,74 @@ def _build_translation_reasoning(model, effort):
     if not normalized_effort or not _supports_translation_reasoning(model):
         return None
     return {'effort': normalized_effort}
+
+
+def _is_gpt_realtime_whisper(model):
+    """判断是否为 gpt-realtime-whisper 或其快照名。"""
+    normalized_model = (model or '').strip().lower()
+    return normalized_model.startswith('gpt-realtime-whisper')
+
+
+def _build_realtime_transcription_config(model, language=None, prompt=''):
+    """构造 Realtime transcription 配置，避免发送模型不支持的字段。"""
+    transcription_config = {'model': model}
+    if language:
+        transcription_config['language'] = language
+    if _is_gpt_realtime_whisper(model):
+        transcription_config['delay'] = 'low'
+    elif prompt:
+        transcription_config['prompt'] = prompt
+    return transcription_config
+
+
+def _normalize_realtime_translation_language(language):
+    """归一化 Realtime Translation 支持的紧凑目标语言代码。"""
+    normalized = _normalize_language_code(language)
+    if normalized not in REALTIME_TRANSLATION_LANGUAGES:
+        raise ValueError(
+            'Unsupported realtime translation target language: '
+            f'{language}. Supported: {", ".join(sorted(REALTIME_TRANSLATION_LANGUAGES))}'
+        )
+    return normalized
+
+
+def _proxy_realtime_sdp_call(openai_url):
+    """代理浏览器 WebRTC SDP offer 到 OpenAI，避免客户端网络直连失败。"""
+    client_secret = (request.headers.get('X-OpenAI-Client-Secret') or '').strip()
+    if not client_secret:
+        return jsonify({'error': 'Missing X-OpenAI-Client-Secret'}), 400
+
+    offer_sdp = request.get_data(as_text=True) or ''
+    if not offer_sdp.strip():
+        return jsonify({'error': 'Missing SDP offer'}), 400
+
+    started_at = time.perf_counter()
+    try:
+        resp = requests.post(
+            openai_url,
+            headers={
+                'Authorization': f'Bearer {client_secret}',
+                'Content-Type': 'application/sdp'
+            },
+            data=offer_sdp.encode('utf-8'),
+            timeout=30)
+        if not resp.ok:
+            print(f'[realtime-call-proxy] OpenAI error: {resp.status_code} {resp.text}')
+            return resp.text, resp.status_code, {'Content-Type': 'text/plain; charset=utf-8'}
+
+        _log_timing('realtime_call_proxy_succeeded',
+                    elapsed_ms=round((time.perf_counter() - started_at) * 1000,
+                                     1),
+                    endpoint=openai_url.rsplit('/', 1)[-1],
+                    answer_bytes=len(resp.text))
+        return resp.text, 200, {'Content-Type': 'application/sdp'}
+    except Exception as e:
+        _log_timing('realtime_call_proxy_failed',
+                    elapsed_ms=round((time.perf_counter() - started_at) * 1000,
+                                     1),
+                    endpoint=openai_url.rsplit('/', 1)[-1],
+                    error=str(e))
+        return jsonify({'error': str(e)}), 500
 
 
 def _coerce_bool(value, default=False):
@@ -350,6 +425,12 @@ def realtime():
             'reasoning_effort':
             _build_translation_reasoning(TRANSLATION_MODEL,
                                          TRANSLATION_REASONING_EFFORT)
+        },
+        'realtime_translation': {
+            'purpose': '实时翻译 Beta',
+            'api': 'Realtime Translation API',
+            'model': REALTIME_TRANSLATION_MODEL,
+            'input_model': REALTIME_TRANSLATION_INPUT_MODEL
         }
     }
     return render_template(
@@ -1402,13 +1483,10 @@ def create_realtime_session():
         return jsonify({'error': str(e)}), 500
 
     data = request.get_json() or {}
-    language = data.get('language')
+    language = _normalize_language_code(data.get('language')) or None
     prompt = data.get('prompt', '')
-    transcription_config = {'model': TRANSCRIPTION_MODEL}
-    if language:
-        transcription_config['language'] = language
-    if prompt:
-        transcription_config['prompt'] = prompt
+    transcription_config = _build_realtime_transcription_config(
+        TRANSCRIPTION_MODEL, language=language, prompt=prompt)
 
     session_config = {
         'type': 'transcription',
@@ -1421,11 +1499,7 @@ def create_realtime_session():
                 'noise_reduction': {
                     'type': 'near_field'
                 },
-                'transcription': transcription_config,
-                'turn_detection': {
-                    'type': 'semantic_vad',
-                    'eagerness': 'high'
-                }
+                'transcription': transcription_config
             }
         },
         'include': ['item.input_audio_transcription.logprobs']
@@ -1462,7 +1536,8 @@ def create_realtime_session():
                                      1),
                     language=language,
                     has_prompt=bool(prompt),
-                    turn_detection=session_config['audio']['input']['turn_detection'])
+                    turn_detection=session_config['audio']['input'].get(
+                        'turn_detection'))
         return jsonify({
             'clientSecret': client_secret,
             'expiresAt': expires_at,
@@ -1475,6 +1550,103 @@ def create_realtime_session():
                                      1),
                     error=str(e))
         return jsonify({'error': str(e)}), 500
+
+
+@main_bp.route('/api/realtime-translation-session', methods=['POST'])
+def create_realtime_translation_session():
+    """
+    创建 OpenAI Realtime Translation session 的 client secret。
+    该模式作为实验性旁路使用，不替代默认实时转写链路。
+    """
+    try:
+        api_key = _get_api_key()
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 500
+
+    data = request.get_json() or {}
+    try:
+        target_language = _normalize_realtime_translation_language(
+            data.get('targetLanguage'))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+    session_config = {
+        'model': REALTIME_TRANSLATION_MODEL,
+        'audio': {
+            'input': {
+                'transcription': {
+                    'model': REALTIME_TRANSLATION_INPUT_MODEL
+                },
+                'noise_reduction': {
+                    'type': 'near_field'
+                }
+            },
+            'output': {
+                'language': target_language
+            }
+        }
+    }
+
+    session_started_at = time.perf_counter()
+    try:
+        resp = requests.post(
+            'https://api.openai.com/v1/realtime/translations/client_secrets',
+            headers={
+                'Authorization': f'Bearer {api_key}',
+                'Content-Type': 'application/json'
+            },
+            json={'session': session_config},
+            timeout=15)
+
+        if not resp.ok:
+            print(
+                f'[realtime-translation-session] OpenAI error: {resp.status_code} {resp.text}'
+            )
+            return jsonify({'error': resp.text}), resp.status_code
+
+        session_data = resp.json()
+        client_secret = session_data.get('value')
+        expires_at = session_data.get('expires_at')
+
+        print(
+            '[realtime-translation-session] Session created: '
+            f'{json.dumps(session_data, indent=2)[:500]}')
+        _log_timing(
+            'realtime_translation_session_created',
+            elapsed_ms=round((time.perf_counter() - session_started_at) * 1000,
+                             1),
+            target_language=target_language,
+            model=REALTIME_TRANSLATION_MODEL,
+            input_model=REALTIME_TRANSLATION_INPUT_MODEL)
+        return jsonify({
+            'clientSecret': client_secret,
+            'expiresAt': expires_at,
+            'session': session_data.get('session', {}),
+            'targetLanguage': target_language,
+            'model': REALTIME_TRANSLATION_MODEL
+        })
+
+    except Exception as e:
+        _log_timing(
+            'realtime_translation_session_failed',
+            elapsed_ms=round((time.perf_counter() - session_started_at) * 1000,
+                             1),
+            target_language=target_language,
+            error=str(e))
+        return jsonify({'error': str(e)}), 500
+
+
+@main_bp.route('/api/realtime-call', methods=['POST'])
+def proxy_realtime_call():
+    """代理 Realtime transcription WebRTC SDP exchange。"""
+    return _proxy_realtime_sdp_call('https://api.openai.com/v1/realtime/calls')
+
+
+@main_bp.route('/api/realtime-translation-call', methods=['POST'])
+def proxy_realtime_translation_call():
+    """代理 Realtime Translation WebRTC SDP exchange。"""
+    return _proxy_realtime_sdp_call(
+        'https://api.openai.com/v1/realtime/translations/calls')
 
 
 @main_bp.route('/api/workspace/projects', methods=['GET'])

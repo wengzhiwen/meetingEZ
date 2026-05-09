@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeetingEZ - 智能会议助手</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=20260509f">
     <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
 </head>
 <body
@@ -99,15 +99,29 @@
                     </div>
                     <div class="model-info-card">
                         <div class="model-info-header">
-                            <span class="model-purpose">{{ model_info.translation.purpose }}</span>
-                            <span class="model-api">{{ model_info.translation.api }}</span>
+                            <span id="translationModelPurpose" class="model-purpose">{{ model_info.translation.purpose }}</span>
+                            <span id="translationModelApi" class="model-api">{{ model_info.translation.api }}</span>
                         </div>
-                        <div class="model-name">{{ model_info.translation.model }}</div>
+                        <div id="translationModelName" class="model-name">{{ model_info.translation.model }}</div>
                         {% if model_info.translation.reasoning_effort %}
-                        <div class="model-meta">reasoning: {{ model_info.translation.reasoning_effort.effort }}</div>
+                        <div id="translationModelMeta" class="model-meta">reasoning: {{ model_info.translation.reasoning_effort.effort }}</div>
+                        {% else %}
+                        <div id="translationModelMeta" class="model-meta"></div>
                         {% endif %}
                     </div>
+                    <div class="model-info-card model-mode-card">
+                        <div class="model-info-header">
+                            <label class="model-purpose" for="translationMode">翻译方式</label>
+                            <span class="model-api">Mode</span>
+                        </div>
+                        <select id="translationMode" class="model-mode-select">
+                            <option value="postprocess" selected>转写后翻译（稳定）</option>
+                            <option value="realtime_beta">Realtime Translation Beta（实验）</option>
+                        </select>
+                        <div class="model-meta model-mode-help">Beta 左侧显示一路原文转写，右侧显示译入两种目标语言的实时字幕。</div>
+                    </div>
                 </div>
+                <script type="application/json" id="modelInfoData">{{ model_info|tojson }}</script>
             </div>
 
             <div class="setting-item stack">
@@ -245,7 +259,8 @@
         </div>
     </div>
 
-    <script src="{{ url_for('static', filename='js/realtime-transcription.js') }}?v=20260320"></script>
-    <script type="module" src="{{ url_for('static', filename='js/app.js') }}?v=20260320"></script>
+    <script src="{{ url_for('static', filename='js/realtime-transcription.js') }}?v=20260508d"></script>
+    <script src="{{ url_for('static', filename='js/realtime-translation.js') }}?v=20260509a"></script>
+    <script type="module" src="{{ url_for('static', filename='js/app.js') }}?v=20260509k"></script>
 </body>
 </html>

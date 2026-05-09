@@ -140,12 +140,9 @@
           "type": "near_field"
         },
         "transcription": {
-          "model": "gpt-4o-transcribe",
-          "language": "zh"
-        },
-        "turn_detection": {
-          "type": "semantic_vad",
-          "eagerness": "high"
+          "model": "gpt-realtime-whisper",
+          "language": "zh",
+          "delay": "low"
         }
       }
     },
@@ -169,6 +166,63 @@
 - 当前代码兼容两种返回格式：
   - 顶层 `value` / `expires_at`
   - 嵌套 `client_secret.value` / `client_secret.expires_at`
+- `gpt-realtime-whisper` 当前不接受 `turn_detection` 字段；默认依赖 `delay: "low"` 的低延迟流式 transcript deltas。
+- `gpt-realtime-whisper` 不支持 `prompt` 字段；默认转写链路发送 `model`、ISO-639-1 短码 `language` 和 `delay`，Realtime Translation Beta 的原文转写链路不发送 `language`，让一路 Whisper 输出混合会议原文。
+
+### `POST /api/realtime-translation-session`
+
+创建 OpenAI Realtime Translation session 的 `client secret`。
+
+该接口仅用于前端 `Realtime Translation Beta` 实验模式。默认转写和后置翻译流程不依赖它。
+
+请求体：
+
+```json
+{
+  "targetLanguage": "ja"
+}
+```
+
+后端当前创建的 session 配置：
+
+```json
+{
+  "session": {
+    "model": "gpt-realtime-translate",
+    "audio": {
+      "input": {
+        "transcription": {
+          "model": "gpt-realtime-whisper"
+        },
+        "noise_reduction": {
+          "type": "near_field"
+        }
+      },
+      "output": {
+        "language": "ja"
+      }
+    }
+  }
+}
+```
+
+返回体：
+
+```json
+{
+  "clientSecret": "ek_...",
+  "expiresAt": 1234567890,
+  "targetLanguage": "ja",
+  "model": "gpt-realtime-translate",
+  "session": {}
+}
+```
+
+说明：
+
+- 支持的目标语言按 OpenAI demo 白名单约束：`es`、`pt`、`fr`、`ja`、`ru`、`zh`、`de`、`ko`、`hi`、`id`、`vi`、`it`、`en`。
+- 当前 Beta 模式会启动一路不限定输入语言的 `gpt-realtime-whisper` 原文转写链路，并对第一语言和第二语言各创建一路 translation session。前端使用左右双栏：左栏显示混合原文转写，右栏上下显示译入第一语言和译入第二语言的实时字幕。
+- 混合会议音频没有说话人音轨边界，因此 Beta 输出用于对比和评估，不作为默认正式翻译链路。
 
 ### `GET /api/workspace/projects`
 

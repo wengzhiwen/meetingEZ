@@ -5,10 +5,10 @@
  * - 使用 WebRTC（浏览器推荐方式）连接 OpenAI Realtime API
  * - transcription-only session（不需要模型回答）
  * - 后端签发短期 client secret（不暴露 API key）
- * - server_vad 做分段检测
+ * - gpt-realtime-whisper 使用 delay 控制 transcript delta 延迟
  * - 按 item_id 管理 live/final 状态
  */
-console.log('realtime-transcription.js loaded, build: 90813');
+console.log('realtime-transcription.js loaded, build: 20260508d');
 
 const REALTIME_STATUS = {
     IDLE: 'idle',
@@ -89,10 +89,11 @@ class RealtimeTranscription {
         this.status = REALTIME_STATUS.IDLE;
         this.lastError = null;
         this._turnCounter = 0;
+        this._statsTimer = null;
 
         // 配置
         this.options = {
-            model: options.model || 'gpt-4o-transcribe',
+            model: options.model || 'gpt-realtime-whisper',
             language: options.language || null,
             prompt: options.prompt || '',
 
@@ -224,11 +225,11 @@ class RealtimeTranscription {
 
             // 6. 发送 offer 到 OpenAI，获取 answer
             const sdpResp = await fetch(
-                'https://api.openai.com/v1/realtime/calls',
+                '/api/realtime-call',
                 {
                     method: 'POST',
                     headers: {
-                        'Authorization': `Bearer ${clientSecret}`,
+                        'X-OpenAI-Client-Secret': clientSecret,
                         'Content-Type': 'application/sdp'
                     },
                     body: this.pc.localDescription?.sdp || offer.sdp
@@ -249,6 +250,7 @@ class RealtimeTranscription {
             await this._waitForDataChannelOpen();
 
             console.log('Realtime: WebRTC 连接已就绪');
+            this._startOutboundAudioStats();
         } catch (error) {
             console.error('Realtime: 连接失败', error);
             this.isConnecting = false;
@@ -460,6 +462,10 @@ class RealtimeTranscription {
             try { this.pc.close(); } catch (e) {}
             this.pc = null;
         }
+        if (this._statsTimer) {
+            clearInterval(this._statsTimer);
+            this._statsTimer = null;
+        }
         this.isConnected = false;
         this.isConnecting = false;
         if (!preserveStream) {
@@ -531,6 +537,34 @@ class RealtimeTranscription {
                 resolve();
             }, 2000);
         });
+    }
+
+    _startOutboundAudioStats() {
+        if (!this.pc || this._statsTimer) return;
+        let lastPacketsSent = 0;
+        let lastBytesSent = 0;
+        this._statsTimer = setInterval(async () => {
+            if (!this.pc || this.pc.connectionState === 'closed') return;
+            try {
+                const stats = await this.pc.getStats();
+                stats.forEach(report => {
+                    if (report.type === 'outbound-rtp' && report.kind === 'audio') {
+                        const packetsDelta = report.packetsSent - lastPacketsSent;
+                        const bytesDelta = report.bytesSent - lastBytesSent;
+                        lastPacketsSent = report.packetsSent;
+                        lastBytesSent = report.bytesSent;
+                        console.log('Realtime [stats] outbound audio', {
+                            packetsSent: report.packetsSent,
+                            bytesSent: report.bytesSent,
+                            packetsDelta,
+                            bytesDelta
+                        });
+                    }
+                });
+            } catch (error) {
+                console.warn('Realtime [stats] getStats failed:', error);
+            }
+        }, 3000);
     }
 
     async _waitForDataChannelOpen(timeoutMs = 10000) {

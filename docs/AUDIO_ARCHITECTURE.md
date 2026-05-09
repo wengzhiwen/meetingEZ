@@ -11,6 +11,15 @@
   -> 前端渲染 live / final transcript
   -> 后端代理翻译
   -> 前端回填翻译
+
+可选实验路径：
+
+```text
+同一浏览器音频流
+  -> WebRTC sidecar
+  -> OpenAI Realtime Translation
+  -> 前端渲染低延迟翻译字幕
+```
 ```
 
 ## 当前数据流
@@ -64,10 +73,11 @@
 - `audio.input.format.type: "audio/pcm"`
 - `audio.input.format.rate: 24000`
 - `audio.input.noise_reduction.type: "near_field"`
-- `audio.input.transcription.model: "gpt-4o-transcribe"`
-- `audio.input.turn_detection.type: "semantic_vad"`
-- `audio.input.turn_detection.eagerness: "high"`
+- `audio.input.transcription.model: "gpt-realtime-whisper"`
+- `audio.input.transcription.delay: "low"`
 - `include: ["item.input_audio_transcription.logprobs"]`
+
+说明：`gpt-realtime-whisper` 当前不接受 `turn_detection` 字段；默认依赖 `delay: "low"` 的低延迟流式 transcript deltas。
 
 ## 前端状态机
 
@@ -99,6 +109,18 @@
 - 先显示原文
 - 翻译完成后在原文后插入翻译行
 - 维护少量翻译上下文 `translationContext`
+
+### Realtime Translation Beta
+
+设置面板中的“翻译方式”可切换到实验模式。
+
+- Beta 模式会同时启动一路不限定输入语言的 `RealtimeTranscription` 链路和两个 `RealtimeTranslation` 会话。
+- `RealtimeTranscription` 负责混合会议原文转写，进入左栏“原文转写”区块。
+- 两个 `RealtimeTranslation` 会话分别以第一语言和第二语言为目标语言；两个目标语言的输出都进入右栏，并按目标语言分成上下两个区块。
+- 后端通过 `/api/realtime-translation-session` 签发 translation client secret。
+- 前端通过 `/v1/realtime/translations/calls` 建立 WebRTC 连接。
+- 消费 `session.input_transcript.delta` 和 `session.output_transcript.delta`。
+- 左右两栏独立分段、独立打时间标签、独立滚动。由于会议音频是混合流，没有说话人音轨边界，该模式不做说话人分离，也不在前端按脚本文字过滤原文。
 
 ## 当前 UI 架构
 

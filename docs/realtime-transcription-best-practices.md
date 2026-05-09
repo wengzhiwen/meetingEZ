@@ -139,18 +139,19 @@ Realtime transcription 指南说明，这类会话应使用 `type: "transcriptio
 
 Realtime transcription 文档列出了支持的转写模型，包括：
 
+- `gpt-realtime-whisper`
 - `gpt-4o-transcribe`
 - `gpt-4o-mini-transcribe`
-- `gpt-4o-transcribe-latest`
 - `whisper-1`
 
 对于实时、增量、前端用户体验，我的建议是：
 
-- 默认：`gpt-4o-transcribe`
+- 默认：`gpt-realtime-whisper`
+- 非实时文件或不需要流式 delta 的请求-响应转写：`gpt-4o-transcribe`
 - 预算更敏感时：`gpt-4o-mini-transcribe`
 - 不优先选择：`whisper-1`
 
-原因是官方文档说明，`gpt-4o-transcribe` / `gpt-4o-mini-transcribe` 更适合真正的流式增量 transcript，而 `whisper-1` 在 Realtime 中不会提供同样理想的逐步增量体验。
+原因是官方文档说明，`gpt-realtime-whisper` 是为 live audio、transcript deltas 和可调延迟设计的原生流式模型；`gpt-4o-transcribe` 更适合文件或不要求流式 delta 的转写工作流，而 `whisper-1` 在 Realtime 中不会提供同样理想的原生流式体验。
 
 ### 4. 已知语言时显式设置 `language`
 
@@ -371,7 +372,8 @@ client secret 用于安全创建会话，但会话建立后，不应为了“tok
 
 优先策略：
 
-- `gpt-4o-transcribe`
+- 实时字幕链路先使用 `gpt-realtime-whisper`，并用真实会议音频评估延迟与准确率
+- 如果不是实时流式场景，再评估 `gpt-4o-transcribe`
 - 正确配置 `noise_reduction`
 - 维护术语表
 - 使用 logprobs 做可疑文本复核
@@ -418,14 +420,13 @@ client secret 用于安全创建会话，但会话建立后，不应为了“tok
 - 连接方式：WebRTC
 - 会话类型：`transcription`
 - 音频格式：24kHz mono PCM
-- 模型：`gpt-4o-transcribe`
+- 模型：`gpt-realtime-whisper`
+- 延迟：`delay: "low"`
 - 语言：已知则显式指定
 - 术语提示：开启，维护一份产品词表
 - 噪声处理：`near_field`
-- VAD：`server_vad`
-  - `threshold: 0.5`
-  - `prefix_padding_ms: 300`
-  - `silence_duration_ms: 400 ~ 500`
+- VAD：`gpt-realtime-whisper` 当前不发送 `turn_detection`
+- 分段/出字：依赖 `delay: "low"` 的低延迟流式 transcript deltas
 - 事件消费：`delta` + `completed`
 - 数据建模：按 `item_id` 管理 live/final 状态
 - 置信度：启用 logprobs，但默认不直接显示百分比
