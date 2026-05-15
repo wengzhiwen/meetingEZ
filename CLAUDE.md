@@ -1,95 +1,166 @@
 # CLAUDE.md
 
-本文件为 Claude Code (claude.ai/code) 在本仓库中工作时提供指引。
+本文件为 Claude Code 在本仓库中工作时提供指引。
 
 **沟通语言约定：始终使用简体中文与用户交流。**
+
+## 项目现状
+
+MeetingEZ 是一个轻量的会议实时转写、按需翻译和会后纪要工具。当前 Web 应用已经收敛为“控制台 + 实时页”双入口：
+
+- 控制台 `/`：项目选择、会议创建、会议文件/音频/术语/背景管理。
+- 实时页 `/realtime`：采集麦克风或标签页音频，通过 OpenAI Realtime API WebRTC transcription session 做实时转写。
+- 后端只签发短期 Realtime `client secret`，浏览器不保存标准 API Key。
+- 后端代理翻译请求，默认翻译模型为 `gpt-5.4-mini-2026-03-17`。
+- 仓库仍保留 CLI 会议纪要 Agent，用于离线音频转写、纪要生成和项目记忆维护。
 
 ## 常用命令
 
 ```bash
-# 启动 Web 应用（开发模式）
-python run.py                          # Flask 开发服务器，监听 0.0.0.0:5090
+# 开发启动
+source venv/bin/activate
+python run.py
 
-# 运行 CLI Agent
-python -m meeting_agent run --project <项目名> --meeting <会议目录名>
-python -m meeting_agent status --project <项目名>
-
-# 生产服务器
+# 生产启动
 gunicorn -w 2 -b 0.0.0.0:5090 run:app
 
-# 代码格式化
-yapf -ir meeting_agent/ app/
+# CLI Agent
+python -m meeting_agent status --project <项目名>
+python -m meeting_agent run --project <项目名> --meeting <会议目录名>
 
-# 代码检查
+# 格式化与检查
+yapf -ir meeting_agent/ app/
 pylint meeting_agent/ app/
+
+# 基础语法校验
+python3 -m py_compile app/routes.py
 ```
 
-虚拟环境：`venv/bin/python`（激活命令：`source venv/bin/activate`）。
+默认 Web 地址：`http://localhost:5090`。虚拟环境通常位于 `venv/`。
+
+## 运行时关键配置
+
+配置来自 `.env`，主要入口在 `meeting_agent/config.py` 和 `app/routes.py`。
+
+- `OPENAI_API_KEY`：Realtime client secret 签发、翻译代理、纪要生成。
+- `TRANSCRIPTION_MODEL`：Web 实时转写模型，默认 `gpt-realtime-whisper`。
+- `TRANSLATION_MODEL`：后置翻译模型，默认 `gpt-5.4-mini-2026-03-17`。
+- `TRANSLATION_REASONING_EFFORT`：翻译 reasoning 强度，默认 `low`，仅对支持 reasoning 的模型发送。
+- `ACCESS_CODE`：可选访问码；为空时不启用登录保护。
+- `OPENROUTER_API_KEY`：离线文件 ASR 的首选 OpenRouter Chirp 3。
+- `ZHIPU_API_KEY`：OpenRouter ASR 不可用时的降级 ASR。
 
 ## 架构概览
 
-MeetingEZ 是一个双模式会议智能系统，Web 端和 CLI 共享数据层：
-
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Web GUI（Flask SPA）                                    │
-│  app/routes.py → app/workspace_service.py → templates/  │
-│  app/static/js/workspace/（原生 JS 模块）                │
-│  ├── 实时转写：OpenAI Realtime API via WebRTC            │
-│  └── 工作台：项目/会议增删改查、术语表、文件管理          │
-├─────────────────────────────────────────────────────────┤
-│  CLI Agent（meeting_agent/）                              │
-│  __main__.py → cmd_run() 编排处理管线：                  │
-│  ASR 路由器 → LLM 客户端 → 记忆写入器 → 术语管理        │
-├─────────────────────────────────────────────────────────┤
-│  共享层：meeting_agent/models.py, meeting_agent/config   │
-└─────────────────────────────────────────────────────────┘
-```
+Web GUI
+  app/routes.py
+  app/workspace_service.py
+  templates/
+  app/static/js/app.js
+  app/static/js/realtime-transcription.js
+  app/static/js/workspace/*.js
 
-### ASR 管线
+CLI Agent
+  meeting_agent/__main__.py
+  meeting_agent/asr/router.py
+  meeting_agent/llm/client.py
+  meeting_agent/memory/*.py
 
-`meeting_agent/asr/router.py`（`ASRRouter`）编排两个 ASR 引擎：
-1. **VibeVoice**（首选，`vibevoice_engine.py`）— 本地 vLLM 部署，支持说话人分离
-2. **智谱 ASR**（降级，`engine.py`）— 云端 API，无说话人信息
-
-VibeVoice 失败时，路由器将 `_asr_state.json` 写入会议目录，进入指数退避。用户可通过 Web GUI 立即重试（`/asr/retry`）或降级到智谱（`/asr/fallback`）。
-
-### 会议处理流程
-
-通过 Web GUI 或 CLI 触发。在后台线程中运行（`routes.py` 中的 `_run_meeting_process_async`），该线程以子进程方式执行 `python -m meeting_agent run`：
-
-```
-音频文件 → ASR（VibeVoice/智谱） → transcript.json
-                                       ↓
-transcript.json + 上下文 → LLM（GPT） → GPTAnalysisResult
-                                       ↓
-                          MemoryWriter → minutes.md, actions.md, timeline.md, context.md
+共享模型与配置
+  meeting_agent/models.py
+  meeting_agent/config.py
+  meeting_agent/glossary/*.py
 ```
 
-### 状态与持久化
+## Web 实时转写链路
 
-所有状态以文件形式存储在项目/会议目录中：
-- `_meeting.json` — 会议元数据（日期、类型、参会人、语言）
-- `transcript.json` — ASR 输出，每个片段含可选的 `speaker` 字段
-- `_asr_state.json` — ASR 重试/降级状态
-- `_processing.lock` / `_processing.error` — 处理状态（供 Web GUI 轮询）
-- `context.md`, `actions.md`, `timeline.md` — 跨会议累积的项目记忆
-- `_glossary.json` / `_glossary.pending.json` — 术语表（已确认/待审核/已拒绝三种状态）
-- `_project.json`, `_people.json` — 项目配置
+当前实时模式是 transcription-only WebRTC：
 
-### 配置
+1. 前端请求 `POST /api/realtime-session`。
+2. 后端使用 `OPENAI_API_KEY` 调用 `https://api.openai.com/v1/realtime/client_secrets`。
+3. session 配置为 `type: "transcription"`。
+4. `audio.input.transcription.model` 默认是 `gpt-realtime-whisper`。
+5. 音频格式为 24kHz mono PCM，噪声处理为 `near_field`。
+6. `gpt-realtime-whisper` 当前不发送 `turn_detection`，使用 `delay: "low"` 获取低延迟 transcript deltas。
+7. 前端通过 `https://api.openai.com/v1/realtime/calls` 完成 SDP 交换。
+8. DataChannel 处理 `conversation.item.input_audio_transcription.delta` 和 `completed` 事件。
 
-`meeting_agent/config.py` — `Settings(BaseSettings)` 从 `.env` 加载配置。所有设置项都有合理默认值。通过 `Config()` 包装 `Settings` 实例化。
+不要把标准 API Key 放入浏览器端代码。不要回退到旧的浏览器 WebSocket + Base64 PCM 推流实现。
 
-### 前端
+### Realtime Translation Beta
 
-原生 JS SPA，位于 `app/static/js/workspace/`。组件为 ES 模块。`api.js` 封装所有 `/api/workspace/` 调用。无需构建步骤。
+设置面板可选择实验性 `Realtime Translation Beta`：
 
-## 关键约定
+- 默认仍使用“转写后翻译（稳定）”。
+- Beta 额外调用 `POST /api/realtime-translation-session` 签发 translation client secret。
+- 前端类为 `app/static/js/realtime-translation.js`。
+- WebRTC endpoint 为 `/v1/realtime/translations/calls`。
+- 模型默认 `gpt-realtime-translate`，输入转写模型默认 `gpt-realtime-whisper`。
+- Beta 会为第一语言和第二语言各开一路 translation session，用于混合会议音频的互译效果对比。
+- 由于没有说话人音轨边界，Beta 输出不作为默认正式翻译链路。
 
-- **会议目录命名**：`projects/<项目>/` 下采用 `YYYY-MM-DD_标题` 格式
-- **元数据文件**：以 `_` 为前缀（如 `_meeting.json`、`_project.json`）
-- **术语辨析**："转写"（transcription）= ASR 输出；"纪要"（minutes）= AI 生成的会议摘要
-- **语言模式**：`single_primary`（单语言）vs `bilingual`（双语，含翻译）
-- **代码风格**：yapf + pep8 基准，88 列宽限制，4 空格缩进（详见 `pyproject.toml`）
-- **LLM 提示词**：`meeting_agent/llm/prompts.py` — `PromptBuilder` 类提供模板方法。VibeVoice 的说话人信息以 `[HH:MM:SS] Speaker X: 文本` 格式注入，但提示词中明确标注仅供参考、不完全可靠
+## 离线会议处理链路
+
+CLI Agent 处理项目/会议目录中的录音文件：
+
+```
+音频文件
+  -> ASRRouter
+  -> transcript.json
+  -> GPT 纪要生成
+  -> minutes.md / actions.md / timeline.md / context.md
+```
+
+当前 ASR 路由器 `meeting_agent/asr/router.py`：
+
+- 首选 OpenRouter Chirp 3：`meeting_agent/asr/openrouter_engine.py`
+- 降级智谱 ASR：`meeting_agent/asr/engine.py`
+- VibeVoice 文件仍保留，但当前不实例化、不路由调用。
+
+## 数据与状态文件
+
+项目和会议状态以文件形式持久化：
+
+- `_project.json`：项目配置。
+- `_people.json`：项目成员。
+- `_meeting.json`：会议元数据。
+- `transcript.json`：正式转写稿。
+- `transcript.json.progress`：ASR 中间进度。
+- `_asr_state.json`：ASR provider、状态、错误。
+- `_processing.lock` / `_processing.error` / `_processing.progress`：后台处理状态。
+- `_glossary.json` / `_glossary.pending.json`：术语表。
+- `minutes.md` / `actions.md` / `timeline.md` / `context.md`：纪要与项目记忆。
+
+术语约定见 `docs/TERMINOLOGY.md`：`transcription` 是转写，`minutes` 是 AI 生成的纪要。
+
+## 前端约定
+
+- 无构建步骤，直接使用原生 JS 和 ES modules。
+- 实时页主逻辑：`app/static/js/app.js`。
+- Realtime WebRTC 封装：`app/static/js/realtime-transcription.js`。
+- 控制台 SPA：`app/static/js/workspace/`。
+- 控制台样式：`app/static/css/workspace-spa.css`。
+- 实时页样式：`app/static/css/style.css`。
+
+修改前端时保持现有原生 JS 模块风格，不引入打包器或框架。
+
+## 文档维护约定
+
+优先更新这些当前文档：
+
+- `README.md`
+- `docs/API.md`
+- `docs/AUDIO_ARCHITECTURE.md`
+- `docs/USAGE.md`
+- `docs/realtime-transcription-best-practices.md`
+- `docs/meeting_minutes_agent.md`
+
+`docs/FEATURE_*.md` 和旧设计文档可能包含历史方案，除非用户明确要求，不要把一次运行时改动扩大为大规模历史文档重写。
+
+## 代码风格
+
+- Python：遵循 `pyproject.toml` 中 yapf 配置，88 列，4 空格。
+- JavaScript：保持当前原生模块风格，少做全局状态扩散。
+- 变更运行时模型时，同时检查 `app/routes.py`、前端默认值、`env.example` 和当前文档。
+- 不要删除或覆盖用户数据目录、会议目录、项目目录和生成的纪要文件，除非用户明确要求。
