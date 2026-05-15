@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeetingEZ - 智能会议助手</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=20260509f">
-    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo.svg') }}">
 </head>
 <body
     data-entry-mode="{{ entry_mode }}"
@@ -34,7 +34,10 @@
             <div class="dock-summary">
                 <div class="dock-brand">
                     <div class="dock-title-row">
-                        <p class="app-eyebrow">MeetingEZ</p>
+                        <p class="app-eyebrow app-brand">
+                            <img src="{{ url_for('static', filename='logo.svg') }}" alt="" class="app-brand-mark">
+                            <span>MeetingEZ</span>
+                        </p>
                         <span id="meetingModeBadge" class="app-badge {% if entry_mode != 'project' %}app-badge-muted{% endif %}">{{ session_mode_label }}</span>
                     </div>
                     <div class="dock-heading-row">

@@ -6,7 +6,7 @@
     <title>MeetingEZ 工作台</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/workspace-spa.css') }}">
-    <link rel="icon" href="{{ url_for('main.favicon') }}">
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo.svg') }}">
 </head>
 <body class="spa-body">
 
@@ -14,7 +14,10 @@
     <!-- 侧边栏 -->
     <aside class="spa-sidebar" id="sidebar">
         <div class="spa-sidebar-header">
-            <h2 class="spa-logo">MeetingEZ</h2>
+            <h2 class="spa-logo">
+                <img src="{{ url_for('static', filename='logo.svg') }}" alt="" class="spa-logo-mark">
+                <span>MeetingEZ</span>
+            </h2>
             <button class="spa-sidebar-close btn-icon" id="sidebarClose" title="关闭侧栏">&times;</button>
         </div>
 

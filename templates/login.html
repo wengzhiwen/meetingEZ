@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeetingEZ - 登录</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo.svg') }}">
     <style>
         .login-container {
             max-width: 380px;
@@ -20,6 +20,13 @@
             font-size: 2rem;
             color: #333;
             margin-bottom: 8px;
+        }
+        .login-logo-mark {
+            width: 56px;
+            height: 56px;
+            border-radius: 14px;
+            margin-bottom: 14px;
+            box-shadow: 0 10px 24px rgba(8, 145, 178, 0.24);
         }
         .login-container .subtitle {
             color: #6c757d;
@@ -59,6 +66,7 @@
 <body>
     <div class="container">
         <div class="login-container">
+            <img src="{{ url_for('static', filename='logo.svg') }}" alt="" class="login-logo-mark">
             <h1>MeetingEZ</h1>
             <p class="subtitle">请输入访问码</p>
             {% if error %}

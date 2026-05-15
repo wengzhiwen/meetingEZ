@@ -738,8 +738,8 @@ def health():
 def favicon():
     """网站图标"""
     return send_from_directory(os.path.join(main_bp.root_path, 'static'),
-                               'favicon.ico',
-                               mimetype='image/vnd.microsoft.icon')
+                               'logo.svg',
+                               mimetype='image/svg+xml')
 
 
 # ---- SPA JSON API ----

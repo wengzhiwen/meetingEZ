@@ -34,10 +34,21 @@
 }
 
 .spa-logo {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
     font-size: 1.15rem;
     font-weight: 700;
     color: var(--accent);
-    letter-spacing: 0.02em;
+    letter-spacing: 0;
+}
+
+.spa-logo-mark {
+    width: 2rem;
+    height: 2rem;
+    border-radius: 0.55rem;
+    flex: 0 0 auto;
+    box-shadow: 0 8px 18px rgba(8, 145, 178, 0.24);
 }
 
 .spa-sidebar-close {
