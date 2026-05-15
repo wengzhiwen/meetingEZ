@@ -133,6 +133,64 @@ body {
     height: 100%;
 }
 
+/* Beta 3-pane: whisper left (full height), two translation panes right */
+.transcript-beta-split {
+    display: grid;
+    grid-template-columns: 55fr 45fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 0.75rem;
+    height: 100%;
+}
+
+.beta-pane-whisper { grid-column: 1; grid-row: 1 / 3; }
+.beta-pane-lang1   { grid-column: 2; grid-row: 1; }
+.beta-pane-lang2   { grid-column: 2; grid-row: 2; }
+
+.transcript-beta-split .transcript-pane {
+    padding: 0.75rem 1rem;
+}
+
+.transcript-beta-split .transcript-pane::before {
+    font-size: 0.36em;
+    margin: -0.15rem 0 0.5rem;
+    padding: 0.12rem 0 0.28rem;
+}
+
+/* Section titles are redundant when the pane header already names the lane */
+.transcript-beta-split .subtitle-section-title { display: none; }
+
+.transcript-beta-split .subtitle-section { min-height: unset; padding-bottom: 0.4rem; }
+
+.transcript-beta-split .subtitle-entry { margin-bottom: 0.6rem; gap: 0.28rem; }
+
+/* Language labels are redundant — the pane header already names the lane */
+.transcript-beta-split .subtitle-label { display: none; }
+
+/* Hide timestamps on the compact translation panes */
+.beta-pane-lang1 .subtitle-meta,
+.beta-pane-lang2 .subtitle-meta { display: none; }
+
+/* Language-change divider in the Whisper pane */
+.whisper-lang-divider {
+    margin: 0.7rem 0 0.45rem;
+    border-top: 1px solid rgba(96, 165, 250, 0.28);
+    position: relative;
+}
+
+.whisper-lang-divider::after {
+    content: attr(data-lang);
+    position: absolute;
+    top: -0.55em;
+    left: 0;
+    padding: 0 0.4rem;
+    background: rgba(7, 12, 25, 0.88);
+    color: var(--subtitle-label);
+    font-size: 0.62rem;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+}
+
 .transcript-pane::before {
     content: attr(data-language-label);
     position: sticky;
@@ -1544,6 +1602,15 @@ body.workspace-page {
     .transcript-split {
         grid-template-columns: 1fr;
     }
+
+    .transcript-beta-split {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto auto auto;
+    }
+
+    .beta-pane-whisper { grid-column: 1; grid-row: 1; }
+    .beta-pane-lang1   { grid-column: 1; grid-row: 2; }
+    .beta-pane-lang2   { grid-column: 1; grid-row: 3; }
 
     .workspace-shell {
         width: calc(100vw - 1rem);

@@ -114,8 +114,10 @@ def _build_realtime_transcription_config(model, language=None, prompt=''):
     if language:
         transcription_config['language'] = language
     if _is_gpt_realtime_whisper(model):
+        # 'delay' 是 gpt-realtime-whisper 的私有扩展字段，官方文档未收录；
+        # 实测可降低首个 delta 延迟，暂保留。
         transcription_config['delay'] = 'low'
-    elif prompt:
+    if prompt:
         transcription_config['prompt'] = prompt
     return transcription_config
 
@@ -1607,6 +1609,11 @@ def create_realtime_translation_session():
         session_data = resp.json()
         client_secret = session_data.get('value')
         expires_at = session_data.get('expires_at')
+
+        if not client_secret:
+            client_secret = session_data.get('client_secret', {}).get('value')
+            expires_at = expires_at or session_data.get('client_secret',
+                                                        {}).get('expires_at')
 
         print(
             '[realtime-translation-session] Session created: '

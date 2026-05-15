@@ -535,7 +535,7 @@ class RealtimeTranscription {
                     this.pc.removeEventListener('icegatheringstatechange', handleStateChange);
                 }
                 resolve();
-            }, 2000);
+            }, 5000);
         });
     }
 
@@ -543,6 +543,8 @@ class RealtimeTranscription {
         if (!this.pc || this._statsTimer) return;
         let lastPacketsSent = 0;
         let lastBytesSent = 0;
+        let sampleCount = 0;
+        const MAX_SAMPLES = 10; // 采集约 30s 的启动数据后停止，避免长时间会议持续轮询
         this._statsTimer = setInterval(async () => {
             if (!this.pc || this.pc.connectionState === 'closed') return;
             try {
@@ -563,6 +565,11 @@ class RealtimeTranscription {
                 });
             } catch (error) {
                 console.warn('Realtime [stats] getStats failed:', error);
+            }
+            sampleCount++;
+            if (sampleCount >= MAX_SAMPLES) {
+                clearInterval(this._statsTimer);
+                this._statsTimer = null;
             }
         }, 3000);
     }

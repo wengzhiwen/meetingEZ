@@ -20,6 +20,10 @@ const HIDE_BEFORE_KEY = 'meetingEZ_hideBefore';
 
 let realtimeClient = null;
 let realtimeTranslationClients = [];
+let betaSplitContainer = null;
+let betaPaneWhisper = null;
+let betaPaneLang1 = null;
+let betaPaneLang2 = null;
 let currentContextPack = null;
 let mediaStreamExtras = null;  // 标签页+麦克风混合时的额外资源
 let realtimeTranslationOutputMap = {};
@@ -356,7 +360,7 @@ function insertTranscriptInRealtimeOrder(entry) {
     });
 }
 
-function splitTranscriptSentences(text) {
+function splitTranscriptSentences(text, { group = true } = {}) {
     const normalized = normalizeText(text);
     if (!normalized) return [];
 
@@ -367,7 +371,7 @@ function splitTranscriptSentences(text) {
         if (!boundaryChars.has(normalized[i])) continue;
 
         let end = i + 1;
-        while (end < normalized.length && /["'”’」』）\]\s]/u.test(normalized[end])) {
+        while (end < normalized.length && /[“’”’」』）\]\s]/u.test(normalized[end])) {
             end++;
         }
 
@@ -379,7 +383,7 @@ function splitTranscriptSentences(text) {
     const tail = normalized.slice(start).trim();
     if (tail) sentences.push(tail);
     const roughSegments = (sentences.length ? sentences : [normalized]).flatMap(splitLongTranscriptSegment);
-    return groupSubtitleSegments(roughSegments);
+    return group ? groupSubtitleSegments(roughSegments) : roughSegments;
 }
 
 function splitLongTranscriptSegment(segment) {
@@ -980,7 +984,7 @@ async function initRealtimeConnection(options = {}) {
                 return;
             }
 
-            const segments = splitTranscriptSentences(transcript);
+            const segments = splitTranscriptSentences(transcript, { group: !betaMode });
             const newTranscripts = segments.map((segment, index) => {
                 const language = detectLanguage(segment);
                 const channel = betaMode ? targetChannel : 'primary';
@@ -1078,6 +1082,7 @@ async function initRealtimeTranslationConnections() {
     updateStreamingDisplay('secondary');
 
     realtimeTranslationTargetLanguages = [primaryLang, secondaryLang];
+    updateRealtimeTranslationSplitHeaders();
     const targets = realtimeTranslationTargetLanguages.map((language) => ({
         language,
         label: `译为 ${language}`
@@ -1171,6 +1176,15 @@ function commitRealtimeTranslationPaneSegments(targetLang, segments) {
 function updateRealtimeTranslationSplitHeaders() {
     if (transcriptLeft) transcriptLeft.dataset.languageLabel = 'WHISPER';
     if (transcriptRight) transcriptRight.dataset.languageLabel = 'TRANSLATE';
+    if (betaPaneWhisper) betaPaneWhisper.dataset.languageLabel = 'WHISPER';
+    if (betaPaneLang1) {
+        const l1 = realtimeTranslationTargetLanguages[0];
+        betaPaneLang1.dataset.languageLabel = l1 ? getSubtitleLanguageLabel(l1) : 'LANG 1';
+    }
+    if (betaPaneLang2) {
+        const l2 = realtimeTranslationTargetLanguages[1];
+        betaPaneLang2.dataset.languageLabel = l2 ? getSubtitleLanguageLabel(l2) : 'LANG 2';
+    }
 }
 
 function splitCommittedRealtimeTranslationBuffer(targetLang, flush = false) {
@@ -1570,6 +1584,25 @@ function renderRealtimeTranslationPairEntry(entry) {
     });
 }
 
+function renderBetaWhisperSection(entries, liveLines, liveId) {
+    let prevLang = null;
+    const body = entries.map((entry) => {
+        const curLang = normalizeRealtimeTranslationLanguage(
+            entry.language || entry.originalLanguage || '');
+        const langChanged = prevLang !== null && curLang && prevLang !== curLang;
+        prevLang = curLang || prevLang;
+        const divider = langChanged
+            ? `<div class="whisper-lang-divider" data-lang="${escapeHtml(getSubtitleLanguageLabel(curLang))}"></div>`
+            : '';
+        return divider + renderTranscriptEntry(entry);
+    }).join('');
+    const live = liveLines?.length
+        ? renderSubtitleEntry(liveLines, new Date().toISOString(), { id: liveId, live: true })
+        : '';
+    const empty = !body && !live ? '<div class="subtitle-empty">等待字幕...</div>' : '';
+    return `<section class="subtitle-section">${body}${live}${empty}</section>`;
+}
+
 function renderRealtimePaneSection(title, entries, liveLines, liveId) {
     const body = entries.map(renderTranscriptEntry).join('');
     const live = liveLines?.length
@@ -1720,6 +1753,43 @@ function updateDisplay(channel = 'primary') {
         .filter(t => !hideBefore || t.timestamp > hideBefore)
         .filter(t => splitVisible ? t.channel === channel : true)
         .slice(-50);
+
+    // Beta 3-pane layout: whisper left, lang1/lang2 right
+    const betaVisible = betaSplitContainer && betaSplitContainer.style.display !== 'none';
+    if (betaVisible) {
+        if (channel === 'primary') {
+            const originalEntries = displayTranscripts.filter(entry =>
+                entry.paneRole === 'original' || isRealtimeTranscriptionPaneEntry(entry));
+            betaPaneWhisper.innerHTML = renderBetaWhisperSection(
+                originalEntries,
+                buildRealtimePaneLiveLines('primary', 'original'),
+                'streaming-transcript-primary-original'
+            );
+        } else {
+            realtimeTranslationTargetLanguages.forEach((lang, idx) => {
+                const pane = idx === 0 ? betaPaneLang1 : betaPaneLang2;
+                if (!pane) return;
+                const langEntries = displayTranscripts.filter(entry =>
+                    (entry.paneRole === 'translation' || isRealtimeTranslationPaneEntry(entry)) &&
+                    normalizeRealtimeTranslationLanguage(entry.language) ===
+                    normalizeRealtimeTranslationLanguage(lang));
+                const liveText = (realtimeTranslationBufferMap[lang] || '').trim();
+                const liveLines = liveText
+                    ? [{ language: lang, label: getSubtitleLanguageLabel(lang), text: liveText }]
+                    : [];
+                pane.innerHTML = renderRealtimePaneSection(
+                    getSubtitleLanguageLabel(lang),
+                    langEntries,
+                    liveLines,
+                    `streaming-translation-${lang}`
+                );
+            });
+        }
+        if (document.getElementById('autoScroll').classList.contains('btn-primary')) {
+            scrollToBottom(channel);
+        }
+        return;
+    }
 
     const contentHtml = splitVisible
         ? renderRealtimeSplitPane(channel, displayTranscripts)
@@ -1896,6 +1966,14 @@ function escapeHtml(text) {
 }
 
 function scrollToBottom(channel = 'primary') {
+    const betaVisible = betaSplitContainer && betaSplitContainer.style.display !== 'none';
+    if (betaVisible) {
+        const panes = channel === 'primary'
+            ? [betaPaneWhisper]
+            : [betaPaneLang1, betaPaneLang2].filter(Boolean);
+        requestAnimationFrame(() => { panes.forEach(p => { p.scrollTop = p.scrollHeight; }); });
+        return;
+    }
     transcriptSplit = transcriptSplit || document.getElementById('transcriptSplit');
     transcriptLeft = transcriptLeft || document.getElementById('transcriptLeft');
     transcriptRight = transcriptRight || document.getElementById('transcriptRight');
@@ -1999,6 +2077,9 @@ function clearTranscript() {
         `;
         if (transcriptLeft) transcriptLeft.innerHTML = '';
         if (transcriptRight) transcriptRight.innerHTML = '';
+        if (betaPaneWhisper) betaPaneWhisper.innerHTML = '';
+        if (betaPaneLang1) betaPaneLang1.innerHTML = '';
+        if (betaPaneLang2) betaPaneLang2.innerHTML = '';
         rebuildTranslationContext();
         updateControls();
         setTimeout(() => saveTranscripts(), 0);
@@ -2046,6 +2127,9 @@ function updateFontSize() {
     const fontSize = localStorage.getItem('meetingEZ_fontSize') || 'medium';
     if (transcriptLeft) transcriptLeft.className = `transcript-pane font-${fontSize}`;
     if (transcriptRight) transcriptRight.className = `transcript-pane font-${fontSize}`;
+    if (betaPaneWhisper) betaPaneWhisper.className = `transcript-pane beta-pane-whisper font-${fontSize}`;
+    if (betaPaneLang1) betaPaneLang1.className = `transcript-pane beta-pane-lang1 font-${fontSize}`;
+    if (betaPaneLang2) betaPaneLang2.className = `transcript-pane beta-pane-lang2 font-${fontSize}`;
 }
 
 function disableSettings() {
@@ -2075,15 +2159,17 @@ function enableSplitView(enabled) {
     const content = document.getElementById('transcriptContent');
     transcriptSplit = transcriptSplit || document.getElementById('transcriptSplit');
     if (!content || !transcriptSplit) return;
+
+    const isBeta = enabled && getTranslationMode() === 'realtime_beta';
+    content.style.display = enabled ? 'none' : 'block';
+    transcriptSplit.style.display = (!isBeta && enabled) ? 'grid' : 'none';
+    if (betaSplitContainer) betaSplitContainer.style.display = isBeta ? 'grid' : 'none';
+
     if (enabled) {
-        content.style.display = 'none';
-        transcriptSplit.style.display = 'grid';
         updateRealtimeTranslationSplitHeaders();
         updateDisplay('primary');
         updateDisplay('secondary');
     } else {
-        transcriptSplit.style.display = 'none';
-        content.style.display = 'block';
         updateDisplay('primary');
     }
 }
@@ -2365,6 +2451,24 @@ document.addEventListener('DOMContentLoaded', () => {
         const container = document.querySelector('.transcript-container');
         if (container) container.appendChild(transcriptSplit);
     }
+
+    // Beta 3-pane container (whisper left, two translation panes right)
+    betaSplitContainer = document.createElement('div');
+    betaSplitContainer.id = 'betaSplitContainer';
+    betaSplitContainer.className = 'transcript-beta-split';
+    betaSplitContainer.style.display = 'none';
+    betaPaneWhisper = document.createElement('div');
+    betaPaneWhisper.id = 'betaPaneWhisper';
+    betaPaneWhisper.className = 'transcript-pane beta-pane-whisper';
+    betaPaneLang1 = document.createElement('div');
+    betaPaneLang1.id = 'betaPaneLang1';
+    betaPaneLang1.className = 'transcript-pane beta-pane-lang1';
+    betaPaneLang2 = document.createElement('div');
+    betaPaneLang2.id = 'betaPaneLang2';
+    betaPaneLang2.className = 'transcript-pane beta-pane-lang2';
+    betaSplitContainer.append(betaPaneWhisper, betaPaneLang1, betaPaneLang2);
+    const betaContainer = document.querySelector('.transcript-container');
+    if (betaContainer) betaContainer.appendChild(betaSplitContainer);
 
     init();
     loadTranscripts();
