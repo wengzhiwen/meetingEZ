@@ -103,8 +103,21 @@ class PromptBuilder:
 
         # 历史纪要
         if recent_minutes:
-            history = "\n---\n".join(recent_minutes)
-            sections.append(f"""## 历史纪要参考（最近{len(recent_minutes)}份）
+            # 最近一份单独强调作为格式和风格基准
+            latest = recent_minutes[0]
+            older = recent_minutes[1:]
+
+            latest_section = f"""## 上一份会议纪要（格式与风格基准）
+
+> **重要**：请严格参照以下纪要的结构、格式和书写风格来生成本次纪要。
+> 标题层级、表格样式、措辞习惯、详细程度均应与之保持一致。
+
+{latest}"""
+            sections.append(latest_section)
+
+            if older:
+                history = "\n---\n".join(older)
+                sections.append(f"""## 历史纪要参考（更早的{len(older)}份，供内容连贯性参考）
 
 {history}""")
 

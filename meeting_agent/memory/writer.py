@@ -15,6 +15,7 @@ from meeting_agent.config import (
     TIMELINE_FILE,
     ACTIONS_FILE,
     MINUTES_FILE,
+    MEETING_META_FILE,
     PRE_HINT_FILE,
 )
 from meeting_agent.memory.context import ContextManager
@@ -149,21 +150,42 @@ class MemoryWriter:
         project_dir: Optional[Path] = None,
         count: int = 5,
     ) -> list[str]:
-        """获取最近的会议纪要"""
+        """获取最近的会议纪要，按会议日期倒序排列"""
+        import json
+
         base_dir = project_dir or self.config.meetings_dir
 
         if not base_dir.exists():
             return []
 
-        # 查找所有会议目录
+        # 查找所有有纪要的会议目录，读取会议日期
         meeting_dirs = []
         for item in base_dir.iterdir():
-            if item.is_dir() and not item.name.startswith("."):
-                minutes_file = item / MINUTES_FILE
-                if minutes_file.exists():
-                    meeting_dirs.append((item, minutes_file.stat().st_mtime))
+            if not item.is_dir() or item.name.startswith("."):
+                continue
+            minutes_file = item / MINUTES_FILE
+            if not minutes_file.exists():
+                continue
 
-        # 按修改时间排序
+            # 尝试从 _meeting.json 读取会议日期
+            sort_key: tuple = (None,)
+            meta_file = item / MEETING_META_FILE
+            if meta_file.exists():
+                try:
+                    data = json.loads(meta_file.read_text(encoding="utf-8"))
+                    raw_date = data.get("date")
+                    if raw_date:
+                        sort_key = (str(raw_date),)
+                except Exception:
+                    pass
+
+            # 无法读取日期时回退到文件修改时间（转为字符串确保类型一致）
+            if sort_key == (None,):
+                sort_key = ("",)
+
+            meeting_dirs.append((item, sort_key))
+
+        # 按会议日期倒序
         meeting_dirs.sort(key=lambda x: x[1], reverse=True)
 
         # 读取最近的纪要

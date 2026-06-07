@@ -131,11 +131,11 @@ body {
 }
 
 .transcript-content {
-    font-size: 2rem;
+    font-size: 1.55rem;
 }
 
 .transcript-pane {
-    font-size: 1.7rem;
+    font-size: 1.35rem;
     position: relative;
 }
 
@@ -174,14 +174,24 @@ body {
 
 .transcript-beta-split .subtitle-section { min-height: unset; padding-bottom: 0.4rem; }
 
-.transcript-beta-split .subtitle-entry { margin-bottom: 0.6rem; gap: 0.28rem; }
+.transcript-beta-split .subtitle-entry + .subtitle-entry { margin-top: 0.5em; }
+.transcript-beta-split .subtitle-entry { gap: 0.16em; }
 
 /* Language labels are redundant — the pane header already names the lane */
 .transcript-beta-split .subtitle-label { display: none; }
+.transcript-beta-split .subtitle-line {
+    display: block;
+}
+.transcript-beta-split .subtitle-line.is-secondary {
+    padding-left: 0.9em;
+}
 
-/* Hide timestamps on the compact translation panes */
-.beta-pane-lang1 .subtitle-meta,
-.beta-pane-lang2 .subtitle-meta { display: none; }
+.transcript-beta-split .subtitle-minute {
+    margin: 0.9em 0 0.3em;
+}
+.transcript-beta-split .subtitle-minute:first-child {
+    margin-top: 0;
+}
 
 /* Language-change divider in the Whisper pane */
 .whisper-lang-divider {
@@ -223,30 +233,30 @@ body {
 }
 
 .font-small {
-    font-size: 1.45rem;
+    font-size: 1.2rem;
 }
 
 .font-medium {
-    font-size: 2rem;
+    font-size: 1.55rem;
 }
 
 .font-large {
-    font-size: 2.6rem;
+    font-size: 2rem;
 }
 
 .transcript-content.font-small,
 .transcript-pane.font-small {
-    font-size: 1.45rem;
+    font-size: 1.2rem;
 }
 
 .transcript-content.font-medium,
 .transcript-pane.font-medium {
-    font-size: 2rem;
+    font-size: 1.55rem;
 }
 
 .transcript-content.font-large,
 .transcript-pane.font-large {
-    font-size: 2.6rem;
+    font-size: 2rem;
 }
 
 .transcript-content::-webkit-scrollbar,
@@ -276,14 +286,19 @@ body {
 
 .subtitle-entry,
 .transcript-entry {
-    margin-bottom: 1.15rem;
+    position: relative;
+    margin: 0;
     padding: 0;
     border: none;
     border-radius: 0;
     background: transparent;
     display: flex;
     flex-direction: column;
-    gap: 0.56rem;
+    gap: 0.18em;
+}
+
+.subtitle-entry + .subtitle-entry {
+    margin-top: 0.7em;
 }
 
 .subtitle-section {
@@ -317,54 +332,87 @@ body {
     letter-spacing: 0.04em;
 }
 
-.subtitle-entry:last-child {
-    margin-bottom: 0;
+.subtitle-minute {
+    margin: 1.4em 0 0.45em;
+    color: rgba(154, 166, 199, 0.55);
+    font-size: 0.42em;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    line-height: 1;
+    text-transform: uppercase;
+    font-variant-numeric: tabular-nums;
+}
+
+.subtitle-minute:first-child {
+    margin-top: 0;
 }
 
 .subtitle-line {
     display: grid;
-    grid-template-columns: minmax(2.8rem, auto) 1fr;
+    grid-template-columns: 2.6em 1fr;
     align-items: baseline;
-    column-gap: 0.7rem;
+    column-gap: 0.65em;
+}
+
+.subtitle-line.is-secondary {
+    display: block;
+    padding-left: 3.25em;
+    margin-top: 0.08em;
 }
 
 .subtitle-label,
 .transcript-label {
-    color: var(--subtitle-label);
-    font-size: 0.48em;
-    font-weight: 800;
+    color: rgba(96, 165, 250, 0.7);
+    font-size: 0.4em;
+    font-weight: 700;
     letter-spacing: 0.12em;
-    line-height: 1.1;
+    line-height: 1.4;
     text-transform: uppercase;
 }
 
 .subtitle-text,
 .transcript-main,
 .transcript-translation-row span:last-child {
-    color: #f7f8ff;
-    line-height: 1.26;
+    color: #f6f7ff;
+    line-height: 1.34;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
 }
 
+.subtitle-line.is-secondary .subtitle-text {
+    color: rgba(232, 238, 255, 0.62);
+    font-size: 0.78em;
+    line-height: 1.32;
+    font-style: normal;
+}
+
 .subtitle-meta,
 .transcript-meta {
-    align-self: flex-end;
-    color: var(--muted);
-    font-size: 0.46em;
-    letter-spacing: 0.05em;
-    opacity: 0.7;
+    display: none;
 }
 
 .subtitle-line.is-pending .subtitle-text {
-    color: rgba(238, 242, 255, 0.48);
+    color: rgba(238, 242, 255, 0.42);
 }
 
 .subtitle-line.is-pending .subtitle-label {
-    opacity: 0.68;
+    opacity: 0.6;
 }
 
 .subtitle-live {
+    animation: none;
+    position: relative;
+}
+
+.subtitle-live::before {
+    content: '';
+    position: absolute;
+    left: -0.7em;
+    top: 0.15em;
+    bottom: 0.15em;
+    width: 2px;
+    border-radius: 2px;
+    background: var(--accent);
     animation: subtitlePulse 1.25s ease-in-out infinite;
 }
 

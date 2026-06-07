@@ -1526,21 +1526,46 @@ function renderSubtitleEntry(lines, timestamp, options = {}) {
     const idAttr = options.id ? ` id="${escapeHtml(options.id)}"` : '';
     const className = ['subtitle-entry', options.live ? 'subtitle-live' : '', options.extraClass || '']
         .filter(Boolean).join(' ');
-    const rows = (lines || [])
-        .filter(line => line && (line.text || line.pending))
-        .map(line => `
-            <div class="subtitle-line ${line.pending ? 'is-pending' : ''}">
-                <div class="subtitle-label">${escapeHtml(line.label || getSubtitleLanguageLabel(line.language))}</div>
+    const validLines = (lines || []).filter(line => line && (line.text || line.pending));
+    const rows = validLines.map((line, idx) => {
+        const role = idx === 0 ? 'is-primary' : 'is-secondary';
+        const pending = line.pending ? 'is-pending' : '';
+        const cls = `subtitle-line ${role} ${pending}`.trim();
+        const label = idx === 0
+            ? `<div class="subtitle-label">${escapeHtml(line.label || getSubtitleLanguageLabel(line.language))}</div>`
+            : '';
+        return `
+            <div class="${cls}">
+                ${label}
                 <div class="subtitle-text">${escapeHtml(line.text || '...')}</div>
             </div>
-        `).join('');
+        `;
+    }).join('');
 
     return `
-        <div${idAttr} class="${className}">
+        <div${idAttr} class="${className}" title="${escapeHtml(time)}">
             ${rows}
-            <div class="subtitle-meta">${time}</div>
         </div>
     `;
+}
+
+function formatMinuteLabel(timestamp) {
+    const d = new Date(timestamp || Date.now());
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    return `${hh}:${mm}`;
+}
+
+function renderEntriesWithMinuteGroups(entries, renderFn) {
+    let prevMinute = null;
+    return (entries || []).map((entry) => {
+        const minute = formatMinuteLabel(entry.timestamp);
+        const header = (minute !== prevMinute)
+            ? `<div class="subtitle-minute">${escapeHtml(minute)}</div>`
+            : '';
+        prevMinute = minute;
+        return header + renderFn(entry);
+    }).join('');
 }
 
 function renderLegacyTranscriptEntry(entry) {
@@ -1586,15 +1611,23 @@ function renderRealtimeTranslationPairEntry(entry) {
 
 function renderBetaWhisperSection(entries, liveLines, liveId) {
     let prevLang = null;
-    const body = entries.map((entry) => {
+    let prevMinute = null;
+    const body = (entries || []).map((entry) => {
         const curLang = normalizeRealtimeTranslationLanguage(
             entry.language || entry.originalLanguage || '');
+        const minute = formatMinuteLabel(entry.timestamp);
         const langChanged = prevLang !== null && curLang && prevLang !== curLang;
+        const minuteChanged = minute !== prevMinute;
         prevLang = curLang || prevLang;
-        const divider = langChanged
-            ? `<div class="whisper-lang-divider" data-lang="${escapeHtml(getSubtitleLanguageLabel(curLang))}"></div>`
-            : '';
-        return divider + renderTranscriptEntry(entry);
+        prevMinute = minute;
+        let header = '';
+        if (langChanged) {
+            header += `<div class="whisper-lang-divider" data-lang="${escapeHtml(getSubtitleLanguageLabel(curLang))}"></div>`;
+        }
+        if (minuteChanged) {
+            header += `<div class="subtitle-minute">${escapeHtml(minute)}</div>`;
+        }
+        return header + renderTranscriptEntry(entry);
     }).join('');
     const live = liveLines?.length
         ? renderSubtitleEntry(liveLines, new Date().toISOString(), { id: liveId, live: true })
@@ -1604,7 +1637,7 @@ function renderBetaWhisperSection(entries, liveLines, liveId) {
 }
 
 function renderRealtimePaneSection(title, entries, liveLines, liveId) {
-    const body = entries.map(renderTranscriptEntry).join('');
+    const body = renderEntriesWithMinuteGroups(entries, renderTranscriptEntry);
     const live = liveLines?.length
         ? renderSubtitleEntry(liveLines, new Date().toISOString(), { id: liveId, live: true })
         : '';
@@ -1793,7 +1826,7 @@ function updateDisplay(channel = 'primary') {
 
     const contentHtml = splitVisible
         ? renderRealtimeSplitPane(channel, displayTranscripts)
-        : displayTranscripts.map(renderTranscriptEntry).join('');
+        : renderEntriesWithMinuteGroups(displayTranscripts, renderTranscriptEntry);
 
     if (transcriptSplit && transcriptSplit.style.display !== 'none') {
         if (channel === 'secondary') {
