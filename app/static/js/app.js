@@ -121,6 +121,14 @@ function resetRealtimePaneLiveMap() {
     };
 }
 
+// Beta 全局单调序号：让源转写条目与两路译文条目按到达时序在共享 transcripts 中交错排列，
+// 三列 pane 各自时序对齐。跨 session 不能用 item_id 配对（每路独立），改用时序软对齐。
+let realtimeSegmentSeq = 0;
+function nextRealtimeSegmentOrder() {
+    realtimeSegmentSeq += 1;
+    return realtimeSegmentSeq;
+}
+
 function clearRealtimePaneLive(role) {
     if (!role) {
         resetRealtimePaneLiveMap();
@@ -859,10 +867,9 @@ async function startMeeting() {
         await loadWorkspaceContextPack({ silent: true });
         if (getTranslationMode() === 'realtime_beta') {
             enableSplitView(true);
-            await Promise.all([
-                initRealtimeBetaTranscriptionConnection(),
-                initRealtimeTranslationConnections()
-            ]);
+            // 仅开 2 路翻译 session：第 0 路兼任权威源转写来源（session.input_transcript
+            // 自带源语言转写且自动检测语言，处理中日语码切换），不再额外开独立转写 session。
+            await initRealtimeTranslationConnections();
         } else {
             await initRealtimeConnection();
         }
@@ -938,7 +945,7 @@ async function initRealtimeConnection(options = {}) {
             currentTranscriptIdMap[transcriptKey] = itemId;
             if (betaMode) {
                 realtimePaneLiveMap[targetChannel].original = '';
-                updateDisplay(targetChannel);
+                scheduleDisplayUpdate(targetChannel);
             } else {
                 currentStreamingTextMap.primary = '正在识别...';
                 updateStreamingDisplay('primary');
@@ -956,7 +963,7 @@ async function initRealtimeConnection(options = {}) {
             currentTranscriptIdMap[transcriptKey] = itemId;
             if (betaMode) {
                 realtimePaneLiveMap[targetChannel].original = liveText;
-                updateDisplay(targetChannel);
+                scheduleDisplayUpdate(targetChannel);
             } else {
                 currentStreamingTextMap.primary = liveText;
                 updateStreamingDisplay('primary');
@@ -975,7 +982,7 @@ async function initRealtimeConnection(options = {}) {
                 if (currentTranscriptIdMap[transcriptKey] === itemId) {
                     if (betaMode) {
                         realtimePaneLiveMap[targetChannel].original = '';
-                        updateDisplay(targetChannel);
+                        scheduleDisplayUpdate(targetChannel);
                     } else {
                         currentStreamingTextMap.primary = '';
                     }
@@ -1019,7 +1026,7 @@ async function initRealtimeConnection(options = {}) {
                 confidence: realtimeItem.confidence
             });
             if (betaMode) {
-                updateDisplay(targetChannel);
+                scheduleDisplayUpdate(targetChannel);
             } else {
                 updateDisplay('primary');
             }
@@ -1042,15 +1049,6 @@ async function initRealtimeConnection(options = {}) {
     // 不再传 apiKey，后端从环境变量读取
     await client.connect(mediaStream);
     realtimeClient = client;
-}
-
-async function initRealtimeBetaTranscriptionConnection() {
-    const primaryLang = normalizeRealtimeTranslationLanguage(document.getElementById('primaryLanguage')?.value || '');
-    const secondaryLang = normalizeRealtimeTranslationLanguage(document.getElementById('secondaryLanguage')?.value || '');
-    if (!primaryLang || !secondaryLang || primaryLang === secondaryLang) {
-        throw new Error('Realtime Translation Beta 需要不同的第一语言和第二语言');
-    }
-    await initRealtimeConnection({ beta: true, language: null, channel: 'primary' });
 }
 
 async function initRealtimeTranslationConnections() {
@@ -1088,7 +1086,10 @@ async function initRealtimeTranslationConnections() {
         label: `译为 ${language}`
     }));
 
-    const connectTasks = targets.map(async (target) => {
+    const connectTasks = targets.map(async (target, clientIndex) => {
+        // 第 0 路（目标=第一语言）兼任权威源转写来源：其 session.input_transcript 自带
+        // 源语言转写且自动检测语言（处理中日语码切换），喂给 Whisper pane，省去额外转写 session。
+        const isSourceAuthority = clientIndex === 0;
         const client = new RealtimeTranslationClass({
             targetLanguage: target.language,
             label: target.label,
@@ -1099,7 +1100,16 @@ async function initRealtimeTranslationConnections() {
             onDisconnected: () => {
                 console.log(`Realtime Translation Beta disconnected: ${target.language}`);
             },
-            onInputDelta: () => {},
+            onInputDelta: (delta) => {
+                if (!isSourceAuthority || !delta) return;
+                realtimePaneLiveMap.primary.original =
+                    (realtimePaneLiveMap.primary.original || '') + delta;
+                scheduleDisplayUpdate('primary');
+            },
+            onInputDone: (payload) => {
+                if (!isSourceAuthority) return;
+                commitRealtimeInputTranscript(payload);
+            },
             onOutputDelta: (delta) => {
                 realtimeTranslationOutputMap[target.language] =
                     (realtimeTranslationOutputMap[target.language] || '') + delta;
@@ -1131,7 +1141,7 @@ async function initRealtimeTranslationConnections() {
 }
 
 function renderRealtimeTranslationBeta() {
-    updateDisplay('secondary');
+    scheduleDisplayUpdate('secondary');
 }
 
 function buildRealtimePaneLiveLines(channel = 'primary', role = 'original') {
@@ -1156,18 +1166,21 @@ function createRealtimeTranslationPaneEntry(targetLang, text) {
         language: targetLang,
         text,
         isTranslation: true,
-        isRealtimeTranslationPaneEntry: true
+        isRealtimeTranslationPaneEntry: true,
+        realtimeOrder: nextRealtimeSegmentOrder()
     };
 }
 
 function commitRealtimeTranslationPaneSegments(targetLang, segments) {
-    if (!segments.length) return;
-    segments.forEach((segment) => {
+    // 过滤空段：说目标语言时该路翻译会静默，产生空输出，不应显示/落盘。
+    const nonEmpty = (segments || []).filter(segment => segment && segment.trim());
+    if (!nonEmpty.length) return;
+    nonEmpty.forEach((segment) => {
         insertTranscriptInRealtimeOrder(createRealtimeTranslationPaneEntry(targetLang, segment));
     });
     saveTranscripts();
     updateControls();
-    updateDisplay('secondary');
+    scheduleDisplayUpdate('secondary');
     if (document.getElementById('autoScroll')?.classList.contains('btn-primary')) {
         scrollToBottom('secondary');
     }
@@ -1202,6 +1215,41 @@ function splitCommittedRealtimeTranslationBuffer(targetLang, flush = false) {
     const committed = endsAtBoundary ? segments : segments.slice(0, -1);
     realtimeTranslationBufferMap[targetLang] = endsAtBoundary ? '' : last;
     return committed;
+}
+
+function commitRealtimeInputTranscript({ itemId, transcript } = {}) {
+    // 权威源转写完成：把最终文本切分提交为 original 条目（Whisper pane），并清空 live 文本。
+    // 文本来源优先用完成事件的 transcript，缺失时回退到已累积的 live 文本。
+    const finalText = (transcript && transcript.trim())
+        ? transcript.trim()
+        : (realtimePaneLiveMap.primary.original || '').trim();
+    realtimePaneLiveMap.primary.original = '';
+    scheduleDisplayUpdate('primary');
+    if (!finalText) return;
+    if (isHallucinationText(finalText)) return;
+
+    const baseOrder = nextRealtimeSegmentOrder();
+    const segments = splitTranscriptSentences(finalText, { group: true });
+    segments.forEach((segment, index) => {
+        insertTranscriptInRealtimeOrder(buildTranscriptEntryFromSegment(
+            segment,
+            `rt-input-${itemId || `${Date.now()}-${index}`}`,
+            { order: baseOrder },
+            index,
+            {
+                language: detectLanguage(segment),
+                channel: 'primary',
+                paneRole: 'original',
+                isRealtimeTranscriptionPaneEntry: true
+            }
+        ));
+    });
+    saveTranscripts();
+    rebuildTranslationContext();
+    scheduleDisplayUpdate('primary');
+    if (document.getElementById('autoScroll')?.classList.contains('btn-primary')) {
+        scrollToBottom('primary');
+    }
 }
 
 function commitRealtimeTranslationSegments(targetLang, options = {}) {
@@ -1762,6 +1810,33 @@ function renderStructuredTranscriptEntry(entry) {
         lines.push({ language: 'note', label: 'NOTE', text: notes.join(' · '), pending: true });
     }
     return renderSubtitleEntry(lines, entry.timestamp);
+}
+
+// ---- 渲染节流：合并同一帧内多次 updateDisplay ----
+// 高频 delta 会连续触发 updateDisplay（每次全量 innerHTML 重建），用 rAF 合并：
+// 一帧内多次 scheduleDisplayUpdate(channel) 只会在下一帧各 channel 各渲染一次。
+const _pendingDisplayChannels = new Set();
+let _displayRafScheduled = false;
+
+function scheduleDisplayUpdate(channel = 'primary') {
+    _pendingDisplayChannels.add(channel);
+    if (_displayRafScheduled) return;
+    _displayRafScheduled = true;
+    requestAnimationFrame(() => {
+        _displayRafScheduled = false;
+        const channels = Array.from(_pendingDisplayChannels);
+        _pendingDisplayChannels.clear();
+        channels.forEach((ch) => updateDisplay(ch));
+    });
+}
+
+function flushDisplayUpdate() {
+    // 立即同步刷新所有待渲染 channel，供停止/切换等需要 DOM 即时一致的场合调用。
+    if (!_displayRafScheduled) return;
+    _displayRafScheduled = false;
+    const channels = Array.from(_pendingDisplayChannels);
+    _pendingDisplayChannels.clear();
+    channels.forEach((ch) => updateDisplay(ch));
 }
 
 function updateDisplay(channel = 'primary') {

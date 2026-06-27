@@ -46,6 +46,14 @@ main_bp = Blueprint('main', __name__)
 TRANSCRIPTION_MODEL = os.getenv('TRANSCRIPTION_MODEL', 'gpt-realtime-whisper')
 TRANSLATION_MODEL = os.getenv('TRANSLATION_MODEL', 'gpt-5.4-mini-2026-03-17')
 TRANSLATION_REASONING_EFFORT = os.getenv('TRANSLATION_REASONING_EFFORT', 'low').strip()
+# gpt-realtime-whisper 的延迟/准确率档位：minimal/low/medium/high/xhigh。
+# 值越低首个 delta 越快，但准确率略降；默认 low 适合实时字幕。
+_TRANSCRIPTION_DELAY_OPTIONS = ('minimal', 'low', 'medium', 'high', 'xhigh')
+TRANSCRIPTION_DELAY = os.getenv('TRANSCRIPTION_DELAY', 'low').strip().lower()
+if TRANSCRIPTION_DELAY not in _TRANSCRIPTION_DELAY_OPTIONS:
+    print(f'[config] TRANSCRIPTION_DELAY={TRANSCRIPTION_DELAY!r} 不在 '
+          f'{_TRANSCRIPTION_DELAY_OPTIONS}，回退为 low')
+    TRANSCRIPTION_DELAY = 'low'
 REALTIME_TRANSLATION_MODEL = os.getenv('REALTIME_TRANSLATION_MODEL',
                                        'gpt-realtime-translate')
 REALTIME_TRANSLATION_INPUT_MODEL = os.getenv('REALTIME_TRANSLATION_INPUT_MODEL',
@@ -109,16 +117,21 @@ def _is_gpt_realtime_whisper(model):
 
 
 def _build_realtime_transcription_config(model, language=None, prompt=''):
-    """构造 Realtime transcription 配置，避免发送模型不支持的字段。"""
+    """构造 Realtime transcription 配置，避免发送模型不支持的字段。
+
+    GA 的 gpt-realtime-whisper 在 Realtime session 中不支持 prompt（官方文档
+    明确），因此即使调用方传入也忽略，不下发；delay 支持
+    minimal/low/medium/high/xhigh 五档，由全局 TRANSCRIPTION_DELAY 控制。
+    """
     transcription_config = {'model': model}
     if language:
         transcription_config['language'] = language
     if _is_gpt_realtime_whisper(model):
         # 'delay' 是 gpt-realtime-whisper 的私有扩展字段，官方文档未收录；
-        # 实测可降低首个 delta 延迟，暂保留。
-        transcription_config['delay'] = 'low'
-    if prompt:
-        transcription_config['prompt'] = prompt
+        # 支持 minimal/low/medium/high/xhigh，值越低首个 delta 越快。
+        transcription_config['delay'] = TRANSCRIPTION_DELAY
+    # prompt 在 GA Realtime session 的 gpt-realtime-whisper 上不被支持，这里
+    # 不再下发；保留入参仅为兼容调用方签名，待模型支持后再恢复。
     return transcription_config
 
 

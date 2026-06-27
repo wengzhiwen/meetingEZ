@@ -163,21 +163,17 @@ Realtime transcription 文档列出了支持的转写模型，包括：
 
 只有在明显的多语混说场景下，才建议依赖自动语言识别。
 
-### 5. 使用 `prompt` 注入术语表
+### 5. 术语表：通过后置翻译注入，而非 ASR `prompt`
 
-官方文档支持使用 `prompt` 提供引导文本或关键词。对于真实产品，这非常有价值。
+> 重要：GA 的 `gpt-realtime-whisper` 在 Realtime session 中**不支持 `prompt`**
+> （官方文档已明确）。早期示例里用 `prompt` 注入术语的写法已失效，发送也不会生效。
 
-建议把这些内容注入 `prompt`：
+术语引导改为在后置处理链路完成：稳定模式的 `/api/translate` 会把产品词表
+（人名、品牌、行业术语、缩写等容易识错的专有名词）作为上下文交给翻译模型，
+在生成双向译文时一并校正。这比事后做文本替换更稳，且不依赖 ASR 是否支持 prompt。
 
-- 产品名
-- 品牌名
-- 人名
-- 地名
-- 行业术语
-- 缩写词
-- 容易识错的专有名词
-
-这比事后做文本替换更稳，因为它直接影响模型识别过程。
+注意：`gpt-realtime-translate`（Realtime Translation Beta）同样不支持 prompt/glossary，
+Beta 下术语准确性主要靠模型自身，重要专有名词仍建议人工复核。
 
 ---
 
@@ -421,12 +417,12 @@ client secret 用于安全创建会话，但会话建立后，不应为了“tok
 - 会话类型：`transcription`
 - 音频格式：24kHz mono PCM
 - 模型：`gpt-realtime-whisper`
-- 延迟：`delay: "low"`
-- 语言：已知则显式指定
-- 术语提示：开启，维护一份产品词表
+- 延迟：`delay` 档位可配（`TRANSCRIPTION_DELAY`，默认 `low`，可选 minimal/low/medium/high/xhigh）
+- 语言：已知则显式指定；双语混说场景依赖自动识别
+- 术语提示：GA 不支持 ASR `prompt`；改为在后置翻译中注入产品词表
 - 噪声处理：`near_field`
 - VAD：`gpt-realtime-whisper` 当前不发送 `turn_detection`
-- 分段/出字：依赖 `delay: "low"` 的低延迟流式 transcript deltas
+- 分段/出字：依赖 `delay`（默认 `low`）的低延迟流式 transcript deltas
 - 事件消费：`delta` + `completed`
 - 数据建模：按 `item_id` 管理 live/final 状态
 - 置信度：启用 logprobs，但默认不直接显示百分比
@@ -451,7 +447,7 @@ client secret 用于安全创建会话，但会话建立后，不应为了“tok
 
 - [ ] 明确模型选择
 - [ ] 已配置语言或明确采用自动识别
-- [ ] 已维护术语 prompt
+- [ ] 术语表已维护（经后置翻译注入，非 ASR `prompt`）
 - [ ] 已选择合适的噪声处理模式
 
 ### 状态管理

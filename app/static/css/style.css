@@ -163,6 +163,17 @@ body {
     padding: 0.75rem 1rem;
 }
 
+/* Beta pane 视觉区分：每列左侧细色条，一眼区分原文与两路译文 */
+.transcript-beta-split .beta-pane-whisper {
+    border-left: 3px solid var(--subtitle-label, #60a5fa);
+}
+.transcript-beta-split .beta-pane-lang1 {
+    border-left: 3px solid var(--accent, #5eead4);
+}
+.transcript-beta-split .beta-pane-lang2 {
+    border-left: 3px solid #f0abfc;
+}
+
 .transcript-beta-split .transcript-pane::before {
     font-size: 0.36em;
     margin: -0.15rem 0 0.5rem;
