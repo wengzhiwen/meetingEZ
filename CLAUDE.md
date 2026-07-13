@@ -11,7 +11,7 @@ MeetingEZ 是一个轻量的会议实时转写、按需翻译和会后纪要工�
 - 控制台 `/`：项目选择、会议创建、会议文件/音频/术语/背景管理。
 - 实时页 `/realtime`：采集麦克风或标签页音频，通过 OpenAI Realtime API WebRTC transcription session 做实时转写。
 - 后端只签发短期 Realtime `client secret`，浏览器不保存标准 API Key。
-- 默认使用 Responses API 做转写后翻译；可显式选择 `gpt-realtime-translate` 实验模式。
+- Web 实时页只使用 `gpt-realtime-translate`，不提供翻译方式选择。
 - 仓库仍保留 CLI 会议纪要 Agent，用于离线音频转写、纪要生成和项目记忆维护。
 
 ## 常用命令
@@ -44,8 +44,6 @@ python3 -m py_compile app/routes.py
 
 - `OPENAI_API_KEY`：Realtime transcription/translation client secret 签发、纪要生成。
 - `TRANSCRIPTION_MODEL`：Web 实时转写模型，默认 `gpt-realtime-whisper`。
-- `TRANSLATION_MODEL`：稳定后置翻译模型，默认 `gpt-5.4-mini-2026-03-17`。
-- `TRANSLATION_REASONING_EFFORT`：后置翻译 reasoning 强度，默认 `low`。
 - `REALTIME_TRANSLATION_MODEL`：Web 实时翻译模型，默认 `gpt-realtime-translate`。
 - `REALTIME_TRANSLATION_INPUT_MODEL`：实时翻译的输入转写模型，默认 `gpt-realtime-whisper`。
 - `ACCESS_CODE`：可选访问码；为空时不启用登录保护。
@@ -77,22 +75,18 @@ CLI Agent
 
 ## Web 实时转写链路
 
-当前实时模式是 transcription-only WebRTC：
+当前实时页固定使用 Realtime Translation WebRTC：
 
-1. 前端请求 `POST /api/realtime-session`。
-2. 后端使用 `OPENAI_API_KEY` 调用 `https://api.openai.com/v1/realtime/client_secrets`。
-3. session 配置为 `type: "transcription"`。
-4. `audio.input.transcription.model` 默认是 `gpt-realtime-whisper`。
-5. 音频格式为 24kHz mono PCM，噪声处理为 `near_field`。
-6. `gpt-realtime-whisper` 当前不发送 `turn_detection`，使用 `delay: "low"` 获取低延迟 transcript deltas。
-7. 前端通过 `https://api.openai.com/v1/realtime/calls` 完成 SDP 交换。
-8. DataChannel 处理 `conversation.item.input_audio_transcription.delta` 和 `completed` 事件。
+1. 前端为两种目标语言分别请求 `POST /api/realtime-translation-session`。
+2. 后端使用 `OPENAI_API_KEY` 签发两个 translation client secret。
+3. 前端通过 `/v1/realtime/translations/calls` 建立两路 WebRTC 连接。
+4. 第 0 路 `session.input_transcript.*` 作为权威混合原文。
+5. 两路 `session.output_transcript.*` 分别输出第一语言和第二语言译文。
+6. input/output delta 不保证携带 `item_id`，前端按当前流累积并以 done 或静音超时收尾。
 
 不要把标准 API Key 放入浏览器端代码。不要回退到旧的浏览器 WebSocket + Base64 PCM 推流实现。
 
-### Realtime Translation（实验旁路）
-
-设置面板可从默认的“转写后翻译（稳定）”切换到 Realtime Translation：
+### Realtime Translation
 
 - 调用 `POST /api/realtime-translation-session` 签发 translation client secret。
 - 前端类为 `app/static/js/realtime-translation.js`。
@@ -101,7 +95,7 @@ CLI Agent
 - 为第一语言和第二语言各开一路 translation session，用于混合会议音频的互译效果对比。
 - 第 0 路兼任权威源转写：其 `session.input_transcript` 自带源语言转写并自动检测语言，喂给原文 pane，省去额外转写 session。
 - input/output transcript delta 不保证携带 `item_id`；前端按当前流累积，以 `.done` 或 1.5 秒静音兜底定格。
-- translation session 不支持 `instructions`/`prompt`，术语表/上下文只用于稳定后置翻译链路。
+- translation session 不支持 `instructions`/`prompt`，实时页不提供术语表或提示词注入。
 
 ## 离线会议处理链路
 

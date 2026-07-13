@@ -163,17 +163,14 @@ Realtime transcription 文档列出了支持的转写模型，包括：
 
 只有在明显的多语混说场景下，才建议依赖自动语言识别。
 
-### 5. 术语表：通过后置翻译注入，而非 ASR `prompt`
+### 5. Realtime Translation 不注入术语表
 
 > 重要：GA 的 `gpt-realtime-whisper` 在 Realtime session 中**不支持 `prompt`**
 > （官方文档已明确）。早期示例里用 `prompt` 注入术语的写法已失效，发送也不会生效。
 
-术语引导改为在后置处理链路完成：稳定模式的 `/api/translate` 会把产品词表
-（人名、品牌、行业术语、缩写等容易识错的专有名词）作为上下文交给翻译模型，
-在生成双向译文时一并校正。这比事后做文本替换更稳，且不依赖 ASR 是否支持 prompt。
-
-注意：`gpt-realtime-translate`（Realtime Translation Beta）同样不支持 prompt/glossary，
-Beta 下术语准确性主要靠模型自身，重要专有名词仍建议人工复核。
+当前 Web 实时页只使用 `gpt-realtime-translate`，该模式同样不支持 prompt/glossary。
+术语准确性主要依赖模型自身，重要专有名词仍建议人工复核。`/api/translate`
+仅作为兼容接口保留，不属于当前实时页运行链路。
 
 ---
 
@@ -419,7 +416,7 @@ client secret 用于安全创建会话，但会话建立后，不应为了“tok
 - 模型：`gpt-realtime-whisper`
 - 延迟：`delay` 档位可配（`TRANSCRIPTION_DELAY`，默认 `low`，可选 minimal/low/medium/high/xhigh）
 - 语言：已知则显式指定；双语混说场景依赖自动识别
-- 术语提示：GA 不支持 ASR `prompt`；改为在后置翻译中注入产品词表
+- 术语提示：GA ASR 与 Realtime Translation 都不支持当前产品所需的 prompt/glossary 注入，重要术语需人工复核
 - 噪声处理：`near_field`
 - VAD：`gpt-realtime-whisper` 当前不发送 `turn_detection`
 - 分段/出字：依赖 `delay`（默认 `low`）的低延迟流式 transcript deltas
@@ -447,7 +444,7 @@ client secret 用于安全创建会话，但会话建立后，不应为了“tok
 
 - [ ] 明确模型选择
 - [ ] 已配置语言或明确采用自动识别
-- [ ] 术语表已维护（经后置翻译注入，非 ASR `prompt`）
+- [ ] 重要术语已纳入人工复核清单
 - [ ] 已选择合适的噪声处理模式
 
 ### 状态管理

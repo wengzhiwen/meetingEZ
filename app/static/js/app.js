@@ -1,4 +1,4 @@
-console.log('app.js loaded, build: 20260713a');
+console.log('app.js loaded, build: 20260713d');
 // MeetingEZ - 基于 OpenAI Realtime API (WebRTC) 的实时转写
 // API Key 由后端从环境变量读取，前端不接触
 
@@ -17,8 +17,8 @@ let currentTranscriptIdMap = { primary: null, secondary: null };
 const STORAGE_KEY = 'meetingEZ_transcripts';
 const STORAGE_VERSION = 3;
 const HIDE_BEFORE_KEY = 'meetingEZ_hideBefore';
+const ORIGINAL_TRANSCRIPT_VISIBLE_KEY = 'meetingEZ_originalTranscriptVisible';
 
-let realtimeClient = null;
 let realtimeTranslationClients = [];
 let betaSplitContainer = null;
 let betaPaneWhisper = null;
@@ -77,7 +77,40 @@ function getLanguageMode() {
 }
 
 function getTranslationMode() {
-    return document.getElementById('translationMode')?.value || 'postprocess';
+    return 'realtime_beta';
+}
+
+function isOriginalTranscriptVisible() {
+    return localStorage.getItem(ORIGINAL_TRANSCRIPT_VISIBLE_KEY) !== 'false';
+}
+
+function updateOriginalTranscriptVisibility() {
+    const toggle = document.getElementById('toggleOriginalTranscript');
+    const betaVisible = betaSplitContainer && betaSplitContainer.style.display !== 'none';
+    const originalVisible = isOriginalTranscriptVisible();
+
+    betaSplitContainer?.classList.toggle('original-transcript-hidden', !originalVisible);
+    if (!toggle) return;
+
+    toggle.hidden = !betaVisible;
+    toggle.disabled = !betaVisible;
+    toggle.classList.toggle('btn-primary', originalVisible);
+    toggle.classList.toggle('btn-outline', !originalVisible);
+    toggle.textContent = originalVisible ? '原✓' : '原';
+    toggle.title = originalVisible ? '隐藏原始转写' : '显示原始转写';
+    toggle.setAttribute('aria-label', toggle.title);
+    toggle.setAttribute('aria-pressed', String(originalVisible));
+}
+
+function toggleOriginalTranscript() {
+    localStorage.setItem(
+        ORIGINAL_TRANSCRIPT_VISIBLE_KEY,
+        String(!isOriginalTranscriptVisible())
+    );
+    updateOriginalTranscriptVisibility();
+    if (document.getElementById('autoScroll')?.classList.contains('btn-primary')) {
+        scrollToBottom('secondary');
+    }
 }
 
 function normalizeRealtimeTranslationLanguage(value) {
@@ -86,11 +119,20 @@ function normalizeRealtimeTranslationLanguage(value) {
     return supported.has(normalized) ? normalized : '';
 }
 
-function getRealtimeTranslationLanguageSelection() {
+function syncRealtimeTranslationTargetLanguages() {
     const primaryLang = normalizeRealtimeTranslationLanguage(
         document.getElementById('primaryLanguage')?.value || '');
     const secondaryLang = normalizeRealtimeTranslationLanguage(
         document.getElementById('secondaryLanguage')?.value || '');
+    realtimeTranslationTargetLanguages = primaryLang && secondaryLang && primaryLang !== secondaryLang
+        ? [primaryLang, secondaryLang]
+        : [];
+    updateRealtimeTranslationSplitHeaders();
+    return { primaryLang, secondaryLang };
+}
+
+function getRealtimeTranslationLanguageSelection() {
+    const { primaryLang, secondaryLang } = syncRealtimeTranslationTargetLanguages();
     if (!primaryLang || !secondaryLang || primaryLang === secondaryLang) {
         throw new Error('Realtime Translation 需要选择两种不同的支持语言');
     }
@@ -624,9 +666,13 @@ function loadSettings() {
         document.getElementById('primaryLanguage').value = primaryLang;
     }
 
-    const secondaryLang = pageLaunchContext.secondaryLanguage || localStorage.getItem('meetingEZ_secondaryLanguage') || '';
+    const selectedPrimaryLang = document.getElementById('primaryLanguage').value;
+    const defaultSecondaryLang = selectedPrimaryLang === 'en' ? 'zh' : 'en';
+    const secondaryLang = pageLaunchContext.secondaryLanguage ||
+        localStorage.getItem('meetingEZ_secondaryLanguage') || defaultSecondaryLang;
     const secSelect = document.getElementById('secondaryLanguage');
     if (secSelect) secSelect.value = secondaryLang;
+    syncRealtimeTranslationTargetLanguages();
 
     const savedLanguageMode = pageLaunchContext.languageMode || localStorage.getItem('meetingEZ_languageMode') ||
         (secondaryLang ? 'bilingual' : DEFAULT_LANGUAGE_MODE);
@@ -644,22 +690,7 @@ function loadSettings() {
         }
     }
 
-    const enableCorrection = localStorage.getItem('meetingEZ_enableCorrection');
-    document.getElementById('enableCorrection').checked = enableCorrection !== 'false';
-
-    const enableGlossary = localStorage.getItem('meetingEZ_enableGlossary') === 'true';
-    document.getElementById('enableGlossary').checked = enableGlossary;
-
-    const translationMode = localStorage.getItem('meetingEZ_translationMode') || 'postprocess';
-    const translationModeSelect = document.getElementById('translationMode');
-    if (translationModeSelect) translationModeSelect.value = translationMode;
     updateTranslationModelInfo();
-
-    const glossaryInput = document.getElementById('glossaryInput');
-    if (glossaryInput) {
-        glossaryInput.value = localStorage.getItem('meetingEZ_glossary') || '';
-    }
-    updateGlossaryInputState();
 
     enableSplitView(false);
     updateMeetingEntrySummary();
@@ -683,6 +714,7 @@ function setupEventListeners() {
     document.getElementById('downloadTranscript').addEventListener('click', downloadTranscript);
     document.getElementById('clearTranscript').addEventListener('click', clearTranscript);
     document.getElementById('autoScroll').addEventListener('click', toggleAutoScroll);
+    document.getElementById('toggleOriginalTranscript')?.addEventListener('click', toggleOriginalTranscript);
     document.getElementById('testMicrophone').addEventListener('click', toggleMicrophoneTest);
 
     document.getElementById('audioSourceMic').addEventListener('change', () => {
@@ -715,6 +747,7 @@ function setupEventListeners() {
 
     document.getElementById('primaryLanguage').addEventListener('change', (e) => {
         localStorage.setItem('meetingEZ_primaryLanguage', e.target.value);
+        syncRealtimeTranslationTargetLanguages();
         void loadWorkspaceContextPack({ silent: true });
     });
 
@@ -722,6 +755,7 @@ function setupEventListeners() {
     if (secSelect) {
         secSelect.addEventListener('change', (e) => {
             localStorage.setItem('meetingEZ_secondaryLanguage', (e.target.value || '').trim());
+            syncRealtimeTranslationTargetLanguages();
             void loadWorkspaceContextPack({ silent: true });
         });
     }
@@ -731,28 +765,9 @@ function setupEventListeners() {
         void loadWorkspaceContextPack({ silent: true });
     });
 
-    document.getElementById('translationMode')?.addEventListener('change', (e) => {
-        localStorage.setItem('meetingEZ_translationMode', e.target.value);
-        updateTranslationModelInfo();
-    });
-
     document.getElementById('workspaceProject').addEventListener('change', (e) => {
         localStorage.setItem('meetingEZ_workspaceProject', e.target.value);
         void loadWorkspaceContextPack({ silent: false });
-    });
-
-    document.getElementById('enableCorrection').addEventListener('change', (e) => {
-        localStorage.setItem('meetingEZ_enableCorrection', String(e.target.checked));
-    });
-
-    document.getElementById('enableGlossary').addEventListener('change', (e) => {
-        localStorage.setItem('meetingEZ_enableGlossary', String(e.target.checked));
-        updateGlossaryInputState();
-    });
-
-    document.getElementById('glossaryInput').addEventListener('input', (e) => {
-        localStorage.setItem('meetingEZ_glossary', e.target.value);
-        updateContextPackPreview();
     });
 
     document.getElementById('fontSize').addEventListener('change', (e) => {
@@ -807,11 +822,8 @@ async function startMeeting() {
     try {
         showLoading('正在初始化会议...');
 
-        // Realtime Translation 是当前翻译模式时，先验证目标语言再申请音频权限，
-        // 避免没有可用 session 却进入“会议已开始”的假成功状态。
-        if (getTranslationMode() === 'realtime_beta') {
-            getRealtimeTranslationLanguageSelection();
-        }
+        // 先验证两个目标语言再申请音频权限，避免没有可用 session 却进入假成功状态。
+        const languageSelection = getRealtimeTranslationLanguageSelection();
 
         if (selectedAudioSource === 'tab') {
             try {
@@ -869,14 +881,9 @@ async function startMeeting() {
         startVolumeMonitor(mediaStream);
         meetingStartedAt = Date.now();
         await loadWorkspaceContextPack({ silent: true });
-        if (getTranslationMode() === 'realtime_beta') {
-            enableSplitView(true);
-            // 仅开 2 路翻译 session：第 0 路兼任权威源转写来源（session.input_transcript
-            // 自带源语言转写且自动检测语言），不再额外开独立转写 session。
-            await initRealtimeTranslationConnections();
-        } else {
-            await initRealtimeConnection();
-        }
+        // 仅开 2 路翻译 session：第 0 路兼任权威源转写来源（session.input_transcript
+        // 自带源语言转写且自动检测语言），不再额外开独立转写 session。
+        await initRealtimeTranslationConnections(languageSelection);
 
         isConnected = true;
         isRecording = true;
@@ -888,7 +895,7 @@ async function startMeeting() {
         hideLoading();
         showStatus('会议已开始', 'success');
 
-        enableSplitView(getTranslationMode() === 'realtime_beta');
+        enableSplitView(true);
     } catch (error) {
         console.error('开始会议失败:', error);
         hideLoading();
@@ -897,105 +904,25 @@ async function startMeeting() {
     }
 }
 
-// 稳定模式使用独立 transcription session，完成后再调用后端 Responses 翻译。
-async function initRealtimeConnection() {
-    const RealtimeTranscriptionClass = window.RealtimeTranscription;
-    if (typeof RealtimeTranscriptionClass !== 'function') {
-        throw new Error('RealtimeTranscription 未正确加载');
-    }
-
-    const languageMode = getLanguageMode();
-    const primaryLang = document.getElementById('primaryLanguage')?.value || null;
-    const client = new RealtimeTranscriptionClass({
-        model: 'gpt-realtime-whisper',
-        language: primaryLang,
-        prompt: '',
-        onConnected: () => {
-            showStatus('实时转写已连接', 'success');
-            updateAudioStatus('已连接', 'active');
-        },
-        onDisconnected: () => {
-            if (isRecording) {
-                showStatus('连接断开，尝试重连...', 'error');
-                updateAudioStatus('重连中', '');
-            }
-        },
-        onStatusChange: ({ status, attempt, maxAttempts, delay }) => {
-            if (status === 'connecting') updateAudioStatus('连接中', '');
-            if (status === 'listening') updateAudioStatus('已连接', 'active');
-            if (status === 'reconnecting') {
-                const seconds = delay ? Math.ceil(delay / 1000) : 1;
-                updateAudioStatus('重连中', '');
-                showStatus(`连接中断，${seconds} 秒后重连 (${attempt}/${maxAttempts})`, 'error');
-            }
-        },
-        onSpeechStarted: (itemId) => {
-            currentTranscriptIdMap.primary = itemId;
-            currentStreamingTextMap.primary = '正在识别...';
-            updateStreamingDisplay('primary');
-        },
-        onTranscriptDelta: (delta, itemId, liveText) => {
-            if (!delta) return;
-            currentTranscriptIdMap.primary = itemId;
-            currentStreamingTextMap.primary = liveText;
-            updateStreamingDisplay('primary');
-        },
-        onTranscriptComplete: (transcript, itemId, realtimeItem = {}) => {
-            const finalText = (transcript || '').trim();
-            if (!finalText || isHallucinationText(finalText)) {
-                if (currentTranscriptIdMap.primary === itemId) {
-                    currentStreamingTextMap.primary = '';
-                    currentTranscriptIdMap.primary = null;
-                    updateStreamingDisplay('primary');
-                }
-                return;
-            }
-
-            const entries = splitTranscriptSentences(finalText).map((segment, index) => {
-                const entry = buildTranscriptEntryFromSegment(
-                    segment, itemId, realtimeItem, index);
-                insertTranscriptInRealtimeOrder(entry);
-                return entry;
-            });
-            if (currentTranscriptIdMap.primary === itemId) {
-                currentStreamingTextMap.primary = '';
-                currentTranscriptIdMap.primary = null;
-            }
-            saveTranscripts();
-            rebuildTranslationContext();
-            updateDisplay('primary');
-            entries.forEach((entry) => runPostProcessingForTranscript(entry, languageMode));
-        },
-        onError: (error) => showStatus(getRealtimeErrorMessage(error), 'error')
-    });
-
-    await client.connect(mediaStream);
-    realtimeClient = client;
-}
-
-async function initRealtimeTranslationConnections() {
-    if (getTranslationMode() !== 'realtime_beta') {
-        return;
-    }
-
+async function initRealtimeTranslationConnections(languageSelection = null) {
     const RealtimeTranslationClass = window.RealtimeTranslation;
     if (typeof RealtimeTranslationClass !== 'function') {
         throw new Error('RealtimeTranslation 未正确加载');
     }
 
-    const { primaryLang, secondaryLang } = getRealtimeTranslationLanguageSelection();
+    const { primaryLang, secondaryLang } = languageSelection ||
+        getRealtimeTranslationLanguageSelection();
 
     realtimeTranslationClients = [];
     realtimeTranslationLiveEntryMap = {};
     resetRealtimePaneLiveMap();
     currentStreamingTextMap.primary = '';
     currentStreamingTextMap.secondary = '';
+    realtimeTranslationTargetLanguages = [primaryLang, secondaryLang];
+    updateRealtimeTranslationSplitHeaders();
     enableSplitView(true);
     updateStreamingDisplay('primary');
     updateStreamingDisplay('secondary');
-
-    realtimeTranslationTargetLanguages = [primaryLang, secondaryLang];
-    updateRealtimeTranslationSplitHeaders();
     const targets = realtimeTranslationTargetLanguages.map((language) => ({
         language,
         label: `译为 ${language}`
@@ -1009,11 +936,11 @@ async function initRealtimeTranslationConnections() {
             targetLanguage: target.language,
             label: target.label,
             onConnected: () => {
-                console.log(`Realtime Translation Beta connected: ${target.language}`);
+                console.log(`Realtime Translation connected: ${target.language}`);
                 renderRealtimeTranslationBeta();
             },
             onDisconnected: () => {
-                console.log(`Realtime Translation Beta disconnected: ${target.language}`);
+                console.log(`Realtime Translation disconnected: ${target.language}`);
             },
             onInputDelta: (delta, client, itemId, liveText) => {
                 if (!isSourceAuthority || !delta) return;
@@ -1033,8 +960,8 @@ async function initRealtimeTranslationConnections() {
                 finalizeRealtimeTranslationLiveEntry(target.language, itemId, transcript);
             },
             onError: (error) => {
-                console.error(`Realtime Translation Beta error [${target.language}]:`, error);
-                showStatus(`Realtime Translation Beta 异常: ${error.message || error}`, 'error');
+                console.error(`Realtime Translation error [${target.language}]:`, error);
+                showStatus(`Realtime Translation 异常: ${error.message || error}`, 'error');
             }
         });
         realtimeTranslationClients.push(client);
@@ -1047,13 +974,13 @@ async function initRealtimeTranslationConnections() {
         throw new Error(`Realtime Translation 原文转写会话连接失败: ${results[0].reason?.message || results[0].reason}`);
     }
     if (failures.length) {
-        console.warn('Realtime Translation Beta 部分连接失败:', failures);
+        console.warn('Realtime Translation 部分连接失败:', failures);
         if (failures.length === targets.length) {
-            throw new Error('Realtime Translation Beta 全部连接失败');
+            throw new Error('Realtime Translation 全部连接失败');
         }
-        showStatus(`Realtime Translation Beta ${failures.length} 路连接失败，其余翻译继续`, 'error');
+        showStatus(`Realtime Translation ${failures.length} 路连接失败，其余翻译继续`, 'error');
     } else {
-        showStatus('Realtime Translation Beta 已连接', 'success');
+        showStatus('Realtime Translation 已连接', 'success');
     }
 }
 
@@ -1235,18 +1162,10 @@ async function stopMeeting(options = {}) {
         }
 
         isRecording = false;
-        if (getTranslationMode() === 'realtime_beta') {
-            // 先定格所有未完成的译文 live 条目，再提交原文 live，避免丢失最后半句。
-            finalizeAllRealtimeLiveEntries();
-            commitRealtimePaneLiveBeforeStop();
-        } else {
-            commitActiveStreamingTranscriptBeforeStop();
-        }
+        // 先定格所有未完成的译文 live 条目，再提交原文 live，避免丢失最后半句。
+        finalizeAllRealtimeLiveEntries();
+        commitRealtimePaneLiveBeforeStop();
 
-        if (realtimeClient) {
-            realtimeClient.disconnect();
-            realtimeClient = null;
-        }
         realtimeTranslationClients.forEach(client => client.disconnect());
         realtimeTranslationClients = [];
 
@@ -1280,7 +1199,6 @@ async function stopMeeting(options = {}) {
         currentTranscriptIdMap.primary = null;
         currentTranscriptIdMap.secondary = null;
         realtimeTranslationLiveEntryMap = {};
-        realtimeTranslationTargetLanguages = [];
         resetRealtimePaneLiveMap();
         updateDisplay('primary');
         updateDisplay('secondary');
@@ -1697,7 +1615,9 @@ function updateDisplay(channel = 'primary') {
     transcriptRight = transcriptRight || document.getElementById('transcriptRight');
 
     const splitVisible = transcriptSplit && transcriptSplit.style.display !== 'none';
-    if (!splitVisible && transcripts.length === 0 && !currentStreamingTextMap.primary && !currentStreamingTextMap.secondary) {
+    const betaVisible = betaSplitContainer && betaSplitContainer.style.display !== 'none';
+    if (!splitVisible && !betaVisible && transcripts.length === 0 &&
+        !currentStreamingTextMap.primary && !currentStreamingTextMap.secondary) {
         tc.innerHTML = `
             <div class="welcome-message">
                 <p>欢迎使用 MeetingEZ！</p>
@@ -1714,7 +1634,6 @@ function updateDisplay(channel = 'primary') {
         .slice(-50);
 
     // Beta 3-pane layout: whisper left, lang1/lang2 right
-    const betaVisible = betaSplitContainer && betaSplitContainer.style.display !== 'none';
     if (betaVisible) {
         if (channel === 'primary') {
             const originalEntries = displayTranscripts.filter(entry =>
@@ -1812,8 +1731,8 @@ function updateContextPackPreview() {
 
     if (!currentContextPack) {
         statusEl.textContent = isQuickModeProject(getSelectedWorkspaceProject())
-            ? '当前为快速模式，未加载项目增强包'
-            : '还未加载项目增强包';
+            ? '当前为快速模式，未关联项目上下文'
+            : '还未关联项目上下文';
         statusEl.className = 'status-message info';
         previewEl.textContent = '';
         updateMeetingEntrySummary();
@@ -1821,24 +1740,20 @@ function updateContextPackPreview() {
     }
 
     if (!currentContextPack.projectName) {
-        statusEl.textContent = '当前为快速模式，未加载项目增强包';
+        statusEl.textContent = '当前为快速模式，未关联项目上下文';
         statusEl.className = 'status-message info';
-        previewEl.textContent = '仍会保留实时转写、智能修正和翻译能力。';
+        previewEl.textContent = '仍会使用 Realtime 原文转写与双语流式翻译。';
         updateMeetingEntrySummary();
         return;
     }
 
     const projectName = currentContextPack.projectName || '当前项目';
-    statusEl.textContent = `已加载 ${projectName} 的增强包`;
+    statusEl.textContent = `已关联项目：${projectName}`;
     statusEl.className = 'status-message success';
 
     const pieces = [
-        `语言模式：${currentContextPack.languageMode === 'bilingual' ? '双语言会议' : '单主语言会议'}`,
-        `术语 ${currentContextPack.confirmedTermsCount || 0} 条`
+        `语言模式：${currentContextPack.languageMode === 'bilingual' ? '双语言会议' : '单主语言会议'}`
     ];
-    if (currentContextPack.pendingActions?.length) {
-        pieces.push(`待办摘要 ${currentContextPack.pendingActions.length} 条`);
-    }
     if (currentContextPack.recentMeetings?.length) {
         pieces.push(`近期会议 ${currentContextPack.recentMeetings.length} 条`);
     }
@@ -2076,8 +1991,7 @@ function updateFontSize() {
 
 function disableSettings() {
     ['audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize', 'audioSourceMic',
-        'audioSourceTab', 'enableCorrection', 'enableGlossary', 'glossaryInput',
-        'languageMode', 'workspaceProject', 'translationMode'].forEach(id => {
+        'audioSourceTab', 'languageMode', 'workspaceProject'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.disabled = true;
     });
@@ -2089,8 +2003,7 @@ function disableSettings() {
 
 function enableSettings() {
     ['audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize', 'audioSourceMic',
-        'audioSourceTab', 'enableCorrection', 'enableGlossary', 'glossaryInput',
-        'languageMode', 'workspaceProject', 'translationMode'].forEach(id => {
+        'audioSourceTab', 'languageMode', 'workspaceProject'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.disabled = false;
     });
@@ -2109,6 +2022,7 @@ function enableSplitView(enabled) {
     content.style.display = enabled ? 'none' : 'block';
     transcriptSplit.style.display = (!isBeta && enabled) ? 'grid' : 'none';
     if (betaSplitContainer) betaSplitContainer.style.display = isBeta ? 'grid' : 'none';
+    updateOriginalTranscriptVisibility();
 
     if (enabled) {
         updateRealtimeTranslationSplitHeaders();

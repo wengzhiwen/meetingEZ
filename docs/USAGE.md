@@ -20,12 +20,10 @@ python run.py
 
 - `ACCESS_CODE`
   配置后启用登录页；为空则直接进入应用。
-- `TRANSLATION_MODEL`
-  稳定模式的后置翻译模型，默认 `gpt-5.4-mini-2026-03-17`。
-- `TRANSLATION_REASONING_EFFORT`
-  可选，仅对支持 reasoning 的模型发送；默认 `low`。
 - `REALTIME_TRANSLATION_MODEL`
-  实验性实时翻译模型，默认 `gpt-realtime-translate`。
+  实时翻译模型，默认 `gpt-realtime-translate`。
+- `REALTIME_TRANSLATION_INPUT_MODEL`
+  Realtime Translation 的输入转写模型，默认 `gpt-realtime-whisper`。
 
 参考：[`env.example`](/home/wengzhiwen/meetingEZ/env.example)
 
@@ -62,7 +60,7 @@ python run.py
 - 查看当前项目模式 / 快速模式
 - 选择音频输入源
 - 选择麦克风设备
-- 配置主要语言 / 第二语言
+- 配置两种不同的目标语言
 - 配置语言模式
 - 在项目模式下选择项目增强来源
 - 调整字体大小
@@ -78,16 +76,14 @@ python run.py
 
 ### 5. 字幕显示
 
-转写过程中：
+实时翻译过程中：
 
-- 检测到讲话时，会先显示“正在识别...”
-- 收到 `delta` 后实时更新
-- 收到 `completed` 后写入最终字幕
+- 原始语音通过第 0 路 session 的 input transcript 进入原文栏
+- 两路 output transcript 分别进入第一语言、第二语言栏
+- 收到 delta 后逐字更新，收到 done/completed 后写入最终字幕
 
-如果设置了第二语言：
-
-- 原文先进入列表
-- 翻译完成后在后面插入翻译行
+- 底部 `原` 按钮可隐藏或恢复原文栏
+- 宽屏隐藏原文后，两种译文左右排列；竖屏下保持上下排列
 
 ### 6. 其他工具
 

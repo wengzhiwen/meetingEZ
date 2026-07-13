@@ -113,7 +113,7 @@
 
 ### `POST /api/realtime-session`
 
-创建 OpenAI Realtime transcription session 的 `client secret`。
+创建 OpenAI Realtime transcription session 的 `client secret`。该接口为兼容能力，当前实时页固定使用 Realtime Translation，不调用它。
 
 请求体：
 
@@ -173,7 +173,7 @@
 
 创建 OpenAI Realtime Translation session 的 `client secret`。
 
-该接口用于设置面板显式选择的 Realtime Translation 实验模式。
+该接口是当前实时页的唯一翻译 session 签发入口；前端会为两种目标语言各调用一次。
 
 请求体：
 
@@ -221,9 +221,9 @@
 说明：
 
 - 支持的目标语言按 OpenAI demo 白名单约束：`es`、`pt`、`fr`、`ja`、`ru`、`zh`、`de`、`ko`、`hi`、`id`、`vi`、`it`、`en`。
-- 当前实验模式只创建两路 translation session，分别译入第一语言和第二语言；第 0 路 session 的 input transcript 同时作为权威原文。前端左栏显示原文，右侧两栏显示目标语言字幕。
+- 当前实时页只创建两路 translation session，分别译入第一语言和第二语言；第 0 路 session 的 input transcript 同时作为权威原文。前端显示原文与两栏目标语言字幕，原文栏可隐藏。
 - transcript delta 不保证携带 `item_id`；前端按当前 input/output 流累积，并由 done 事件或短暂停顿完成分段。
-- 混合会议音频没有说话人音轨边界，因此 Beta 输出用于对比和评估，不作为默认正式翻译链路。
+- 混合会议音频没有说话人音轨边界，因此当前链路不做说话人分离。
 
 ### `GET /api/workspace/projects`
 
@@ -278,20 +278,20 @@
 
 ### `POST /api/translate`
 
-默认稳定模式的后置翻译代理。它在 Realtime transcription 完成后调用 Responses API，支持智能修正、术语表、会议上下文和双向翻译，并使用 JSON schema 约束输出。Realtime Translation 实验模式不调用此接口。
+兼容保留的后置翻译代理。它可调用 Responses API 完成智能修正、术语表、会议上下文和双向翻译，但当前实时页固定使用 Realtime Translation，不调用此接口。
 
 ## 前端与 OpenAI Realtime
 
 ### 连接流程
 
-1. 前端请求 `/api/realtime-session`
-2. 后端向 OpenAI 创建 `client secret`
-3. 前端创建 `RTCPeerConnection`
-4. 前端添加音频轨道并创建 `oai-events` data channel
-5. 前端生成 offer
-6. 前端将 SDP POST 到 `https://api.openai.com/v1/realtime/calls`
+1. 前端为两种目标语言分别请求 `/api/realtime-translation-session`
+2. 后端向 OpenAI 创建两个 translation `client secret`
+3. 前端创建两路 `RTCPeerConnection`
+4. 前端把同一音频轨道加入两路连接并创建 data channel
+5. 前端分别生成 offer
+6. 前端将 SDP POST 到 `https://api.openai.com/v1/realtime/translations/calls`
 7. OpenAI 返回 answer SDP
-8. DataChannel 打开后开始接收转写事件
+8. DataChannel 打开后开始接收 input/output transcript 事件
 
 ### 前端处理的关键事件
 
@@ -338,7 +338,6 @@
 - 音频输入源
 - 麦克风设备选择
 - 主要语言 / 第二语言
-- 术语表增强
 - 字体大小
 
 ## 性能日志

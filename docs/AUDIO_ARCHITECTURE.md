@@ -2,24 +2,14 @@
 
 ## 总览
 
-当前 Web 端已经不是旧的“分段上传 + Worker WAV 编码”方案，而是：
+当前 Web 端已经不是旧的“分段上传 + Worker WAV 编码”方案，也不再提供后置翻译与 Realtime 的模式切换，而是：
 
 ```text
 浏览器音频采集
-  -> WebRTC
-  -> OpenAI Realtime transcription
-  -> 前端渲染 live / final transcript
-  -> 后端代理翻译
-  -> 前端回填翻译
-
-可选实验路径：
-
-```text
-同一浏览器音频流
-  -> WebRTC sidecar
+  -> 两路 WebRTC
   -> OpenAI Realtime Translation
-  -> 前端渲染低延迟翻译字幕
-```
+  -> 第 0 路 input transcript 渲染原文
+  -> 两路 output transcript 渲染两种目标语言
 ```
 
 ## 当前数据流
@@ -48,80 +38,41 @@
 
 这条链路只负责 UI，不参与转写上行。
 
-### 3. Realtime 连接
+### 3. Realtime Translation 连接
 
-前端类：[`app/static/js/realtime-transcription.js`](/home/wengzhiwen/meetingEZ/app/static/js/realtime-transcription.js)
+前端类：[`app/static/js/realtime-translation.js`](/home/wengzhiwen/meetingEZ/app/static/js/realtime-translation.js)
 
 流程：
 
-1. 请求后端 `/api/realtime-session`
-2. 获取 `client secret`
-3. 创建 `RTCPeerConnection`
+1. 为第一语言和第二语言分别请求后端 `/api/realtime-translation-session`
+2. 获取两个 `client secret`
+3. 创建两路 `RTCPeerConnection`
 4. 将音频轨道加入 PeerConnection
 5. 创建 `oai-events` DataChannel
-6. 发送 SDP offer 到 OpenAI `/v1/realtime/calls`
+6. 发送 SDP offer 到 OpenAI `/v1/realtime/translations/calls`
 7. 设置 answer SDP
 8. 等待 DataChannel 打开
 
-## OpenAI Session 配置
+## OpenAI Translation Session 配置
 
 当前后端 session 创建逻辑在 [`app/routes.py`](/home/wengzhiwen/meetingEZ/app/routes.py)。
 
-关键配置：
-
-- `type: "transcription"`
-- `audio.input.format.type: "audio/pcm"`
-- `audio.input.format.rate: 24000`
-- `audio.input.noise_reduction.type: "near_field"`
-- `audio.input.transcription.model: "gpt-realtime-whisper"`
-- `audio.input.transcription.delay: "low"`
-- `include: ["item.input_audio_transcription.logprobs"]`
-
-说明：`gpt-realtime-whisper` 当前不接受 `turn_detection` 字段；默认依赖 `delay: "low"` 的低延迟流式 transcript deltas。
+关键配置是目标语言、`gpt-realtime-translate` 和内部输入转写模型 `gpt-realtime-whisper`。Realtime Translation 不支持提示词或术语表注入。
 
 ## 前端状态机
 
-前端按 `item_id` 管理转写条目：
-
-- `speech_started`
-  创建或刷新当前识别状态
-- `delta`
-  更新 live text
-- `completed`
-  生成 final text 并写入记录
-
-这避免了简单按消息到达顺序拼接导致的错乱。
+前端分别维护 input/output 当前流；事件可能没有 `item_id`，因此使用 `item_id`、`response_id` 或本地流序号聚合，以 done/completed 或 1.5 秒静音超时完成分段。
 
 ## 翻译链路
 
-转写完成后，前端调用后端 `/api/translate`。
-
-后端职责：
-
-- 调用 OpenAI Responses API
-- 按翻译模型能力有条件附带 `reasoning.effort`
-- 使用 JSON schema 约束输出
-- 做语言归一化和结果收口
-- 避免把原文同语种文本当作“翻译”
-
-前端职责：
-
-- 先显示原文
-- 翻译完成后在原文后插入翻译行
-- 维护少量翻译上下文 `translationContext`
-
-### Realtime Translation 实验模式
-
-设置面板中的“翻译方式”可切换到实验模式。
-
-- 实验模式创建两个 `RealtimeTranslation` 会话，分别以第一语言和第二语言为目标语言。
+- 页面固定创建两个 `RealtimeTranslation` 会话，分别以第一语言和第二语言为目标语言。
 - 第 0 路会话的 `session.input_transcript.*` 同时作为权威混合原文，进入左栏。
 - 两路 `session.output_transcript.*` 分别进入右侧两个目标语言栏。
 - 后端通过 `/api/realtime-translation-session` 签发 translation client secret。
 - 前端通过 `/v1/realtime/translations/calls` 建立 WebRTC 连接。
 - 消费 `session.input_transcript.delta`、`session.output_transcript.delta` 及其 done/completed 变体。
 - 事件不保证有 `item_id`，因此按当前流累积，以 done 或 1.5 秒静音兜底完成分段。
-- 左右两栏独立分段、独立打时间标签、独立滚动。由于会议音频是混合流，没有说话人音轨边界，该模式不做说话人分离，也不在前端按脚本文字过滤原文。
+- 三栏独立分段、独立打时间标签、独立滚动；原文栏可隐藏。由于会议音频是混合流，没有说话人音轨边界，该模式不做说话人分离，也不在前端按脚本文字过滤原文。
 
 ## 当前 UI 架构
 
