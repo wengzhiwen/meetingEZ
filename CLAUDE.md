@@ -11,7 +11,7 @@ MeetingEZ 是一个轻量的会议实时转写、按需翻译和会后纪要工�
 - 控制台 `/`：项目选择、会议创建、会议文件/音频/术语/背景管理。
 - 实时页 `/realtime`：采集麦克风或标签页音频，通过 OpenAI Realtime API WebRTC transcription session 做实时转写。
 - 后端只签发短期 Realtime `client secret`，浏览器不保存标准 API Key。
-- 后端代理翻译请求，默认翻译模型为 `gpt-5.4-mini-2026-03-17`。
+- 默认使用 Responses API 做转写后翻译；可显式选择 `gpt-realtime-translate` 实验模式。
 - 仓库仍保留 CLI 会议纪要 Agent，用于离线音频转写、纪要生成和项目记忆维护。
 
 ## 常用命令
@@ -42,10 +42,12 @@ python3 -m py_compile app/routes.py
 
 配置来自 `.env`，主要入口在 `meeting_agent/config.py` 和 `app/routes.py`。
 
-- `OPENAI_API_KEY`：Realtime client secret 签发、翻译代理、纪要生成。
+- `OPENAI_API_KEY`：Realtime transcription/translation client secret 签发、纪要生成。
 - `TRANSCRIPTION_MODEL`：Web 实时转写模型，默认 `gpt-realtime-whisper`。
-- `TRANSLATION_MODEL`：后置翻译模型，默认 `gpt-5.4-mini-2026-03-17`。
-- `TRANSLATION_REASONING_EFFORT`：翻译 reasoning 强度，默认 `low`，仅对支持 reasoning 的模型发送。
+- `TRANSLATION_MODEL`：稳定后置翻译模型，默认 `gpt-5.4-mini-2026-03-17`。
+- `TRANSLATION_REASONING_EFFORT`：后置翻译 reasoning 强度，默认 `low`。
+- `REALTIME_TRANSLATION_MODEL`：Web 实时翻译模型，默认 `gpt-realtime-translate`。
+- `REALTIME_TRANSLATION_INPUT_MODEL`：实时翻译的输入转写模型，默认 `gpt-realtime-whisper`。
 - `ACCESS_CODE`：可选访问码；为空时不启用登录保护。
 - `OPENROUTER_API_KEY`：离线文件 ASR 的首选 OpenRouter Chirp 3。
 - `ZHIPU_API_KEY`：OpenRouter ASR 不可用时的降级 ASR。
@@ -88,17 +90,18 @@ CLI Agent
 
 不要把标准 API Key 放入浏览器端代码。不要回退到旧的浏览器 WebSocket + Base64 PCM 推流实现。
 
-### Realtime Translation Beta
+### Realtime Translation（实验旁路）
 
-设置面板可选择实验性 `Realtime Translation Beta`：
+设置面板可从默认的“转写后翻译（稳定）”切换到 Realtime Translation：
 
-- 默认仍使用“转写后翻译（稳定）”。
-- Beta 额外调用 `POST /api/realtime-translation-session` 签发 translation client secret。
+- 调用 `POST /api/realtime-translation-session` 签发 translation client secret。
 - 前端类为 `app/static/js/realtime-translation.js`。
 - WebRTC endpoint 为 `/v1/realtime/translations/calls`。
 - 模型默认 `gpt-realtime-translate`，输入转写模型默认 `gpt-realtime-whisper`。
-- Beta 会为第一语言和第二语言各开一路 translation session，用于混合会议音频的互译效果对比。
-- 由于没有说话人音轨边界，Beta 输出不作为默认正式翻译链路。
+- 为第一语言和第二语言各开一路 translation session，用于混合会议音频的互译效果对比。
+- 第 0 路兼任权威源转写：其 `session.input_transcript` 自带源语言转写并自动检测语言，喂给原文 pane，省去额外转写 session。
+- input/output transcript delta 不保证携带 `item_id`；前端按当前流累积，以 `.done` 或 1.5 秒静音兜底定格。
+- translation session 不支持 `instructions`/`prompt`，术语表/上下文只用于稳定后置翻译链路。
 
 ## 离线会议处理链路
 

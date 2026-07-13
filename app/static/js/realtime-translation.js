@@ -6,7 +6,7 @@
  * also emits a source-language transcript (session.input_transcript.*) which the
  * Beta UI can surface as the original caption.
  */
-console.log('realtime-translation.js loaded, build: 20260509b');
+console.log('realtime-translation.js loaded, build: 20260713a');
 
 class RealtimeTranslation {
     constructor(options = {}) {
@@ -27,6 +27,22 @@ class RealtimeTranslation {
         this.reconnectAttempts = 0;
         this._intentionalClose = false;
         this._reconnectTimer = null;
+        // 用稳定 stream key 管理 input/output 的 live/final。服务端有 item_id/response_id
+        // 时优先使用，否则生成本地序号；input/output 各自拥有独立命名空间。
+        this.inputItems = {};
+        this.outputItems = {};
+        // session.created 门禁：DataChannel 打开后等首个 session.created 再置 connected。
+        this._sessionReady = false;
+        this._dcOpenPending = false;
+        this._sessionGateTimer = null;
+        // Translation transcript delta 不保证携带 item_id。按 input/output 各维护
+        // 一个当前流，并用短暂停顿作为兜底完成边界（与 sokuji 的 pairing 思路一致）。
+        this._transcriptSequence = 0;
+        this._transcriptSilenceMs = 1500;
+        this._transcriptStreams = {
+            input: { current: null, timer: null, lastFinalized: null },
+            output: { current: null, timer: null, lastFinalized: null }
+        };
         this.options = {
             onConnected: options.onConnected || null,
             onDisconnected: options.onDisconnected || null,
@@ -135,6 +151,22 @@ class RealtimeTranslation {
         return clientSecret;
     }
 
+    _markConnected(reason) {
+        if (this.isConnected) return;
+        if (this._sessionGateTimer) {
+            clearTimeout(this._sessionGateTimer);
+            this._sessionGateTimer = null;
+        }
+        this._sessionReady = true;
+        this._dcOpenPending = false;
+        this.isConnected = true;
+        this.reconnectAttempts = 0;
+        console.log(`RealtimeTranslation [${this.label}] connected (${reason})`);
+        if (this.options.onConnected) {
+            this.options.onConnected(this);
+        }
+    }
+
     _attemptReconnect() {
         if (this._intentionalClose) return;
         // Skip if already back online, mid-connect, or with a reconnect pending.
@@ -164,12 +196,12 @@ class RealtimeTranslation {
 
     _setupDataChannel() {
         this.dc.onopen = () => {
-            this.isConnected = true;
-            this.reconnectAttempts = 0;
             console.log(`RealtimeTranslation [${this.label}] DataChannel opened`);
-            if (this.options.onConnected) {
-                this.options.onConnected(this);
-            }
+            this._dcOpenPending = true;
+            // 等 session.created 再 onConnected；8s 超时兜底，防止 session.created 丢包时卡在 connecting。
+            if (this._sessionGateTimer) clearTimeout(this._sessionGateTimer);
+            this._sessionGateTimer = setTimeout(
+                () => this._markConnected('session_created_timeout'), 8000);
         };
         this.dc.onclose = () => {
             this.isConnected = false;
@@ -201,10 +233,17 @@ class RealtimeTranslation {
 
         const type = event.type;
         const isDelta = type === 'session.input_transcript.delta'
-            || type === 'session.output_transcript.delta';
+            || type === 'conversation.item.input_audio_transcription.delta'
+            || type === 'session.output_transcript.delta'
+            || type === 'response.output_audio_transcript.delta';
         // delta 事件高频，仅在非常规事件时打印，避免控制台刷屏。
         if (!isDelta) {
             console.log(`RealtimeTranslation [${this.label}] recv:`, type, event);
+        }
+
+        if (type === 'session.created' || type === 'translation_session.created') {
+            this._markConnected('session_created');
+            return;
         }
 
         if (type === 'error') {
@@ -214,43 +253,153 @@ class RealtimeTranslation {
             return;
         }
 
-        if (type === 'session.input_transcript.delta' && typeof event.delta === 'string') {
-            if (this.options.onInputDelta) {
-                this.options.onInputDelta(event.delta, this);
-            }
+        if ((type === 'session.input_transcript.delta'
+            || type === 'conversation.item.input_audio_transcription.delta')
+            && typeof event.delta === 'string') {
+            this._appendTranscriptDelta('input', event);
             return;
         }
 
         // input 转写完成（事件名以实测为准，兼容 .done / .completed）
         if (type === 'session.input_transcript.done'
-            || type === 'session.input_transcript.completed') {
-            if (this.options.onInputDone) {
-                this.options.onInputDone(
-                    { itemId: event.item_id, transcript: event.transcript || event.text || '' },
-                    this);
-            }
+            || type === 'session.input_transcript.completed'
+            || type === 'conversation.item.input_audio_transcription.completed') {
+            this._finalizeTranscriptStream('input', event);
             return;
         }
 
-        if (type === 'session.output_transcript.delta' && typeof event.delta === 'string') {
-            if (this.options.onOutputDelta) {
-                this.options.onOutputDelta(event.delta, this);
-            }
+        if ((type === 'session.output_transcript.delta'
+            || type === 'response.output_audio_transcript.delta')
+            && typeof event.delta === 'string') {
+            this._appendTranscriptDelta('output', event);
             return;
         }
 
         // 译文完成
         if (type === 'session.output_transcript.done'
-            || type === 'session.output_transcript.completed') {
-            if (this.options.onOutputDone) {
-                this.options.onOutputDone(
-                    { itemId: event.item_id, transcript: event.transcript || event.text || '' },
-                    this);
-            }
+            || type === 'session.output_transcript.completed'
+            || type === 'response.output_audio_transcript.done') {
+            this._finalizeTranscriptStream('output', event);
         }
     }
 
+    _eventTranscriptKey(kind, event = {}) {
+        return event.item_id || event.response_id || null;
+    }
+
+    _nextTranscriptKey(kind) {
+        this._transcriptSequence += 1;
+        return `${kind}-stream-${this._transcriptSequence}`;
+    }
+
+    _appendTranscriptDelta(kind, event) {
+        const stream = this._transcriptStreams[kind];
+        const explicitKey = this._eventTranscriptKey(kind, event);
+        if (stream.current && explicitKey && stream.current.explicitKey
+            && stream.current.explicitKey !== explicitKey) {
+            this._finalizeTranscriptStream(kind, {});
+        }
+
+        if (!stream.current) {
+            stream.current = {
+                key: explicitKey || this._nextTranscriptKey(kind),
+                explicitKey,
+                live: '',
+                updatedAt: Date.now()
+            };
+        }
+
+        stream.current.live += event.delta;
+        stream.current.updatedAt = Date.now();
+        const itemMap = kind === 'input' ? this.inputItems : this.outputItems;
+        itemMap[stream.current.key] = {
+            live: stream.current.live,
+            final: null,
+            updatedAt: stream.current.updatedAt
+        };
+
+        const callback = kind === 'input'
+            ? this.options.onInputDelta
+            : this.options.onOutputDelta;
+        if (callback) {
+            callback(event.delta, this, stream.current.key, stream.current.live);
+        }
+        this._resetTranscriptSilenceTimer(kind);
+    }
+
+    _resetTranscriptSilenceTimer(kind) {
+        const stream = this._transcriptStreams[kind];
+        if (stream.timer) clearTimeout(stream.timer);
+        stream.timer = setTimeout(() => {
+            stream.timer = null;
+            this._finalizeTranscriptStream(kind, {});
+        }, this._transcriptSilenceMs);
+    }
+
+    _finalizeTranscriptStream(kind, event = {}) {
+        const stream = this._transcriptStreams[kind];
+        if (stream.timer) {
+            clearTimeout(stream.timer);
+            stream.timer = null;
+        }
+
+        const explicitKey = this._eventTranscriptKey(kind, event);
+        const eventText = event.transcript || event.text || '';
+        const current = stream.current;
+        const transcript = (eventText || current?.live || '').trim();
+        const itemId = explicitKey || current?.key || null;
+        if (!transcript || !itemId) {
+            stream.current = null;
+            return;
+        }
+
+        const finalizedAt = Date.now();
+        const last = stream.lastFinalized;
+        if (!current && last && finalizedAt - last.at < 10000
+            && ((explicitKey && explicitKey === last.explicitKey)
+                || (!explicitKey && transcript === last.transcript))) {
+            stream.current = null;
+            return;
+        }
+
+        const itemMap = kind === 'input' ? this.inputItems : this.outputItems;
+        itemMap[itemId] = { live: transcript, final: transcript, updatedAt: finalizedAt };
+        stream.lastFinalized = { explicitKey, transcript, at: finalizedAt };
+        stream.current = null;
+
+        const callback = kind === 'input'
+            ? this.options.onInputDone
+            : this.options.onOutputDone;
+        if (callback) callback({ itemId, transcript }, this);
+    }
+
+    _clearTranscriptStreams() {
+        Object.values(this._transcriptStreams).forEach((stream) => {
+            if (stream.timer) clearTimeout(stream.timer);
+            stream.timer = null;
+            stream.current = null;
+            stream.lastFinalized = null;
+        });
+    }
+
+    getInputItems() {
+        return this.inputItems;
+    }
+
+    getOutputItems() {
+        return this.outputItems;
+    }
+
     _teardownPeer() {
+        if (this._sessionGateTimer) {
+            clearTimeout(this._sessionGateTimer);
+            this._sessionGateTimer = null;
+        }
+        this._sessionReady = false;
+        this._dcOpenPending = false;
+        this._clearTranscriptStreams();
+        this.inputItems = {};
+        this.outputItems = {};
         if (this.dc) {
             // Null handlers before close so teardown doesn't trigger reconnect.
             this.dc.onmessage = null;

@@ -167,13 +167,13 @@
   - 顶层 `value` / `expires_at`
   - 嵌套 `client_secret.value` / `client_secret.expires_at`
 - `gpt-realtime-whisper` 当前不接受 `turn_detection` 字段；默认依赖 `delay: "low"` 的低延迟流式 transcript deltas。
-- `gpt-realtime-whisper` 不支持 `prompt` 字段；默认转写链路发送 `model`、ISO-639-1 短码 `language` 和 `delay`，Realtime Translation Beta 的原文转写链路不发送 `language`，让一路 Whisper 输出混合会议原文。
+- `gpt-realtime-whisper` 不支持 `prompt` 字段；默认转写链路发送 `model`、ISO-639-1 短码 `language` 和 `delay`，Realtime Translation 的原文转写链路不发送 `language`，让一路 Whisper 输出混合会议原文。
 
 ### `POST /api/realtime-translation-session`
 
 创建 OpenAI Realtime Translation session 的 `client secret`。
 
-该接口仅用于前端 `Realtime Translation Beta` 实验模式。默认转写和后置翻译流程不依赖它。
+该接口用于设置面板显式选择的 Realtime Translation 实验模式。
 
 请求体：
 
@@ -221,7 +221,8 @@
 说明：
 
 - 支持的目标语言按 OpenAI demo 白名单约束：`es`、`pt`、`fr`、`ja`、`ru`、`zh`、`de`、`ko`、`hi`、`id`、`vi`、`it`、`en`。
-- 当前 Beta 模式会启动一路不限定输入语言的 `gpt-realtime-whisper` 原文转写链路，并对第一语言和第二语言各创建一路 translation session。前端使用左右双栏：左栏显示混合原文转写，右栏上下显示译入第一语言和译入第二语言的实时字幕。
+- 当前实验模式只创建两路 translation session，分别译入第一语言和第二语言；第 0 路 session 的 input transcript 同时作为权威原文。前端左栏显示原文，右侧两栏显示目标语言字幕。
+- transcript delta 不保证携带 `item_id`；前端按当前 input/output 流累积，并由 done 事件或短暂停顿完成分段。
 - 混合会议音频没有说话人音轨边界，因此 Beta 输出用于对比和评估，不作为默认正式翻译链路。
 
 ### `GET /api/workspace/projects`
@@ -271,54 +272,13 @@
   "glossaryLines": ["MeetingEZ | 米听易"],
   "pendingActions": ["整理评审反馈"],
   "recentMeetings": ["2026-03-23 需求评审"],
-  "realtimePrompt": "你正在执行会议实时转写..."
+  "realtimePrompt": ""
 }
 ```
 
 ### `POST /api/translate`
 
-后端代理翻译请求，避免前端暴露标准 API Key。
-
-请求体：
-
-```json
-{
-  "text": "こんにちは",
-  "primaryLanguage": "zh",
-  "secondaryLanguage": "ja",
-  "originalLanguageHint": "ja",
-  "context": "[1] (zh) 上一条上下文",
-  "model": "gpt-5.4-mini-2026-03-17",
-  "reasoningEffort": "low"
-}
-```
-
-当前行为：
-
-- 默认模型来自环境变量 `TRANSLATION_MODEL`
-- 默认为 `gpt-5.4-mini-2026-03-17`
-- 可选 reasoning effort 来自环境变量 `TRANSLATION_REASONING_EFFORT`
-- 默认为 `low`
-- 当前代码仅在翻译模型名以 `gpt-5` 开头时发送 `reasoning.effort`
-- 支持 `languageMode`、`meetingContext`、术语表增强输入
-- 输出严格 JSON
-- 后端会做结果清洗，防止“同语种翻译”
-
-返回体：
-
-```json
-{
-  "originalLanguage": "ja",
-  "primaryTranslation": "你好",
-  "secondaryTranslation": null
-}
-```
-
-规则：
-
-- 原文是第一语言：`primaryTranslation = null`
-- 原文是第二语言：`secondaryTranslation = null`
-- 原文是其他语言：只翻到第一语言
+默认稳定模式的后置翻译代理。它在 Realtime transcription 完成后调用 Responses API，支持智能修正、术语表、会议上下文和双向翻译，并使用 JSON schema 约束输出。Realtime Translation 实验模式不调用此接口。
 
 ## 前端与 OpenAI Realtime
 

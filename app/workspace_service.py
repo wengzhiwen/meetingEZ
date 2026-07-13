@@ -618,34 +618,6 @@ def build_context_pack(
     primary = (primary_language or "zh-CN").strip()
     secondary = (secondary_language or "").strip()
 
-    realtime_prompt_parts = [
-        "你正在执行会议实时转写，请优先保证术语和人名的准确性。",
-    ]
-    if normalized_language_mode == "single_primary":
-        realtime_prompt_parts.append(f"这是一场单主语言会议，主要语言是 {primary}。")
-        realtime_prompt_parts.append("允许出现少量外语技术词、缩写或产品名，应尽量保留原始写法。")
-        realtime_prompt_parts.append("不要为了看起来更自然而擅自把术语意译或汉化。")
-    else:
-        realtime_prompt_parts.append(
-            f"这是一场双语言会议，主要语言是 {primary}，第二语言是 {secondary or '未指定'}。")
-        realtime_prompt_parts.append("请尽量保持原始语言，不要把中文和日语等混淆。")
-        realtime_prompt_parts.append("人名、产品名、缩写优先按术语表中的标准写法输出。")
-
-    if confirmed_terms:
-        top_terms = "、".join(entry.canonical for entry in confirmed_terms[:12])
-        realtime_prompt_parts.append(f"高优先级术语：{top_terms}")
-
-    # 团队成员昵称→标准名映射
-    nickname_mappings = []
-    for member in (project_meta.team or []):
-        if member.nickname and member.nickname != member.name:
-            nickname_mappings.append(f"{member.nickname}→{member.name}")
-    if nickname_mappings:
-        realtime_prompt_parts.append(f"团队成员别名映射：{'、'.join(nickname_mappings)}")
-
-    if recent_meetings:
-        realtime_prompt_parts.append(f"近期相关会议：{'；'.join(recent_meetings[:4])}")
-
     action_lines = []
     for action in pending_actions[:6]:
         owner = action.owner or "未指定"
@@ -670,7 +642,7 @@ def build_context_pack(
         "glossaryLines": glossary_lines,
         "pendingActions": action_lines,
         "recentMeetings": recent_meetings,
-        "realtimePrompt": " ".join(realtime_prompt_parts),
+        "realtimePrompt": "",
     }
 
 

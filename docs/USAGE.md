@@ -21,9 +21,11 @@ python run.py
 - `ACCESS_CODE`
   配置后启用登录页；为空则直接进入应用。
 - `TRANSLATION_MODEL`
-  默认 `gpt-5.4-mini-2026-03-17`
+  稳定模式的后置翻译模型，默认 `gpt-5.4-mini-2026-03-17`。
 - `TRANSLATION_REASONING_EFFORT`
-  可选。仅对支持 reasoning 的翻译模型生效；默认 `low`。
+  可选，仅对支持 reasoning 的模型发送；默认 `low`。
+- `REALTIME_TRANSLATION_MODEL`
+  实验性实时翻译模型，默认 `gpt-realtime-translate`。
 
 参考：[`env.example`](/home/wengzhiwen/meetingEZ/env.example)
 

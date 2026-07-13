@@ -110,16 +110,17 @@
 - 翻译完成后在原文后插入翻译行
 - 维护少量翻译上下文 `translationContext`
 
-### Realtime Translation Beta
+### Realtime Translation 实验模式
 
 设置面板中的“翻译方式”可切换到实验模式。
 
-- Beta 模式会同时启动一路不限定输入语言的 `RealtimeTranscription` 链路和两个 `RealtimeTranslation` 会话。
-- `RealtimeTranscription` 负责混合会议原文转写，进入左栏“原文转写”区块。
-- 两个 `RealtimeTranslation` 会话分别以第一语言和第二语言为目标语言；两个目标语言的输出都进入右栏，并按目标语言分成上下两个区块。
+- 实验模式创建两个 `RealtimeTranslation` 会话，分别以第一语言和第二语言为目标语言。
+- 第 0 路会话的 `session.input_transcript.*` 同时作为权威混合原文，进入左栏。
+- 两路 `session.output_transcript.*` 分别进入右侧两个目标语言栏。
 - 后端通过 `/api/realtime-translation-session` 签发 translation client secret。
 - 前端通过 `/v1/realtime/translations/calls` 建立 WebRTC 连接。
-- 消费 `session.input_transcript.delta` 和 `session.output_transcript.delta`。
+- 消费 `session.input_transcript.delta`、`session.output_transcript.delta` 及其 done/completed 变体。
+- 事件不保证有 `item_id`，因此按当前流累积，以 done 或 1.5 秒静音兜底完成分段。
 - 左右两栏独立分段、独立打时间标签、独立滚动。由于会议音频是混合流，没有说话人音轨边界，该模式不做说话人分离，也不在前端按脚本文字过滤原文。
 
 ## 当前 UI 架构

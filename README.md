@@ -7,7 +7,7 @@
 - OpenAI Realtime API WebRTC transcription session
 - 极小 Flask 后端签发 `client secret`
 - 后端代理翻译请求，前端不再保存 API Key
-- 可选 OpenAI Realtime Translation Beta，用于左右双栏显示原文转写与双语实时翻译
+- 可选 OpenAI Realtime Translation，用于三栏显示原文与双语流式翻译
 
 ## 当前特性
 
@@ -15,9 +15,9 @@
 - 实时转写：`gpt-realtime-whisper`
 - 连接方式：WebRTC + DataChannel
 - 分段策略：`gpt-realtime-whisper` 低延迟流式输出，`delay: "low"`，不发送 `turn_detection`
-- 后置翻译：默认 `gpt-5.4-mini-2026-03-17`，可用 `TRANSLATION_MODEL` 覆盖
-- 实时翻译实验模式：可选 `gpt-realtime-translate`，一路 `gpt-realtime-whisper` 输出混合原文转写，另开两路 translation session 分别译入第一语言和第二语言
-- 推理强度：默认 `low`，可用 `TRANSLATION_REASONING_EFFORT` 覆盖，仅对支持 reasoning 的翻译模型生效
+- 稳定翻译：默认在 `gpt-realtime-whisper` 转写完成后调用 Responses API，支持智能修正、术语表和项目上下文
+- 实时翻译实验模式：创建两路 `gpt-realtime-translate` session，分别译入第一语言和第二语言；第 0 路的 input transcript 同时作为权威原文
+- Translation transcript delta 不依赖 `item_id`，按当前流累积，并以 done 事件或短暂停顿完成分段
 - 访问控制：可选 `ACCESS_CODE` 登录页
 - 项目协同：项目模式下可加载术语、近期会议和待办摘要增强实时处理
 - UI：控制台首页 + 实时页全屏字幕视图 + 底部吸附工具栏 + 右下角设置浮层
@@ -42,9 +42,9 @@ python run.py
 - `ACCESS_CODE`
   可选。为空时不启用登录保护。
 - `TRANSLATION_MODEL`
-  可选。默认 `gpt-5.4-mini-2026-03-17`。
-- `TRANSLATION_REASONING_EFFORT`
-  可选。默认 `low`；仅对支持 reasoning 的翻译模型生效。
+  稳定后置翻译模型，默认 `gpt-5.4-mini-2026-03-17`。
+- `REALTIME_TRANSLATION_MODEL`
+  实验性实时翻译模型，默认 `gpt-realtime-translate`。
 - `SECRET_KEY`
   Flask session 密钥。
 

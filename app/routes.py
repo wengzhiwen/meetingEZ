@@ -97,13 +97,11 @@ def _is_same_language(left, right):
 
 
 def _supports_translation_reasoning(model):
-    """只在明确支持 reasoning 的模型上发送 reasoning 参数"""
-    normalized_model = (model or '').strip().lower()
-    return normalized_model.startswith('gpt-5')
+    """只在明确支持 reasoning 的模型上发送 reasoning 参数。"""
+    return (model or '').strip().lower().startswith('gpt-5')
 
 
 def _build_translation_reasoning(model, effort):
-    """根据模型能力构造 reasoning 配置"""
     normalized_effort = (effort or '').strip().lower()
     if not normalized_effort or not _supports_translation_reasoning(model):
         return None
@@ -186,7 +184,6 @@ def _proxy_realtime_sdp_call(openai_url):
 
 
 def _coerce_bool(value, default=False):
-    """兼容 bool / 字符串形式的布尔值"""
     if isinstance(value, bool):
         return value
     if value is None:
@@ -197,16 +194,14 @@ def _coerce_bool(value, default=False):
 
 
 def _parse_glossary(text):
-    """将多行术语表解析为标准词 + 别名列表"""
     entries = []
     for raw_line in (text or '').splitlines():
         line = raw_line.strip()
         if not line or line.startswith('#'):
             continue
         parts = [part.strip() for part in line.split('|') if part.strip()]
-        if not parts:
-            continue
-        entries.append({'canonical': parts[0], 'aliases': parts[1:]})
+        if parts:
+            entries.append({'canonical': parts[0], 'aliases': parts[1:]})
     return entries
 
 
@@ -431,18 +426,14 @@ def realtime():
             'model': TRANSCRIPTION_MODEL
         },
         'translation': {
-            'purpose':
-            '后置翻译',
-            'api':
-            'Responses API',
-            'model':
-            TRANSLATION_MODEL,
-            'reasoning_effort':
-            _build_translation_reasoning(TRANSLATION_MODEL,
-                                         TRANSLATION_REASONING_EFFORT)
+            'purpose': '后置翻译',
+            'api': 'Responses API',
+            'model': TRANSLATION_MODEL,
+            'reasoning_effort': _build_translation_reasoning(
+                TRANSLATION_MODEL, TRANSLATION_REASONING_EFFORT)
         },
         'realtime_translation': {
-            'purpose': '实时翻译 Beta',
+            'purpose': '实时翻译',
             'api': 'Realtime Translation API',
             'model': REALTIME_TRANSLATION_MODEL,
             'input_model': REALTIME_TRANSLATION_INPUT_MODEL
@@ -1701,271 +1692,169 @@ def workspace_context_pack():
     except Exception as exc:  # pragma: no cover - defensive branch
         return jsonify({'error': _safe_error(exc)}), 500
 
-
 @main_bp.route('/api/translate', methods=['POST'])
 def translate():
-    """后置语言处理代理：智能修正 + 双向翻译"""
+    """稳定后置处理：智能修正、术语增强和双向翻译。"""
     try:
         api_key = _get_api_key()
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 500
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 500
 
-    data = request.get_json()
-    if not data or 'text' not in data:
+    data = request.get_json() or {}
+    text = str(data.get('text') or '').strip()
+    if not text:
         return jsonify({'error': 'Missing text'}), 400
 
-    text = data['text']
     primary_language = data.get('primaryLanguage', 'zh')
-    secondary_language = data.get('secondaryLanguage', 'ja')
-    language_mode = data.get('languageMode', 'single_primary')
+    secondary_language = data.get('secondaryLanguage', '')
     original_language_hint = data.get('originalLanguageHint', primary_language)
-    context = data.get('context', '')
-    meeting_context = data.get('meetingContext', '')
-    enable_correction = _coerce_bool(data.get('enableCorrection'), default=False)
-    enable_glossary = _coerce_bool(data.get('enableGlossary'), default=False)
-    glossary_entries = _parse_glossary(data.get('glossary',
-                                                '')) if enable_glossary else []
+    enable_correction = _coerce_bool(data.get('enableCorrection'))
+    enable_glossary = _coerce_bool(data.get('enableGlossary'))
+    glossary_entries = (_parse_glossary(data.get('glossary', ''))
+                        if enable_glossary else [])
+    model = data.get('model', TRANSLATION_MODEL)
+    reasoning = _build_translation_reasoning(
+        model, data.get('reasoningEffort', TRANSLATION_REASONING_EFFORT))
 
     system_prompt = (
-        '你是实时会议字幕的后置语言处理助手，负责两件事：\n'
-        '1. 在允许时，对 ASR 原始转写做轻量智能修正\n'
-        '2. 输出双向翻译\n\n'
-        '## 输入\n'
-        '- language_mode: 会议语言模式（single_primary / bilingual）\n'
-        '- primary_language: 第一语言（如 zh）\n'
-        '- secondary_language: 第二语言（如 ja）\n'
-        '- current_text: 当前需要处理的 ASR 原始文本\n'
-        '- enable_correction: 是否启用智能修正\n'
-        '- enable_glossary: 是否启用术语表增强\n'
-        '- glossary_entries: 术语表，包含标准写法和别名\n'
-        '- meeting_context: 会议级上下文摘要（项目、术语、近期议题）\n'
-        '- recent_context: 最近上下文\n\n'
-        '## 智能修正规则\n'
-        '- 仅在 enable_correction=true 时输出 correctedTranscript\n'
-        '- 只允许修正明显 ASR 错误、术语误识别、轻度断句和标点\n'
-        '- 不允许改写说话意图，不允许补充未说出的信息，不允许总结替代原句\n'
-        '- 如果没有明确证据，不要擅自修改\n'
-        '- 如果 enable_glossary=true，优先将术语修正为 glossary_entries 中的标准写法\n\n'
-        '## 语言模式约束\n'
-        '- 如果 language_mode=single_primary，说明会议主要使用第一语言，只会夹杂少量外语术语或缩写，应优先保留这些术语原样，不要过度判定成第二语言句子\n'
-        '- 如果 language_mode=bilingual，说明两种语言都是真正的会议语言，应尽量保留原始语言边界，避免把中文和日语等混淆\n\n'
-        '## 规则\n'
-        '- 翻译应基于 correctedTranscript（如果启用了智能修正），否则基于 current_text\n'
-        '- 情况A: 文本是第一语言 => primaryTranslation = null, secondaryTranslation = 翻译成第二语言\n'
-        '- 情况B: 文本是第二语言 => primaryTranslation = 翻译成第一语言, secondaryTranslation = null\n'
-        '- 情况C: 文本是其他语言 => primaryTranslation = 翻译成第一语言, secondaryTranslation = null\n'
-        '绝对不要输出与原文同语种的“翻译”。若目标语言与原文同语种，对应字段必须是 null。\n'
-        'originalLanguage 必须是你判定的原文语言，而不是目标语言。\n\n'
-        '输出严格的 JSON，不要添加任何解释。')
-
+        '你是会议字幕后置处理器。只修正有明确依据的 ASR 错误，不得改写意图或补充内容。'
+        '识别原文语言，并按以下规则翻译：原文若是第一语言，只译为第二语言；原文若是第二语言，'
+        '只译为第一语言；其他语言只译为第一语言。目标语言与原文相同的字段必须为 null。'
+        '仅当 enable_correction=true 时返回 correctedTranscript，否则必须为 null。'
+        '输出必须严格符合给定 JSON schema。')
     user_content = json.dumps({
-        'task': 'bidirectional_translation',
-        'language_mode': language_mode,
+        'language_mode': data.get('languageMode', 'single_primary'),
         'primary_language': primary_language,
         'secondary_language': secondary_language,
         'original_language_hint': original_language_hint,
         'enable_correction': enable_correction,
-        'enable_glossary': enable_glossary,
         'glossary_entries': glossary_entries,
-        'meeting_context': meeting_context,
-        'recent_context': context,
-        'current_text': text
-    })
+        'meeting_context': data.get('meetingContext', ''),
+        'recent_context': data.get('context', ''),
+        'current_text': text,
+    }, ensure_ascii=False)
 
-    json_schema = {
-        'name': 'BidirectionalTranslation',
-        'schema': {
-            '$schema':
-            'http://json-schema.org/draft-07/schema#',
-            'type':
-            'object',
-            'additionalProperties':
-            False,
-            'required': [
-                'originalLanguage', 'correctedTranscript', 'correctionApplied',
-                'primaryTranslation', 'secondaryTranslation'
-            ],
-            'properties': {
-                'originalLanguage': {
-                    'type': 'string',
-                    'description': '判定的文本语言 ISO 代码'
-                },
-                'correctedTranscript': {
-                    'description': '智能修正后的文本；若未启用修正则为 null',
-                    'anyOf': [{
-                        'type': 'string'
-                    }, {
-                        'type': 'null'
-                    }]
-                },
-                'correctionApplied': {
-                    'type': 'boolean',
-                    'description': '是否真的修改了原始转写'
-                },
-                'primaryTranslation': {
-                    'description': '翻译成第一语言，或 null',
-                    'anyOf': [{
-                        'type': 'string'
-                    }, {
-                        'type': 'null'
-                    }]
-                },
-                'secondaryTranslation': {
-                    'description': '翻译成第二语言，或 null',
-                    'anyOf': [{
-                        'type': 'string'
-                    }, {
-                        'type': 'null'
-                    }]
-                }
-            }
-        }
+    schema = {
+        'type': 'object',
+        'additionalProperties': False,
+        'required': [
+            'originalLanguage', 'correctedTranscript', 'correctionApplied',
+            'primaryTranslation', 'secondaryTranslation'
+        ],
+        'properties': {
+            'originalLanguage': {'type': 'string'},
+            'correctedTranscript': {
+                'anyOf': [{'type': 'string'}, {'type': 'null'}]
+            },
+            'correctionApplied': {'type': 'boolean'},
+            'primaryTranslation': {
+                'anyOf': [{'type': 'string'}, {'type': 'null'}]
+            },
+            'secondaryTranslation': {
+                'anyOf': [{'type': 'string'}, {'type': 'null'}]
+            },
+        },
     }
-
-    model = data.get('model', TRANSLATION_MODEL)
-    reasoning_effort = data.get('reasoningEffort', TRANSLATION_REASONING_EFFORT)
-    reasoning = _build_translation_reasoning(model, reasoning_effort)
-    translate_started_at = time.perf_counter()
-    _log_timing('translate_request_received',
-                model=model,
-                reasoning_effort=reasoning.get('effort') if reasoning else None,
-                text_chars=len(text),
-                enable_correction=enable_correction,
-                enable_glossary=enable_glossary,
-                glossary_entries=len(glossary_entries),
-                language_mode=language_mode,
-                primary_language=primary_language,
-                secondary_language=secondary_language,
-                original_language_hint=original_language_hint,
-                context_chars=len(context),
-                meeting_context_chars=len(meeting_context))
-
-    try:
-        payload = {
-            'model':
-            model,
-            'input': [{
-                'role': 'system',
-                'content': system_prompt
-            }, {
-                'role': 'user',
-                'content': user_content
-            }],
-            'text': {
-                'format': {
-                    'type': 'json_schema',
-                    'name': json_schema['name'],
-                    'schema': json_schema['schema'],
-                    'strict': True
-                }
+    payload = {
+        'model': model,
+        'input': [{
+            'role': 'system',
+            'content': system_prompt
+        }, {
+            'role': 'user',
+            'content': user_content
+        }],
+        'text': {
+            'format': {
+                'type': 'json_schema',
+                'name': 'BidirectionalTranslation',
+                'schema': schema,
+                'strict': True,
             }
-        }
-        if reasoning:
-            payload['reasoning'] = reasoning
+        },
+    }
+    if reasoning:
+        payload['reasoning'] = reasoning
 
-        resp = requests.post('https://api.openai.com/v1/responses',
-                             headers={
-                                 'Authorization': f'Bearer {api_key}',
-                                 'Content-Type': 'application/json'
-                             },
-                             json=payload,
-                             timeout=30)
-        _log_timing('translate_openai_response',
-                    model=model,
-                    reasoning_effort=reasoning.get('effort') if reasoning else None,
-                    elapsed_ms=round(
-                        (time.perf_counter() - translate_started_at) * 1000, 1),
-                    status_code=resp.status_code,
-                    request_id=resp.headers.get('x-request-id'))
-
+    started_at = time.perf_counter()
+    try:
+        resp = requests.post(
+            'https://api.openai.com/v1/responses',
+            headers={
+                'Authorization': f'Bearer {api_key}',
+                'Content-Type': 'application/json',
+            },
+            json=payload,
+            timeout=30)
         if not resp.ok:
             return jsonify({'error': resp.text}), resp.status_code
 
         result = resp.json()
-
         structured = result.get('output_parsed')
         if not structured:
-            text_out = ''
-            for output in (result.get('output') or []):
-                if output.get('type') == 'message':
-                    content = output.get('content', [])
-                    if content:
-                        text_out = content[0].get('text', '')
+            for output in result.get('output') or []:
+                if output.get('type') != 'message':
+                    continue
+                for content in output.get('content') or []:
+                    text_out = content.get('text')
+                    if not text_out:
+                        continue
+                    try:
+                        structured = json.loads(text_out)
+                    except json.JSONDecodeError:
+                        structured = None
                     break
-            if text_out:
-                try:
-                    structured = json.loads(text_out)
-                except json.JSONDecodeError:
-                    structured = None
+                if structured:
+                    break
 
-        if not structured or 'originalLanguage' not in structured:
-            structured = {
-                'originalLanguage': original_language_hint,
-                'correctedTranscript': text if enable_correction else None,
-                'correctionApplied': False,
-                'primaryTranslation': None,
-                'secondaryTranslation': None
-            }
+        if not isinstance(structured, dict):
+            raise ValueError('Responses API 未返回有效的结构化翻译结果')
 
-        original_language = structured.get('originalLanguage') or original_language_hint
-        corrected_transcript = structured.get('correctedTranscript')
-        correction_applied = _coerce_bool(structured.get('correctionApplied'),
-                                          default=False)
-        primary_translation = structured.get('primaryTranslation')
-        secondary_translation = structured.get('secondaryTranslation')
-
+        original_language = (structured.get('originalLanguage')
+                             or original_language_hint)
+        corrected = structured.get('correctedTranscript')
+        correction_applied = _coerce_bool(
+            structured.get('correctionApplied'))
         if enable_correction:
-            corrected_transcript = (corrected_transcript or text).strip()
-            if corrected_transcript == text.strip():
-                correction_applied = False
+            corrected = (corrected or text).strip()
+            correction_applied = correction_applied and corrected != text
         else:
-            corrected_transcript = None
+            corrected = None
             correction_applied = False
 
-        effective_source_text = corrected_transcript or text
-
-        if primary_translation and primary_translation.strip(
-        ) == effective_source_text.strip():
+        effective_source = corrected or text
+        primary_translation = structured.get('primaryTranslation')
+        secondary_translation = structured.get('secondaryTranslation')
+        if primary_translation and primary_translation.strip() == effective_source:
             primary_translation = None
-        if secondary_translation and secondary_translation.strip(
-        ) == effective_source_text.strip():
+        if secondary_translation and secondary_translation.strip() == effective_source:
             secondary_translation = None
-
-        if not secondary_language:
-            secondary_translation = None
-
         if _is_same_language(original_language, primary_language):
             primary_translation = None
         if _is_same_language(original_language, secondary_language):
             secondary_translation = None
         elif not _is_same_language(original_language, primary_language):
             secondary_translation = None
+        if not secondary_language:
+            secondary_translation = None
 
-        structured = {
+        _log_timing(
+            'translate_request_completed',
+            model=model,
+            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+            correction_applied=correction_applied)
+        return jsonify({
             'originalLanguage': original_language,
             'rawTranscript': text,
-            'correctedTranscript': corrected_transcript,
+            'correctedTranscript': corrected,
             'correctionApplied': correction_applied,
             'primaryTranslation': primary_translation,
-            'secondaryTranslation': secondary_translation
-        }
-        _log_timing('translate_request_completed',
-                    model=model,
-                    reasoning_effort=reasoning.get('effort') if reasoning else None,
-                    elapsed_ms=round(
-                        (time.perf_counter() - translate_started_at) * 1000, 1),
-                    original_language=structured['originalLanguage'],
-                    correction_applied=structured['correctionApplied'],
-                    has_primary_translation=bool(structured['primaryTranslation']),
-                    has_secondary_translation=bool(structured['secondaryTranslation']))
-
-        return jsonify(structured)
-
-    except Exception as e:
-        _log_timing('translate_request_failed',
-                    model=model,
-                    reasoning_effort=reasoning.get('effort') if reasoning else None,
-                    elapsed_ms=round(
-                        (time.perf_counter() - translate_started_at) * 1000, 1),
-                    error=str(e))
-        return jsonify({'error': str(e)}), 500
+            'secondaryTranslation': secondary_translation,
+        })
+    except Exception as exc:
+        _log_timing(
+            'translate_request_failed',
+            model=model,
+            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+            error=str(exc))
+        return jsonify({'error': str(exc)}), 500

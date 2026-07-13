@@ -119,9 +119,9 @@
                         </div>
                         <select id="translationMode" class="model-mode-select">
                             <option value="postprocess" selected>转写后翻译（稳定）</option>
-                            <option value="realtime_beta">Realtime Translation Beta（实验）</option>
+                            <option value="realtime_beta">Realtime Translation（实验）</option>
                         </select>
-                        <div class="model-meta model-mode-help">Beta 左侧显示一路原文转写，右侧显示译入两种目标语言的实时字幕。</div>
+                        <div class="model-meta model-mode-help">Realtime 模式需要选择两种不同语言，左侧显示原文，右侧显示两种目标语言的流式译文。</div>
                     </div>
                 </div>
                 <script type="application/json" id="modelInfoData">{{ model_info|tojson }}</script>
@@ -132,14 +132,14 @@
                 <label class="toggle-row">
                     <span>
                         <span class="toggle-title">转写智能修正</span>
-                        <span class="toggle-help">结合上下文修正明显转写错误</span>
+                        <span class="toggle-help">稳定模式下结合上下文修正明显转写错误</span>
                     </span>
                     <input type="checkbox" id="enableCorrection">
                 </label>
                 <label class="toggle-row">
                     <span>
                         <span class="toggle-title">术语表增强</span>
-                        <span class="toggle-help">优先按会议术语、人名、缩写修正和翻译</span>
+                        <span class="toggle-help">稳定模式下优先按会议术语、人名、缩写修正和翻译</span>
                     </span>
                     <input type="checkbox" id="enableGlossary">
                 </label>
@@ -153,7 +153,7 @@
 
             <div class="setting-item stack">
                 <label>协同增强</label>
-                <div class="setting-help">选择项目工作区后，会自动加载已确认术语、近期议题和待办摘要，用于增强实时转写与后置处理。</div>
+                <div class="setting-help">稳定模式会把已确认术语、近期议题和待办摘要用于后置处理；Realtime Translation 不支持提示词或术语表注入。</div>
                 <label for="workspaceProject" class="setting-sub-label">项目工作区</label>
                 <select id="workspaceProject">
                     {% for project in workspace_projects %}
@@ -263,7 +263,7 @@
     </div>
 
     <script src="{{ url_for('static', filename='js/realtime-transcription.js') }}?v=20260508d"></script>
-    <script src="{{ url_for('static', filename='js/realtime-translation.js') }}?v=20260509a"></script>
-    <script type="module" src="{{ url_for('static', filename='js/app.js') }}?v=20260528a"></script>
+    <script src="{{ url_for('static', filename='js/realtime-translation.js') }}?v=20260713a"></script>
+    <script type="module" src="{{ url_for('static', filename='js/app.js') }}?v=20260713a"></script>
 </body>
 </html>
