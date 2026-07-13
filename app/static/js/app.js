@@ -1,4 +1,4 @@
-console.log('app.js loaded, build: 20260713d');
+console.log('app.js loaded, build: 20260713e');
 // MeetingEZ - 基于 OpenAI Realtime API (WebRTC) 的实时转写
 // API Key 由后端从环境变量读取，前端不接触
 
@@ -692,7 +692,9 @@ function loadSettings() {
 
     updateTranslationModelInfo();
 
-    enableSplitView(false);
+    // Realtime Translation 是唯一模式，页面加载后始终使用三栏视图；
+    // 即使会议尚未开始，也要显示两个目标语言空面板和原文显隐按钮。
+    enableSplitView(true);
     updateMeetingEntrySummary();
 }
 
@@ -1869,7 +1871,8 @@ function loadTranscripts() {
                 transcripts = [];
             }
             rebuildTranslationContext();
-            updateDisplay();
+            updateDisplay('primary');
+            updateDisplay('secondary');
             updateControls();
         }
     } catch (error) {
@@ -2306,9 +2309,4 @@ document.addEventListener('DOMContentLoaded', () => {
     updateFontSize();
     updateMeetingTimer();
 
-    const secondaryLang = (localStorage.getItem('meetingEZ_secondaryLanguage') || '').trim();
-    if (secondaryLang && transcriptSplit && transcriptSplit.style.display !== 'none') {
-        updateDisplay('primary');
-        updateDisplay('secondary');
-    }
 });
