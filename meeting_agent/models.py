@@ -182,7 +182,7 @@ class TranscriptSegment(BaseModel):
     start: float
     end: float
     text: str
-    speaker: Optional[str] = None  # 说话人标识（VibeVoice 提供，仅供参考）
+    speaker: Optional[str] = None  # 说话人标识；gpt-transcribe 不提供，保留给历史转写稿
 
 
 class Transcript(BaseModel):
@@ -273,11 +273,11 @@ class ProjectStatus(BaseModel):
 
 
 class ASRState(BaseModel):
-    """ASR 处理状态（重试/降级跟踪）"""
-    provider: str = "openrouter"          # openrouter | zhipu | vibevoice(legacy)
-    status: str = "pending"               # pending | running | failed | blocked | succeeded
+    """ASR 处理状态"""
+    provider: str = "openai"  # 目前只有 openai（gpt-transcribe）
+    status: str = "pending"  # pending | running | failed | succeeded
     retry_count: int = 0
-    next_retry_at: Optional[str] = None   # ISO timestamp
+    next_retry_at: Optional[str] = None  # ISO timestamp
     last_error: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None

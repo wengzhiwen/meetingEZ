@@ -57,7 +57,11 @@
 
 当前后端 session 创建逻辑在 [`app/routes.py`](/home/wengzhiwen/meetingEZ/app/routes.py)。
 
-关键配置是目标语言、`gpt-realtime-translate` 和内部输入转写模型 `gpt-realtime-whisper`。Realtime Translation 不支持提示词或术语表注入。
+关键配置是目标语言、`gpt-realtime-translate` 和内部输入转写模型 `gpt-live-transcribe`。
+
+Translation session 的 `audio.input.transcription` **只接受 `model` 一个字段**：
+`prompt`、`keywords`、`languages`、`delay` 都会被以 400 `unknown_parameter` 拒绝（已实测）。
+术语表因此不在 realtime 层解决，改由 `/api/refine-transcript` 的后置文本校正补（见下）。
 
 ## 前端状态机
 
@@ -146,3 +150,25 @@
 - 旧的顶部控制面板 + 侧边设置栏布局
 
 这些文件或文档可能仍保留历史记录，但不代表当前运行路径。
+
+## 术语校正后置链路
+
+realtime 层注入不了术语表，所以三栏字幕（原文 + 两栏译文）统一走一条后置文本校正：
+
+```
+realtime 条目定格
+  -> enqueueRefine(entry, text)      前端队列，攒够 8 条或静默 1.2 秒
+  -> POST /api/refine-transcript     批量提交，最多 2 个并发
+  -> gpt-5.6-luna (effort=low)       按 keywords 纠错，只返回改动过的片段
+  -> applyRefineResults()            按 entry.id 原位替换 + 重绘
+```
+
+设计取舍：
+
+- **先显示后修正。** realtime 字幕不等校正，立刻上屏；校正是"追加改进"，
+  失败或超时只是保持原样，不产生任何用户可见的错误。
+- **只改术语，不改语义。** system prompt 明确禁止改写、增删、调整语序和翻译，
+  拿不准就原样返回。后端再以文本比对二次过滤，避免模型自作主张的润色被写回。
+- **原文条目和译文条目的落点不同。** 原文是结构化条目，写入 `correctedTranscript`
+  （`getDisplayTranscriptText()` 优先取它）；译文是普通条目，直接改 `text`。
+- **入队只做一次。** 条目上打 `_refineQueued` 标记，避免重复提交和重复计费。

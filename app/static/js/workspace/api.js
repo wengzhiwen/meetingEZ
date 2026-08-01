@@ -72,8 +72,8 @@ export const api = {
         request('GET', `/api/workspace/project/${encodeURIComponent(projectId)}/meeting/${encodeURIComponent(meetingDir)}/process/status`),
     retryASR: (projectId, meetingDir) =>
         request('POST', `/api/workspace/project/${encodeURIComponent(projectId)}/meeting/${encodeURIComponent(meetingDir)}/asr/retry`),
-    fallbackASR: (projectId, meetingDir) =>
-        request('POST', `/api/workspace/project/${encodeURIComponent(projectId)}/meeting/${encodeURIComponent(meetingDir)}/asr/fallback`),
+    restartASR: (projectId, meetingDir) =>
+        request('POST', `/api/workspace/project/${encodeURIComponent(projectId)}/meeting/${encodeURIComponent(meetingDir)}/asr/restart`),
 
     getFile: (projectId, meetingDir, filename) =>
         request('GET', `/api/workspace/project/${encodeURIComponent(projectId)}/meeting/${encodeURIComponent(meetingDir)}/files/${encodeURIComponent(filename)}`),

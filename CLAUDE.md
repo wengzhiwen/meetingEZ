@@ -9,10 +9,13 @@
 MeetingEZ 是一个轻量的会议实时转写、按需翻译和会后纪要工具。当前 Web 应用已经收敛为“控制台 + 实时页”双入口：
 
 - 控制台 `/`：项目选择、会议创建、会议文件/音频/术语/背景管理。
-- 实时页 `/realtime`：采集麦克风或标签页音频，通过 OpenAI Realtime API WebRTC transcription session 做实时转写。
+- 实时页 `/realtime`：采集麦克风或标签页音频，通过 OpenAI Realtime API WebRTC session 做实时转写和实时翻译。
 - 后端只签发短期 Realtime `client secret`，浏览器不保存标准 API Key。
-- Web 实时页只使用 `gpt-realtime-translate`，不提供翻译方式选择。
+- Web 实时页翻译只使用 `gpt-realtime-translate`，不提供翻译方式选择。
 - 仓库仍保留 CLI 会议纪要 Agent，用于离线音频转写、纪要生成和项目记忆维护。
+
+**全系统只用 OpenAI 一家模型供应商。** 不要重新引入 OpenRouter、智谱或 VibeVoice——
+这些供应商的代码已在 2026-07-31 全部删除，不是"暂时屏蔽"。
 
 ## 常用命令
 
@@ -42,13 +45,15 @@ python3 -m py_compile app/routes.py
 
 配置来自 `.env`，主要入口在 `meeting_agent/config.py` 和 `app/routes.py`。
 
-- `OPENAI_API_KEY`：Realtime transcription/translation client secret 签发、纪要生成。
-- `TRANSCRIPTION_MODEL`：Web 实时转写模型，默认 `gpt-realtime-whisper`。
+- `OPENAI_API_KEY`：唯一凭据。Realtime client secret 签发、离线 ASR、纪要生成都用它。
+- `TRANSCRIPTION_MODEL`：Web 实时转写模型，默认 `gpt-live-transcribe`。
+- `TRANSCRIPTION_DELAY`：实时转写延迟档位 minimal/low/medium/high/xhigh，默认 `low`。
 - `REALTIME_TRANSLATION_MODEL`：Web 实时翻译模型，默认 `gpt-realtime-translate`。
-- `REALTIME_TRANSLATION_INPUT_MODEL`：实时翻译的输入转写模型，默认 `gpt-realtime-whisper`。
+- `REALTIME_TRANSLATION_INPUT_MODEL`：实时翻译的输入转写模型，默认 `gpt-live-transcribe`。
+- `OPENAI_ASR_MODEL`：离线文件 ASR 模型，默认 `gpt-transcribe`。
+- `OPENAI_ASR_LANGUAGES`：离线 ASR 的预期输入语言（逗号分隔短码），留空自动检测。
+- `ASR_CHUNK_SECONDS`：离线 ASR 分块时长，默认 120 秒。
 - `ACCESS_CODE`：可选访问码；为空时不启用登录保护。
-- `OPENROUTER_API_KEY`：离线文件 ASR 的首选 OpenRouter Chirp 3。
-- `ZHIPU_API_KEY`：OpenRouter ASR 不可用时的降级 ASR。
 
 ## 架构概览
 
@@ -75,27 +80,46 @@ CLI Agent
 
 ## Web 实时转写链路
 
-当前实时页固定使用 Realtime Translation WebRTC：
+一场会议开 2 路 translation WebRTC session：
 
-1. 前端为两种目标语言分别请求 `POST /api/realtime-translation-session`。
-2. 后端使用 `OPENAI_API_KEY` 签发两个 translation client secret。
-3. 前端通过 `/v1/realtime/translations/calls` 建立两路 WebRTC 连接。
-4. 第 0 路 `session.input_transcript.*` 作为权威混合原文。
-5. 两路 `session.output_transcript.*` 分别输出第一语言和第二语言译文。
-6. input/output delta 不保证携带 `item_id`，前端按当前流累积并以 done 或静音超时收尾。
+1. `POST /api/realtime-translation-session` 为两种目标语言各签发一个 client secret，
+   通过 `/v1/realtime/translations/calls` 建连。
+2. 第 0 路的 `session.input_transcript.*` 作为权威混合原文（translation session 内部
+   本来就要转写才能翻译，这份原文是白拿的，不额外花钱）。
+3. 两路 `session.output_transcript.*` 分别输出第一语言和第二语言译文。
+4. input/output delta 不保证携带 `item_id`，前端按当前流累积并以 done 或静音超时收尾。
 
 不要把标准 API Key 放入浏览器端代码。不要回退到旧的浏览器 WebSocket + Base64 PCM 推流实现。
 
-### Realtime Translation
+### 术语表注入：只能走后置文本链路
 
-- 调用 `POST /api/realtime-translation-session` 签发 translation client secret。
-- 前端类为 `app/static/js/realtime-translation.js`。
-- WebRTC endpoint 为 `/v1/realtime/translations/calls`。
-- 模型默认 `gpt-realtime-translate`，输入转写模型默认 `gpt-realtime-whisper`。
-- 为第一语言和第二语言各开一路 translation session，用于混合会议音频的互译效果对比。
-- 第 0 路兼任权威源转写：其 `session.input_transcript` 自带源语言转写并自动检测语言，喂给原文 pane，省去额外转写 session。
-- input/output transcript delta 不保证携带 `item_id`；前端按当前流累积，以 `.done` 或 1.5 秒静音兜底定格。
-- translation session 不支持 `instructions`/`prompt`，实时页不提供术语表或提示词注入。
+**realtime 这一层注入不了术语表，这是 API 硬限制，不是配置问题：**
+
+- translation session 的 `audio.input.transcription` 只接受 `model` 一个字段，
+  `prompt` / `keywords` / `languages` / `delay` 一律 400 `unknown_parameter`（已实测）。
+- 独立的 transcription session（`gpt-live-transcribe`）倒是接受这些字段，但那要多开
+  一路 WebRTC，每分钟多花 $0.017，且原文与译文来自不同模型实例会产生断句漂移。
+
+所以术语准确性由 `POST /api/refine-transcript` 补：
+
+- realtime 结果**先直接上屏**，条目定格后进 `refineQueue`（`app/static/js/app.js`）。
+- 攒够 8 条或静默 1.2 秒 flush 一批，交给 `REFINE_MODEL`（默认 `gpt-5.6-luna`，
+  `effort=low`）按 keywords 纠错，返回后**原位替换**并重绘。
+- 原文和译文都走这条路——两路 translation 产出的译文同样带术语错误。
+- 校正失败/超时不影响已显示的字幕，静默保留原文。
+- keywords 来自 `/api/workspace/context-pack` 的 `realtimeKeywords`（术语表 canonical +
+  人员标准名）加上手填术语框，**不含别名**——别名是已知的识别错误。
+- 没有术语表时前端根本不入队，后端也会短路返回，不产生调用。
+
+`REFINE_REASONING_EFFORT=none` 快约一倍（2s vs 4s），但实测会漏掉音译类错误
+（片假名写的产品名改不回来），默认 `low`。
+
+### Realtime transcription session（当前默认链路不使用）
+
+`POST /api/realtime-session` 和 `app/static/js/realtime-transcription.js` 仍然是完整
+可用的实现，支持 `gpt-live-transcribe` 的 `prompt` / `keywords` / `languages` / `delay`，
+按 `_supports_transcription_context()` 做模型能力门控。实时页当前不加载它。
+如果以后要把原文改回"转写时就注入术语表"，从这里接。
 
 ## 离线会议处理链路
 
@@ -103,17 +127,26 @@ CLI Agent 处理项目/会议目录中的录音文件：
 
 ```
 音频文件
-  -> ASRRouter
+  -> ASRRouter -> OpenAIASREngine (gpt-transcribe)
   -> transcript.json
   -> GPT 纪要生成
   -> minutes.md / actions.md / timeline.md / context.md
 ```
 
-当前 ASR 路由器 `meeting_agent/asr/router.py`：
+`meeting_agent/asr/engine.py`（`OpenAIASREngine`）的几个约束来自模型能力：
 
-- 首选 OpenRouter Chirp 3：`meeting_agent/asr/openrouter_engine.py`
-- 降级智谱 ASR：`meeting_agent/asr/engine.py`
-- VibeVoice 文件仍保留，但当前不实例化、不路由调用。
+- `gpt-transcribe` 只支持 `response_format=json|text`，**不返回时间戳**
+  （`verbose_json` 会被 400 拒绝）。时间戳由分块边界推导，块内再按字符数把
+  时长摊到句子上——这是估算值，够纪要和 timeline 用，不能做逐词对齐。
+- 分块**不重叠**：没有时间戳就无法对重叠文本去重。跨块连贯性靠把上一块结尾
+  文本放进下一块的 `prompt`。
+- `prompt` / `keywords` / `languages` 从 `meeting_dir.parent` 推导项目目录后，
+  自动读 `_context.json`、`_glossary.json`、`_people.json` 构造。
+  CLI 多项目模式下 ASRRouter 拿到的是全局 Config，不能直接用 `config.meetings_dir`。
+- `transcript.json.progress` 的每条记录带 `signature`（模型@分块长度），
+  换模型或改分块长度后旧进度会被丢弃，避免复用出错位的转写稿。
+- `/v1/audio/transcriptions` 是 multipart 端点，**不做未知字段校验**——参数拼错
+  会静默忽略而不是报错。改这里的参数要用真实音频 A/B 验证，不能只看 HTTP 200。
 
 ## 数据与状态文件
 

@@ -5,10 +5,11 @@
  * - 使用 WebRTC（浏览器推荐方式）连接 OpenAI Realtime API
  * - transcription-only session（不需要模型回答）
  * - 后端签发短期 client secret（不暴露 API key）
- * - gpt-realtime-whisper 使用 delay 控制 transcript delta 延迟
+ * - gpt-live-transcribe 使用 delay 控制 transcript delta 延迟
+ * - gpt-live-transcribe 支持 prompt（录音场景）/ keywords（术语、人名）/ languages（语言提示）
  * - 按 item_id 管理 live/final 状态
  */
-console.log('realtime-transcription.js loaded, build: 20260508d');
+console.log('realtime-transcription.js loaded, build: 20260731a');
 
 const REALTIME_STATUS = {
     IDLE: 'idle',
@@ -91,11 +92,13 @@ class RealtimeTranscription {
         this._turnCounter = 0;
         this._statsTimer = null;
 
-        // 配置
+        // 配置。model 由后端 TRANSCRIPTION_MODEL 决定，前端不再硬编码模型名。
+        // keywords / prompt / languages 只在 gpt-live-transcribe 上生效，后端按模型能力过滤。
         this.options = {
-            model: options.model || 'gpt-realtime-whisper',
             language: options.language || null,
+            languages: options.languages || null,
             prompt: options.prompt || '',
+            keywords: options.keywords || null,
 
             // 事件回调
             onTranscriptDelta: options.onTranscriptDelta || null,
@@ -158,7 +161,9 @@ class RealtimeTranscription {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     language: this.options.language,
-                    prompt: this.options.prompt
+                    languages: this.options.languages,
+                    prompt: this.options.prompt,
+                    keywords: this.options.keywords
                 })
             });
 

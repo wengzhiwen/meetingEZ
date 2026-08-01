@@ -113,16 +113,26 @@
 
 ### `POST /api/realtime-session`
 
-创建 OpenAI Realtime transcription session 的 `client secret`。该接口为兼容能力，当前实时页固定使用 Realtime Translation，不调用它。
+创建 OpenAI Realtime transcription session 的 `client secret`。
+
+**当前实时页默认链路不调用它**：原文来自第 0 路 translation session 的 input transcript，
+术语表由 `/api/refine-transcript` 后置校正补。本接口保留为完整可用的备选路径——它是唯一
+能在"转写发生时"就注入术语表的入口。
 
 请求体：
 
 ```json
 {
-  "language": "zh",
-  "prompt": ""
+  "languages": ["zh", "en"],
+  "prompt": "这是「MeetingEZ - 会议转写工具」的项目会议录音。项目背景：……",
+  "keywords": ["翁志文", "MeetingEZ", "WebRTC"]
 }
 ```
+
+- `languages`：预期输入语言（ISO-639-1 短码数组），是提示不是限制，最多 4 个。
+- `prompt`：自由文本的录音场景描述，不是指令。
+- `keywords`：希望模型写对的字面词（人名、产品名、缩写），最多 100 个。
+- 兼容旧字段 `language`（单个短码）。
 
 后端当前创建的 session 配置：
 
@@ -140,8 +150,10 @@
           "type": "near_field"
         },
         "transcription": {
-          "model": "gpt-realtime-whisper",
-          "language": "zh",
+          "model": "gpt-live-transcribe",
+          "languages": ["zh", "en"],
+          "prompt": "……",
+          "keywords": ["翁志文", "MeetingEZ"],
           "delay": "low"
         }
       }
@@ -166,8 +178,11 @@
 - 当前代码兼容两种返回格式：
   - 顶层 `value` / `expires_at`
   - 嵌套 `client_secret.value` / `client_secret.expires_at`
-- `gpt-realtime-whisper` 当前不接受 `turn_detection` 字段；默认依赖 `delay: "low"` 的低延迟流式 transcript deltas。
-- `gpt-realtime-whisper` 不支持 `prompt` 字段；默认转写链路发送 `model`、ISO-639-1 短码 `language` 和 `delay`，Realtime Translation 的原文转写链路不发送 `language`，让一路 Whisper 输出混合会议原文。
+- 不发送 `turn_detection`；默认依赖 `delay: "low"` 的低延迟流式 transcript deltas。
+  `delay` 支持 `minimal` / `low` / `medium` / `high` / `xhigh`，值越低首个 delta 越快、准确率略降。
+- `prompt` / `keywords` / `languages` 只有 `gpt-live-transcribe` 支持。后端按
+  `_supports_transcription_context()` 做能力门控：换回上一代 `gpt-realtime-whisper` 时
+  这三个字段不会下发（发了会被 400 `unknown_parameter` 拒绝），只发 `model` / `language` / `delay`。
 
 ### `POST /api/realtime-translation-session`
 
@@ -192,7 +207,7 @@
     "audio": {
       "input": {
         "transcription": {
-          "model": "gpt-realtime-whisper"
+          "model": "gpt-live-transcribe"
         },
         "noise_reduction": {
           "type": "near_field"
@@ -221,9 +236,55 @@
 说明：
 
 - 支持的目标语言按 OpenAI demo 白名单约束：`es`、`pt`、`fr`、`ja`、`ru`、`zh`、`de`、`ko`、`hi`、`id`、`vi`、`it`、`en`。
-- 当前实时页只创建两路 translation session，分别译入第一语言和第二语言；第 0 路 session 的 input transcript 同时作为权威原文。前端显示原文与两栏目标语言字幕，原文栏可隐藏。
+- **translation session 的 `audio.input.transcription` 只接受 `model` 一个字段。**
+  `prompt` / `keywords` / `languages` / `delay` 都会被以 400 `unknown_parameter` 拒绝（已实测）。
+  需要术语表注入就必须走独立的 `/api/realtime-session`。
+- 实时页创建两路 translation session，分别译入第一语言和第二语言；第 0 路 session 的
+  input transcript 同时作为权威原文（translation 内部本来就要转写，这份原文不额外计费）。
+  前端显示原文与两栏目标语言字幕，原文栏可隐藏。
 - transcript delta 不保证携带 `item_id`；前端按当前 input/output 流累积，并由 done 事件或短暂停顿完成分段。
 - 混合会议音频没有说话人音轨边界，因此当前链路不做说话人分离。
+
+### `POST /api/refine-transcript`
+
+按项目术语表批量校正已定格的字幕片段。原文和译文都走这个接口。
+
+存在的理由：Realtime Translation session 的 `audio.input.transcription` 只接受 `model`，
+`keywords` 会被 400 拒绝，所以术语准确性没法在转写/翻译时解决，只能在文本层补。
+前端的用法是"先直接给、再更新优化结果"——realtime 字幕立刻上屏，本接口返回后原位替换。
+
+请求体：
+
+```json
+{
+  "segments": [
+    { "id": "rt-input-abc-1", "lang": "zh", "text": "我们这次在 Meeting EZ 里接入了实时转写。" },
+    { "id": "rt-translate-en-...", "lang": "en", "text": "We shipped the Meeting E Z pipeline with web RTC." }
+  ],
+  "keywords": ["MeetingEZ", "WebRTC", "翁志文"],
+  "context": "项目摘要: ...\n背景说明: ..."
+}
+```
+
+返回体（**只回传真正被改动的片段**，没改的不出现）：
+
+```json
+{
+  "segments": [
+    { "id": "rt-input-abc-1", "text": "我们这次在 MeetingEZ 里接入了实时转写。" },
+    { "id": "rt-translate-en-...", "text": "We shipped the MeetingEZ pipeline with WebRTC." }
+  ]
+}
+```
+
+说明：
+
+- 模型由 `REFINE_MODEL` 决定，默认 `gpt-5.6-luna`；reasoning effort 由
+  `REFINE_REASONING_EFFORT` 决定，默认 `low`。
+- 单次最多 `REFINE_MAX_SEGMENTS`（12）个片段、`REFINE_MAX_CHARS`（4000）字符，超出直接截断。
+- `keywords` 为空时直接返回 `{"segments": []}`，不调用模型——没有术语表就没有校正依据。
+- 模型偶尔会把 `changed` 标反，后端以文本比对为准，只回传 `text != 原文` 的片段。
+- 前端批大小 8、静默 1.2 秒 flush、最多 2 个并发请求；失败静默保留 realtime 原文。
 
 ### `GET /api/workspace/projects`
 

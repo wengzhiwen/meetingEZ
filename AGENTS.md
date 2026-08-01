@@ -14,12 +14,12 @@
 
 - Web 应用入口是 Flask：`run.py` -> `app/__init__.py` -> `app/routes.py`。
 - 控制台入口是 `/`，实时转写页是 `/realtime`。
-- Web 实时转写使用 OpenAI Realtime API WebRTC transcription-only session。
-- 实时转写默认模型是 `gpt-realtime-whisper`。
-- Realtime client secret 由后端 `/api/realtime-session` 签发。
+- 全系统只用 OpenAI 一家模型供应商。OpenRouter、智谱、VibeVoice 的代码已于 2026-07-31 全部删除，不要重新引入。
+- Web 实时页一场会议开 2 路 translation session；第 0 路的 input_transcript 兼任权威原文。
+- 实时翻译模型是 `gpt-realtime-translate`；术语表由 `/api/refine-transcript` 后置校正补（默认 `gpt-5.6-luna`）。
+- Realtime client secret 由后端 `/api/realtime-session` 和 `/api/realtime-translation-session` 签发。
 - 前端不保存 OpenAI 标准 API Key。
-- 离线会议处理由 `meeting_agent` CLI 完成。
-- 离线 ASR 首选 OpenRouter Chirp 3，失败后降级智谱；VibeVoice 代码保留但当前不参与路由。
+- 离线会议处理由 `meeting_agent` CLI 完成，ASR 用 `gpt-transcribe`（`/v1/audio/transcriptions`）。
 
 ## 常用命令
 
@@ -43,7 +43,8 @@ python3 -m py_compile app/routes.py
 - `app/static/js/app.js`：实时页主逻辑。
 - `app/static/js/realtime-transcription.js`：WebRTC Realtime 封装和事件状态机。
 - `app/static/js/workspace/`：控制台 SPA 原生 JS 模块。
-- `meeting_agent/asr/router.py`：离线 ASR provider 路由。
+- `meeting_agent/asr/router.py`：离线 ASR 状态编排（只剩 OpenAI 一个 provider）。
+- `meeting_agent/asr/engine.py`：`OpenAIASREngine`，gpt-transcribe 分块转写。
 - `meeting_agent/config.py`：Pydantic settings 与目录配置。
 - `meeting_agent/llm/client.py` 和 `meeting_agent/llm/prompts.py`：纪要生成。
 - `meeting_agent/memory/`：项目记忆写入。
@@ -53,16 +54,22 @@ python3 -m py_compile app/routes.py
 - 同步检查 `TRANSCRIPTION_MODEL` 默认值、前端默认 model、`env.example` 和当前文档。
 - 保持 session 类型为 `transcription`，不要改成对话模式。
 - 保持后端签发 client secret，不要把 API Key 暴露给浏览器。
-- 当前 Realtime 关键配置是 24kHz PCM、`near_field` noise reduction、`gpt-realtime-whisper` 的 `delay: "low"`。
-- `gpt-realtime-whisper` 当前不接受 `turn_detection` 字段；不要发送 `server_vad` 或对话模式的 `semantic_vad`。
+- 当前 Realtime 关键配置是 24kHz PCM、`near_field` noise reduction、`delay: "low"`。
+- 不发送 `turn_detection`；不要发送 `server_vad` 或对话模式的 `semantic_vad`。
 - 事件处理围绕 `conversation.item.input_audio_transcription.delta` 和 `completed`。
-- Realtime Translation Beta 是旁路能力，入口为 `/api/realtime-translation-session` 和 `app/static/js/realtime-translation.js`；不要把它改成默认主链路，除非用户明确要求。
+- `prompt` / `keywords` / `languages` 只有 `gpt-live-transcribe` 支持，按
+  `_supports_transcription_context()` 做能力门控，不要无差别下发。
+- translation session 只接受 `audio.input.transcription.model`，其他上下文字段会
+  400 `unknown_parameter`。术语表注入不走 realtime，走 `/api/refine-transcript` 后置文本校正。
+- 改字幕定格逻辑时记得同步 `enqueueRefine()` 的调用点，漏掉就等于那条字幕不做术语校正。
 
 ## 修改离线 Agent 时
 
 - 区分“转写”与“纪要”：`transcript.json` 是转写，`minutes.md` 是纪要。
-- 不要把 Web 实时转写模型误用于离线文件 ASR，除非用户明确要求迁移。
-- ASR 状态写在 `_asr_state.json`，中间进度写在 `transcript.json.progress`。
+- 实时用 `gpt-live-transcribe`，离线用 `gpt-transcribe`，两者端点和参数都不同，不要互换。
+- `gpt-transcribe` 不返回时间戳；transcript 的时间戳是按分块边界和字符数估算的。
+- `/v1/audio/transcriptions` 不校验未知字段，参数拼错会静默忽略，必须用真实音频 A/B 验证。
+- ASR 状态写在 `_asr_state.json`，中间进度写在 `transcript.json.progress`（带 signature 校验）。
 - 处理流程锁和错误文件用于 Web 轮询，修改时要保持兼容。
 
 ## 文档规则

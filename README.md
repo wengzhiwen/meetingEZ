@@ -4,18 +4,20 @@
 
 当前实现基于：
 - 浏览器采集麦克风或标签页音频
-- OpenAI Realtime Translation WebRTC session
+- OpenAI Realtime transcription + Realtime Translation WebRTC session
 - 极小 Flask 后端签发 `client secret`
 - 前端不保存 OpenAI API Key
-- 三栏显示 Whisper 原文与两种目标语言译文，原文栏可隐藏
+- 三栏显示原文与两种目标语言译文，原文栏可隐藏
+
+模型全部来自 OpenAI：实时翻译 `gpt-realtime-translate`、术语校正 `gpt-5.6-luna`、
+离线文件转写 `gpt-transcribe`、纪要生成 `gpt-5.4`。
 
 ## 当前特性
 
 - 控制台首页：默认先进入控制台，再选择项目模式或快速模式
-- 实时转写：`gpt-realtime-whisper`
 - 连接方式：WebRTC + DataChannel
-- 分段策略：`gpt-realtime-whisper` 低延迟流式输出，`delay: "low"`，不发送 `turn_detection`
-- 实时翻译：固定创建两路 `gpt-realtime-translate` session，分别译入第一语言和第二语言；第 0 路的 input transcript 同时作为权威原文
+- 实时会话结构：2 路 `gpt-realtime-translate` session，分别译入第一语言和第二语言；第 0 路的 input transcript 同时作为权威原文
+- 术语校正：realtime session 注入不了术语表，改由定格后的文本链路补——字幕先直接上屏，随后交给 `gpt-5.6-luna` 按项目术语表纠错，返回后原位替换
 - Translation transcript delta 不依赖 `item_id`，按当前流累积，并以 done 事件或短暂停顿完成分段
 - 访问控制：可选 `ACCESS_CODE` 登录页
 - 项目协同：项目模式下关联会议目录和项目上下文
@@ -37,13 +39,19 @@ python run.py
 核心配置见 [`env.example`](/home/wengzhiwen/meetingEZ/env.example)：
 
 - `OPENAI_API_KEY`
-  用于 Realtime session 和翻译代理。
+  全系统唯一的模型凭据：Realtime session、翻译代理、离线 ASR、纪要生成。
 - `ACCESS_CODE`
   可选。为空时不启用登录保护。
+- `REFINE_MODEL`
+  字幕术语校正模型，默认 `gpt-5.6-luna`。
+- `TRANSCRIPTION_MODEL`
+  独立实时转写 session 的模型，默认 `gpt-live-transcribe`（当前默认链路不使用，见 `docs/API.md`）。
 - `REALTIME_TRANSLATION_MODEL`
   实时翻译模型，默认 `gpt-realtime-translate`。
 - `REALTIME_TRANSLATION_INPUT_MODEL`
-  Realtime Translation 内部的输入转写模型，默认 `gpt-realtime-whisper`。
+  Realtime Translation 内部的输入转写模型，默认 `gpt-live-transcribe`。
+- `OPENAI_ASR_MODEL`
+  离线文件转写模型，默认 `gpt-transcribe`。
 - `SECRET_KEY`
   Flask session 密钥。
 

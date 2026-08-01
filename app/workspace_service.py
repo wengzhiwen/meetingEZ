@@ -15,15 +15,14 @@ from pathlib import Path
 import re
 from typing import Optional
 
-from meeting_agent.config import (AUDIO_EXTENSIONS, MEETING_META_FILE,
-                                  MINUTES_FILE, PRE_HINT_FILE,
-                                  PROJECT_CONFIG_FILE, TRANSCRIPT_FILE,
+from meeting_agent.config import (AUDIO_EXTENSIONS, MEETING_META_FILE, MINUTES_FILE,
+                                  PRE_HINT_FILE, PROJECT_CONFIG_FILE, TRANSCRIPT_FILE,
                                   Config, Settings)
 from meeting_agent.glossary import GlossaryManager
 from meeting_agent.glossary.context_manager import ContextManager as BackgroundContextManager
 from meeting_agent.memory import ActionsManager, MemoryWriter
-from meeting_agent.models import (LanguageMode, MeetingMeta, MeetingType,
-                                  ProjectConfig, TeamMember)
+from meeting_agent.models import (LanguageMode, MeetingMeta, MeetingType, ProjectConfig,
+                                  TeamMember)
 from meeting_agent.models_glossary import GlossaryEntry, TermType
 from meeting_agent.scanner import MeetingScanner
 
@@ -105,9 +104,10 @@ def resolve_project_handle(project_id: Optional[str],
     raise FileNotFoundError(f"未找到项目: {project_id}")
 
 
-def resolve_meeting_dir(project_id: Optional[str],
-                        meeting_dir_name: str,
-                        base_config: Optional[Config] = None) -> tuple[ProjectHandle, Config, Path]:
+def resolve_meeting_dir(
+        project_id: Optional[str],
+        meeting_dir_name: str,
+        base_config: Optional[Config] = None) -> tuple[ProjectHandle, Config, Path]:
     """解析会议目录并保证路径安全。"""
     config = base_config or Config()
     handle = resolve_project_handle(project_id, config)
@@ -123,14 +123,15 @@ def resolve_meeting_dir(project_id: Optional[str],
     return handle, project_config, meeting_dir
 
 
-def resolve_meeting_audio_file(project_id: Optional[str],
-                               meeting_dir_name: str,
-                               filename: str,
-                               base_config: Optional[Config] = None) -> tuple[ProjectHandle, Config, Path, Path]:
+def resolve_meeting_audio_file(
+        project_id: Optional[str],
+        meeting_dir_name: str,
+        filename: str,
+        base_config: Optional[Config] = None
+) -> tuple[ProjectHandle, Config, Path, Path]:
     """解析会议音频文件。"""
-    handle, project_config, meeting_dir = resolve_meeting_dir(project_id,
-                                                              meeting_dir_name,
-                                                              base_config)
+    handle, project_config, meeting_dir = resolve_meeting_dir(
+        project_id, meeting_dir_name, base_config)
     file_name = Path(filename or "").name
     audio_path = (meeting_dir / file_name).resolve()
     if (not audio_path.is_file() or audio_path.suffix.lower() not in AUDIO_EXTENSIONS
@@ -139,14 +140,15 @@ def resolve_meeting_audio_file(project_id: Optional[str],
     return handle, project_config, meeting_dir, audio_path
 
 
-def resolve_meeting_file(project_id: Optional[str],
-                         meeting_dir_name: str,
-                         filename: str,
-                         base_config: Optional[Config] = None) -> tuple[ProjectHandle, Config, Path, Path]:
+def resolve_meeting_file(
+        project_id: Optional[str],
+        meeting_dir_name: str,
+        filename: str,
+        base_config: Optional[Config] = None
+) -> tuple[ProjectHandle, Config, Path, Path]:
     """解析会议相关文件。"""
-    handle, project_config, meeting_dir = resolve_meeting_dir(project_id,
-                                                              meeting_dir_name,
-                                                              base_config)
+    handle, project_config, meeting_dir = resolve_meeting_dir(
+        project_id, meeting_dir_name, base_config)
     file_name = Path(filename or "").name
     file_path = (meeting_dir / file_name).resolve()
     if (not file_path.is_file() or file_path.suffix.lower() in AUDIO_EXTENSIONS
@@ -281,11 +283,14 @@ def update_project_glossary(
 def build_workspace_view_model(base_config: Optional[Config] = None) -> dict:
     """构建卡片式控制台首页的视图模型。"""
     config = base_config or Config()
-    projects = [_build_project_card(config, handle) for handle in list_project_handles(config)]
+    projects = [
+        _build_project_card(config, handle) for handle in list_project_handles(config)
+    ]
     projects.sort(key=lambda item: item["name"].lower())
 
     total_meetings = sum(project["meeting_count"] for project in projects)
-    total_pending = sum(project["pending_asr"] + project["pending_minutes"] for project in projects)
+    total_pending = sum(project["pending_asr"] + project["pending_minutes"]
+                        for project in projects)
 
     return {
         "projects": projects,
@@ -324,21 +329,31 @@ def build_project_detail_view_model(project_id: Optional[str],
     recent_actions = []
     for action in actions_mgr.load()[:8]:
         recent_actions.append({
-            "id": action.id,
-            "task": action.task,
-            "owner": action.owner or "未分配",
-            "status": action.status.value,
-            "due_date": str(action.due_date) if action.due_date else "未设置",
+            "id":
+            action.id,
+            "task":
+            action.task,
+            "owner":
+            action.owner or "未分配",
+            "status":
+            action.status.value,
+            "due_date":
+            str(action.due_date) if action.due_date else "未设置",
         })
 
     project = {
         **project_card,
-        "start_date": str(project_meta.start_date) if project_meta.start_date else "未设置",
+        "start_date":
+        str(project_meta.start_date) if project_meta.start_date else "未设置",
         "team": [m.model_dump(exclude_none=True) for m in (project_meta.team or [])],
-        "tags": project_meta.tags or [],
-        "background_excerpt": _truncate_text(background_content, limit=260),
-        "background_exists": bool(background_content.strip()),
-        "pending_term_count": len(pending_terms.suggestions),
+        "tags":
+        project_meta.tags or [],
+        "background_excerpt":
+        _truncate_text(background_content, limit=260),
+        "background_exists":
+        bool(background_content.strip()),
+        "pending_term_count":
+        len(pending_terms.suggestions),
     }
 
     return {
@@ -403,18 +418,15 @@ def build_background_editor_view_model(project_id: Optional[str],
             "name": project_meta.name,
             "description": project_meta.description or "",
         },
-        "entries": [
-            {
-                "id": e.id,
-                "topic": e.topic,
-                "question": e.question,
-                "answer": e.answer or "",
-                "source_meeting": e.source_meeting or "",
-                "is_answered": e.is_answered,
-                "created_at": e.created_at.isoformat(),
-            }
-            for e in entries
-        ],
+        "entries": [{
+            "id": e.id,
+            "topic": e.topic,
+            "question": e.question,
+            "answer": e.answer or "",
+            "source_meeting": e.source_meeting or "",
+            "is_answered": e.is_answered,
+            "created_at": e.created_at.isoformat(),
+        } for e in entries],
     }
 
 
@@ -422,12 +434,13 @@ def build_audio_manager_view_model(project_id: Optional[str],
                                    meeting_dir_name: str,
                                    base_config: Optional[Config] = None) -> dict:
     """构建会议音频管理页视图模型。"""
-    handle, project_config, meeting_dir = resolve_meeting_dir(project_id,
-                                                              meeting_dir_name,
-                                                              base_config)
+    handle, project_config, meeting_dir = resolve_meeting_dir(
+        project_id, meeting_dir_name, base_config)
     scanner = MeetingScanner(project_config)
     meta = scanner.load_meeting_meta(meeting_dir)
-    audio_files = [_build_audio_file_item(path) for path in scanner.get_audio_files(meeting_dir)]
+    audio_files = [
+        _build_audio_file_item(path) for path in scanner.get_audio_files(meeting_dir)
+    ]
 
     return {
         "project": {
@@ -444,10 +457,8 @@ def build_meeting_file_editor_view_model(project_id: Optional[str],
                                          filename: str,
                                          base_config: Optional[Config] = None) -> dict:
     """构建会议文件查看/编辑页视图模型。"""
-    handle, project_config, meeting_dir, file_path = resolve_meeting_file(project_id,
-                                                                          meeting_dir_name,
-                                                                          filename,
-                                                                          base_config)
+    handle, project_config, meeting_dir, file_path = resolve_meeting_file(
+        project_id, meeting_dir_name, filename, base_config)
     scanner = MeetingScanner(project_config)
     meta = scanner.load_meeting_meta(meeting_dir)
     content = file_path.read_text(encoding="utf-8")
@@ -563,8 +574,74 @@ def build_empty_context_pack(
         "glossaryLines": [],
         "pendingActions": [],
         "recentMeetings": [],
+        "realtimeKeywords": [],
         "realtimePrompt": "",
     }
+
+
+REALTIME_KEYWORDS_LIMIT = 100
+
+
+def _build_realtime_keywords(confirmed_terms, people_config) -> list[str]:
+    """构建 gpt-live-transcribe / gpt-transcribe 的 keywords 列表。
+
+    keywords 是"希望模型写对的字面词"，因此只收录术语表的 canonical 形式和
+    人员标准名，不收录别名——别名是既有的识别错误，喂进去会强化错误拼写。
+    """
+    keywords: list[str] = []
+    seen: set[str] = set()
+
+    def push(value: Optional[str]) -> None:
+        keyword = (value or "").strip()
+        if not keyword or len(keywords) >= REALTIME_KEYWORDS_LIMIT:
+            return
+        dedupe_key = keyword.lower()
+        if dedupe_key in seen:
+            return
+        seen.add(dedupe_key)
+        keywords.append(keyword)
+
+    for person in (people_config.people or {}).values():
+        push(person.name)
+    for entry in confirmed_terms:
+        push(entry.canonical)
+
+    return keywords
+
+
+def _build_asr_background(background_mgr) -> str:
+    """构建喂给转写模型的项目背景文本。
+
+    只取已回答的条目。`ContextManager.load()` 走的是 build_context_prompt()，
+    还会附上 "待回答问题" 列表和 markdown 小标题——那是给纪要 LLM 的格式，
+    对转写模型只是噪声。
+    """
+    parts = []
+    try:
+        entries = background_mgr.list_entries()
+    except Exception:  # pylint: disable=broad-exception-caught
+        return ""
+    for entry in entries:
+        if not entry.is_answered:
+            continue
+        topic = (entry.topic or "").strip()
+        answer = (entry.answer or "").strip()
+        if answer:
+            parts.append(f"{topic}：{answer}" if topic else answer)
+    return _truncate_text("\n".join(parts), limit=800)
+
+
+def _build_realtime_prompt(project_summary: str, background_excerpt: str,
+                           recent_meetings: list[str]) -> str:
+    """构建 gpt-live-transcribe 的自由文本 prompt（描述录音场景，不是指令）。"""
+    parts = []
+    if project_summary:
+        parts.append(f"这是「{project_summary}」的项目会议录音。")
+    if background_excerpt:
+        parts.append(f"项目背景：{background_excerpt}")
+    if recent_meetings:
+        parts.append(f"近期相关会议：{'；'.join(recent_meetings)}。")
+    return _truncate_text("\n".join(parts), limit=1200)
 
 
 def build_context_pack(
@@ -630,6 +707,12 @@ def build_context_pack(
 
     background_excerpt = _truncate_text(background_context, limit=400)
 
+    people_config = scanner.load_people_config(handle.path)
+    realtime_keywords = _build_realtime_keywords(confirmed_terms, people_config)
+    realtime_prompt = _build_realtime_prompt(project_summary,
+                                             _build_asr_background(background_mgr),
+                                             recent_meetings)
+
     return {
         "projectId": handle.project_id,
         "projectName": project_meta.name,
@@ -642,7 +725,8 @@ def build_context_pack(
         "glossaryLines": glossary_lines,
         "pendingActions": action_lines,
         "recentMeetings": recent_meetings,
-        "realtimePrompt": "",
+        "realtimeKeywords": realtime_keywords,
+        "realtimePrompt": realtime_prompt,
     }
 
 
@@ -665,23 +749,40 @@ def _build_project_card(config: Config, handle: ProjectHandle) -> dict:
     latest_meta = meetings[-1].meeting_meta if meetings else None
 
     return {
-        "id": handle.project_id,
-        "name": project_meta.name,
-        "path": str(handle.path),
-        "is_default": handle.is_default,
-        "description": project_meta.description or "",
-        "meeting_count": status.total_meetings,
-        "processed_meetings": status.processed_meetings,
-        "pending_asr": status.pending_asr,
-        "pending_minutes": status.pending_minutes,
-        "actions_total": action_stats["total"],
-        "actions_overdue": action_stats["overdue"],
-        "glossary_confirmed": len([entry for entry in glossary.entries if entry.confirmed_at]),
-        "glossary_pending": len(pending_terms.suggestions),
-        "glossary_rejected": len(rejected_terms.rejected),
-        "background_exists": bool(background_context.strip()),
-        "last_meeting": latest_meta.title if latest_meta else "",
-        "last_meeting_date": str(latest_meta.date) if latest_meta else "",
+        "id":
+        handle.project_id,
+        "name":
+        project_meta.name,
+        "path":
+        str(handle.path),
+        "is_default":
+        handle.is_default,
+        "description":
+        project_meta.description or "",
+        "meeting_count":
+        status.total_meetings,
+        "processed_meetings":
+        status.processed_meetings,
+        "pending_asr":
+        status.pending_asr,
+        "pending_minutes":
+        status.pending_minutes,
+        "actions_total":
+        action_stats["total"],
+        "actions_overdue":
+        action_stats["overdue"],
+        "glossary_confirmed":
+        len([entry for entry in glossary.entries if entry.confirmed_at]),
+        "glossary_pending":
+        len(pending_terms.suggestions),
+        "glossary_rejected":
+        len(rejected_terms.rejected),
+        "background_exists":
+        bool(background_context.strip()),
+        "last_meeting":
+        latest_meta.title if latest_meta else "",
+        "last_meeting_date":
+        str(latest_meta.date) if latest_meta else "",
     }
 
 
@@ -699,19 +800,33 @@ def _build_meeting_card(task) -> dict:
 
     return {
         **summary,
-        "date_sort": summary["date"],
-        "audio_count": len(audio_files),
-        "audio_files": audio_files,
-        "files": files,
-        "file_count": len(files),
-        "has_transcript": task.has_transcript,
-        "has_minutes": task.has_minutes,
-        "needs_asr": task.needs_asr,
-        "needs_minutes": task.needs_minutes,
-        "is_processing": task.is_processing,
-        "asr_state": task.asr_state,
-        "pending_label": " / ".join(pending_items) if pending_items else "已完成",
-        "status_tone": "processing" if task.is_processing else ("pending" if pending_items else "ready"),
+        "date_sort":
+        summary["date"],
+        "audio_count":
+        len(audio_files),
+        "audio_files":
+        audio_files,
+        "files":
+        files,
+        "file_count":
+        len(files),
+        "has_transcript":
+        task.has_transcript,
+        "has_minutes":
+        task.has_minutes,
+        "needs_asr":
+        task.needs_asr,
+        "needs_minutes":
+        task.needs_minutes,
+        "is_processing":
+        task.is_processing,
+        "asr_state":
+        task.asr_state,
+        "pending_label":
+        " / ".join(pending_items) if pending_items else "已完成",
+        "status_tone":
+        "processing" if task.is_processing else
+        ("pending" if pending_items else "ready"),
     }
 
 
@@ -804,11 +919,12 @@ def _parse_team_members(team) -> list[TeamMember]:
                 if not name or name in seen:
                     continue
                 seen.add(name)
-                result.append(TeamMember(
-                    name=name,
-                    nickname=(item.get('nickname') or '').strip() or None,
-                    role=(item.get('role') or '').strip() or None,
-                ))
+                result.append(
+                    TeamMember(
+                        name=name,
+                        nickname=(item.get('nickname') or '').strip() or None,
+                        role=(item.get('role') or '').strip() or None,
+                    ))
             elif isinstance(item, str) and item.strip():
                 name = item.strip()
                 if name not in seen:

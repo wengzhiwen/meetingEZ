@@ -13,29 +13,18 @@ import threading
 import time
 
 import requests
-from flask import (Blueprint, flash, jsonify, redirect, render_template,
-                   request, send_from_directory, session, url_for)
+from flask import (Blueprint, flash, jsonify, redirect, render_template, request,
+                   send_from_directory, session, url_for)
 
-from app.workspace_service import (DEFAULT_PROJECT_ID, NO_PROJECT_ID,
-                                   _normalize_language_mode,
-                                   _parse_team_members,
-                                   _save_project_config,
-                                   build_audio_manager_view_model,
-                                   build_background_editor_view_model,
-                                   clone_config_for_dir,
-                                   build_context_pack,
-                                   build_glossary_editor_view_model,
-                                   build_meeting_file_editor_view_model,
-                                   build_project_detail_view_model,
-                                   build_workspace_view_model,
-                                   create_meeting_workspace,
-                                   create_project_workspace,
-                                   list_project_handles,
-                                   resolve_meeting_audio_file,
-                                   resolve_meeting_dir,
-                                   resolve_meeting_file,
-                                   resolve_project_handle,
-                                   update_project_glossary)
+from app.workspace_service import (
+    DEFAULT_PROJECT_ID, NO_PROJECT_ID, _normalize_language_mode, _parse_team_members,
+    _save_project_config, build_audio_manager_view_model,
+    build_background_editor_view_model, clone_config_for_dir, build_context_pack,
+    build_glossary_editor_view_model, build_meeting_file_editor_view_model,
+    build_project_detail_view_model, build_workspace_view_model,
+    create_meeting_workspace, create_project_workspace, list_project_handles,
+    resolve_meeting_audio_file, resolve_meeting_dir, resolve_meeting_file,
+    resolve_project_handle, update_project_glossary)
 from meeting_agent.models import LanguageMode, MeetingMeta, MeetingType, ProjectConfig
 from meeting_agent.config import AUDIO_EXTENSIONS, ASR_STATE_FILE, MEETING_META_FILE, PROCESSING_LOCK_FILE, PROCESSING_PROGRESS_FILE, Config
 from meeting_agent.glossary import GlossaryManager
@@ -43,10 +32,10 @@ from meeting_agent.glossary.context_manager import ContextManager as BackgroundC
 from meeting_agent.scanner import MeetingScanner
 
 main_bp = Blueprint('main', __name__)
-TRANSCRIPTION_MODEL = os.getenv('TRANSCRIPTION_MODEL', 'gpt-realtime-whisper')
+TRANSCRIPTION_MODEL = os.getenv('TRANSCRIPTION_MODEL', 'gpt-live-transcribe')
 TRANSLATION_MODEL = os.getenv('TRANSLATION_MODEL', 'gpt-5.4-mini-2026-03-17')
 TRANSLATION_REASONING_EFFORT = os.getenv('TRANSLATION_REASONING_EFFORT', 'low').strip()
-# gpt-realtime-whisper 的延迟/准确率档位：minimal/low/medium/high/xhigh。
+# 实时转写模型的延迟/准确率档位：minimal/low/medium/high/xhigh。
 # 值越低首个 delta 越快，但准确率略降；默认 low 适合实时字幕。
 _TRANSCRIPTION_DELAY_OPTIONS = ('minimal', 'low', 'medium', 'high', 'xhigh')
 TRANSCRIPTION_DELAY = os.getenv('TRANSCRIPTION_DELAY', 'low').strip().lower()
@@ -54,10 +43,18 @@ if TRANSCRIPTION_DELAY not in _TRANSCRIPTION_DELAY_OPTIONS:
     print(f'[config] TRANSCRIPTION_DELAY={TRANSCRIPTION_DELAY!r} 不在 '
           f'{_TRANSCRIPTION_DELAY_OPTIONS}，回退为 low')
     TRANSCRIPTION_DELAY = 'low'
+# 单次 session 下发的 keywords 上限，避免把整张术语表塞进去拖慢识别。
+REALTIME_KEYWORDS_LIMIT = 100
+# 术语校正后置处理：realtime session 注入不了术语表，定格后的字幕交给便宜的文本
+# 模型按术语表纠错。gpt-5.6-luna + effort=low 实测约 4 秒 / 6 句，$0.20/$1.20 每百万 token。
+REFINE_MODEL = os.getenv('REFINE_MODEL', 'gpt-5.6-luna')
+REFINE_REASONING_EFFORT = os.getenv('REFINE_REASONING_EFFORT', 'low').strip()
+REFINE_MAX_SEGMENTS = 12
+REFINE_MAX_CHARS = 4000
 REALTIME_TRANSLATION_MODEL = os.getenv('REALTIME_TRANSLATION_MODEL',
                                        'gpt-realtime-translate')
 REALTIME_TRANSLATION_INPUT_MODEL = os.getenv('REALTIME_TRANSLATION_INPUT_MODEL',
-                                             'gpt-realtime-whisper')
+                                             'gpt-live-transcribe')
 REALTIME_TRANSLATION_LANGUAGES = {
     'es', 'pt', 'fr', 'ja', 'ru', 'zh', 'de', 'ko', 'hi', 'id', 'vi', 'it', 'en'
 }
@@ -108,28 +105,94 @@ def _build_translation_reasoning(model, effort):
     return {'effort': normalized_effort}
 
 
-def _is_gpt_realtime_whisper(model):
-    """判断是否为 gpt-realtime-whisper 或其快照名。"""
+def _supports_transcription_context(model):
+    """判断模型是否接受 prompt / keywords / languages 上下文字段。
+
+    gpt-live-transcribe 支持三者；上一代 gpt-realtime-whisper 全部不支持，
+    发送会被 Realtime client_secrets 端点以 unknown_parameter 拒绝。
+    """
+    return (model or '').strip().lower().startswith('gpt-live-transcribe')
+
+
+def _supports_transcription_delay(model):
+    """判断模型是否接受 delay 档位字段。"""
     normalized_model = (model or '').strip().lower()
-    return normalized_model.startswith('gpt-realtime-whisper')
+    return normalized_model.startswith(('gpt-live-transcribe', 'gpt-realtime-whisper'))
 
 
-def _build_realtime_transcription_config(model, language=None, prompt=''):
+def _normalize_keyword_list(values, limit=REALTIME_KEYWORDS_LIMIT):
+    """清洗 keywords：去空白、去重（大小写不敏感）、保序、限量。"""
+    if not values:
+        return []
+    if isinstance(values, str):
+        values = values.replace('\n', ',').split(',')
+
+    keywords = []
+    seen = set()
+    for raw in values:
+        keyword = str(raw or '').strip()
+        if not keyword:
+            continue
+        dedupe_key = keyword.lower()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        keywords.append(keyword)
+        if len(keywords) >= limit:
+            break
+    return keywords
+
+
+def _normalize_language_hints(values, limit=4):
+    """清洗 languages：转 ISO-639-1 短码、去重、保序、限量。"""
+    if not values:
+        return []
+    if isinstance(values, str):
+        values = values.replace('\n', ',').split(',')
+
+    languages = []
+    seen = set()
+    for raw in values:
+        code = _normalize_language_code(raw)
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        languages.append(code)
+        if len(languages) >= limit:
+            break
+    return languages
+
+
+def _build_realtime_transcription_config(model,
+                                         language=None,
+                                         languages=None,
+                                         prompt='',
+                                         keywords=None):
     """构造 Realtime transcription 配置，避免发送模型不支持的字段。
 
-    GA 的 gpt-realtime-whisper 在 Realtime session 中不支持 prompt（官方文档
-    明确），因此即使调用方传入也忽略，不下发；delay 支持
-    minimal/low/medium/high/xhigh 五档，由全局 TRANSCRIPTION_DELAY 控制。
+    gpt-live-transcribe 接受 prompt（自由文本背景）、keywords（人名/产品名等
+    字面词）、languages（期望输入语言，支持多语言混说）和 delay
+    （minimal/low/medium/high/xhigh，值越低首个 delta 越快）。
+    上一代模型只接受 model / language / delay。
     """
     transcription_config = {'model': model}
-    if language:
+
+    if _supports_transcription_context(model):
+        normalized_languages = _normalize_language_hints(languages or language)
+        if normalized_languages:
+            transcription_config['languages'] = normalized_languages
+        normalized_prompt = (prompt or '').strip()
+        if normalized_prompt:
+            transcription_config['prompt'] = normalized_prompt
+        normalized_keywords = _normalize_keyword_list(keywords)
+        if normalized_keywords:
+            transcription_config['keywords'] = normalized_keywords
+    elif language:
         transcription_config['language'] = language
-    if _is_gpt_realtime_whisper(model):
-        # 'delay' 是 gpt-realtime-whisper 的私有扩展字段，官方文档未收录；
-        # 支持 minimal/low/medium/high/xhigh，值越低首个 delta 越快。
+
+    if _supports_transcription_delay(model):
         transcription_config['delay'] = TRANSCRIPTION_DELAY
-    # prompt 在 GA Realtime session 的 gpt-realtime-whisper 上不被支持，这里
-    # 不再下发；保留入参仅为兼容调用方签名，待模型支持后再恢复。
+
     return transcription_config
 
 
@@ -156,28 +219,27 @@ def _proxy_realtime_sdp_call(openai_url):
 
     started_at = time.perf_counter()
     try:
-        resp = requests.post(
-            openai_url,
-            headers={
-                'Authorization': f'Bearer {client_secret}',
-                'Content-Type': 'application/sdp'
-            },
-            data=offer_sdp.encode('utf-8'),
-            timeout=30)
+        resp = requests.post(openai_url,
+                             headers={
+                                 'Authorization': f'Bearer {client_secret}',
+                                 'Content-Type': 'application/sdp'
+                             },
+                             data=offer_sdp.encode('utf-8'),
+                             timeout=30)
         if not resp.ok:
             print(f'[realtime-call-proxy] OpenAI error: {resp.status_code} {resp.text}')
-            return resp.text, resp.status_code, {'Content-Type': 'text/plain; charset=utf-8'}
+            return resp.text, resp.status_code, {
+                'Content-Type': 'text/plain; charset=utf-8'
+            }
 
         _log_timing('realtime_call_proxy_succeeded',
-                    elapsed_ms=round((time.perf_counter() - started_at) * 1000,
-                                     1),
+                    elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
                     endpoint=openai_url.rsplit('/', 1)[-1],
                     answer_bytes=len(resp.text))
         return resp.text, 200, {'Content-Type': 'application/sdp'}
     except Exception as e:
         _log_timing('realtime_call_proxy_failed',
-                    elapsed_ms=round((time.perf_counter() - started_at) * 1000,
-                                     1),
+                    elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
                     endpoint=openai_url.rsplit('/', 1)[-1],
                     error=str(e))
         return jsonify({'error': str(e)}), 500
@@ -203,6 +265,30 @@ def _parse_glossary(text):
         if parts:
             entries.append({'canonical': parts[0], 'aliases': parts[1:]})
     return entries
+
+
+def _extract_structured_output(result):
+    """从 Responses API 结果里取出 json_schema 结构化输出。
+
+    新版返回顶层 `output_parsed`，旧版只有 output[].content[].text 里的 JSON 串，
+    两种都要兼容。
+    """
+    structured = result.get('output_parsed')
+    if structured:
+        return structured
+
+    for output in result.get('output') or []:
+        if output.get('type') != 'message':
+            continue
+        for content in output.get('content') or []:
+            text_out = content.get('text')
+            if not text_out:
+                continue
+            try:
+                return json.loads(text_out)
+            except json.JSONDecodeError:
+                return None
+    return None
 
 
 def _get_api_key():
@@ -426,11 +512,15 @@ def realtime():
             'model': TRANSCRIPTION_MODEL
         },
         'translation': {
-            'purpose': '后置翻译',
-            'api': 'Responses API',
-            'model': TRANSLATION_MODEL,
-            'reasoning_effort': _build_translation_reasoning(
-                TRANSLATION_MODEL, TRANSLATION_REASONING_EFFORT)
+            'purpose':
+            '后置翻译',
+            'api':
+            'Responses API',
+            'model':
+            TRANSLATION_MODEL,
+            'reasoning_effort':
+            _build_translation_reasoning(TRANSLATION_MODEL,
+                                         TRANSLATION_REASONING_EFFORT)
         },
         'realtime_translation': {
             'purpose': '实时翻译',
@@ -475,8 +565,8 @@ def workspace_project_create():
             start_date=request.form.get('project_start_date'),
         )
         flash(f"项目已创建：{created['project_name']}", 'success')
-        return redirect(url_for('main.workspace_project_detail',
-                                project_id=created['project_id']))
+        return redirect(
+            url_for('main.workspace_project_detail', project_id=created['project_id']))
     except Exception as exc:  # pragma: no cover - surface validation message
         flash(str(exc), 'error')
         return redirect(url_for('main.workspace'))
@@ -567,8 +657,10 @@ def workspace_meeting_audio_upload(project_id, meeting_dir):
     """上传会议音频。"""
     try:
         _, _, resolved_meeting_dir = resolve_meeting_dir(project_id, meeting_dir)
-        uploaded_files = [item for item in request.files.getlist('audio_files')
-                          if item and item.filename]
+        uploaded_files = [
+            item for item in request.files.getlist('audio_files')
+            if item and item.filename
+        ]
         if not uploaded_files:
             raise ValueError('请选择至少一个音频文件')
 
@@ -582,36 +674,38 @@ def workspace_meeting_audio_upload(project_id, meeting_dir):
         flash(f'已上传 {len(saved_files)} 个音频文件', 'success')
     except Exception as exc:  # pragma: no cover - upload failure path
         flash(str(exc), 'error')
-    return redirect(url_for('main.workspace_meeting_audio',
-                            project_id=project_id,
-                            meeting_dir=meeting_dir))
+    return redirect(
+        url_for('main.workspace_meeting_audio',
+                project_id=project_id,
+                meeting_dir=meeting_dir))
 
 
-@main_bp.route('/workspace/project/<project_id>/meeting/<meeting_dir>/audio/<path:filename>')
+@main_bp.route(
+    '/workspace/project/<project_id>/meeting/<meeting_dir>/audio/<path:filename>')
 def workspace_meeting_audio_file(project_id, meeting_dir, filename):
     """返回音频文件，用于试听或下载。"""
     try:
-        _, _, resolved_meeting_dir, audio_path = resolve_meeting_audio_file(project_id,
-                                                                            meeting_dir,
-                                                                            filename)
+        _, _, resolved_meeting_dir, audio_path = resolve_meeting_audio_file(
+            project_id, meeting_dir, filename)
         return send_from_directory(str(resolved_meeting_dir),
                                    audio_path.name,
                                    as_attachment=request.args.get('download') == '1')
     except FileNotFoundError as exc:
         flash(str(exc), 'error')
-        return redirect(url_for('main.workspace_meeting_audio',
-                                project_id=project_id,
-                                meeting_dir=meeting_dir))
+        return redirect(
+            url_for('main.workspace_meeting_audio',
+                    project_id=project_id,
+                    meeting_dir=meeting_dir))
 
 
-@main_bp.route('/workspace/project/<project_id>/meeting/<meeting_dir>/audio/<path:filename>/rename',
-               methods=['POST'])
+@main_bp.route(
+    '/workspace/project/<project_id>/meeting/<meeting_dir>/audio/<path:filename>/rename',
+    methods=['POST'])
 def workspace_meeting_audio_rename(project_id, meeting_dir, filename):
     """重命名会议音频。"""
     try:
-        _, _, resolved_meeting_dir, audio_path = resolve_meeting_audio_file(project_id,
-                                                                            meeting_dir,
-                                                                            filename)
+        _, _, resolved_meeting_dir, audio_path = resolve_meeting_audio_file(
+            project_id, meeting_dir, filename)
         new_name = _sanitize_audio_filename(request.form.get('new_name'))
         target_path = resolved_meeting_dir / new_name
         if target_path.exists() and target_path.name != audio_path.name:
@@ -620,24 +714,28 @@ def workspace_meeting_audio_rename(project_id, meeting_dir, filename):
         flash('音频文件已重命名', 'success')
     except Exception as exc:  # pragma: no cover - defensive branch
         flash(str(exc), 'error')
-    return redirect(url_for('main.workspace_meeting_audio',
-                            project_id=project_id,
-                            meeting_dir=meeting_dir))
+    return redirect(
+        url_for('main.workspace_meeting_audio',
+                project_id=project_id,
+                meeting_dir=meeting_dir))
 
 
-@main_bp.route('/workspace/project/<project_id>/meeting/<meeting_dir>/audio/<path:filename>/delete',
-               methods=['POST'])
+@main_bp.route(
+    '/workspace/project/<project_id>/meeting/<meeting_dir>/audio/<path:filename>/delete',
+    methods=['POST'])
 def workspace_meeting_audio_delete(project_id, meeting_dir, filename):
     """删除会议音频。"""
     try:
-        _, _, _, audio_path = resolve_meeting_audio_file(project_id, meeting_dir, filename)
+        _, _, _, audio_path = resolve_meeting_audio_file(project_id, meeting_dir,
+                                                         filename)
         audio_path.unlink()
         flash('音频文件已删除', 'success')
     except Exception as exc:  # pragma: no cover - defensive branch
         flash(str(exc), 'error')
-    return redirect(url_for('main.workspace_meeting_audio',
-                            project_id=project_id,
-                            meeting_dir=meeting_dir))
+    return redirect(
+        url_for('main.workspace_meeting_audio',
+                project_id=project_id,
+                meeting_dir=meeting_dir))
 
 
 @main_bp.route('/workspace/project/<project_id>/meeting/<meeting_dir>/process',
@@ -646,8 +744,8 @@ def workspace_meeting_process(project_id, meeting_dir):
     """对单个会议执行完整处理或仅纪要处理。"""
     action = (request.form.get('action') or 'full').strip()
     try:
-        handle, project_config, resolved_meeting_dir = resolve_meeting_dir(project_id,
-                                                                           meeting_dir)
+        handle, project_config, resolved_meeting_dir = resolve_meeting_dir(
+            project_id, meeting_dir)
         scanner = MeetingScanner(project_config)
         task = next((item for item in scanner.scan_meetings()
                      if item.dir_name == resolved_meeting_dir.name), None)
@@ -674,21 +772,22 @@ def workspace_meeting_process(project_id, meeting_dir):
     return redirect(url_for('main.workspace_project_detail', project_id=project_id))
 
 
-@main_bp.route('/workspace/project/<project_id>/meeting/<meeting_dir>/files/<path:filename>',
-               methods=['GET', 'POST'])
+@main_bp.route(
+    '/workspace/project/<project_id>/meeting/<meeting_dir>/files/<path:filename>',
+    methods=['GET', 'POST'])
 def workspace_meeting_file(project_id, meeting_dir, filename):
     """文件页 — 重定向到 SPA 会议列表。"""
     return redirect(f'/#project/{project_id}/meetings')
 
 
 @main_bp.route(
-    '/workspace/project/<project_id>/meeting/<meeting_dir>/files/<path:filename>/download')
+    '/workspace/project/<project_id>/meeting/<meeting_dir>/files/<path:filename>/download'
+)
 def workspace_meeting_file_download(project_id, meeting_dir, filename):
     """下载会议文件。"""
     try:
-        _, _, resolved_meeting_dir, file_path = resolve_meeting_file(project_id,
-                                                                     meeting_dir,
-                                                                     filename)
+        _, _, resolved_meeting_dir, file_path = resolve_meeting_file(
+            project_id, meeting_dir, filename)
         return send_from_directory(str(resolved_meeting_dir),
                                    file_path.name,
                                    as_attachment=True)
@@ -770,8 +869,16 @@ def api_workspace_dashboard():
         return jsonify({
             'projects': [],
             'can_create_project': bool(cfg.projects_dir),
-            'workspace_summary': {'project_count': 0, 'meeting_count': 0, 'pending_count': 0},
-            'quick_entry': {'project_id': NO_PROJECT_ID, 'title': '快速模式', 'description': ''},
+            'workspace_summary': {
+                'project_count': 0,
+                'meeting_count': 0,
+                'pending_count': 0
+            },
+            'quick_entry': {
+                'project_id': NO_PROJECT_ID,
+                'title': '快速模式',
+                'description': ''
+            },
         })
     except Exception as exc:
         return jsonify({'error': _safe_error(exc)}), 500
@@ -807,12 +914,20 @@ def api_workspace_project_detail(project_id):
         # 目录不存在（如 PROJECTS_DIR 已配置但尚未初始化），返回空项目
         return jsonify({
             'project': {
-                'id': project_id, 'name': project_id, 'description': '',
-                'team': [], 'start_date': '-', 'meeting_count': 0,
-                'pending_asr': 0, 'pending_minutes': 0,
-                'glossary_confirmed': 0, 'glossary_pending': 0,
-                'actions_total': 0, 'actions_overdue': 0,
-                'background_exists': False, 'pending_term_count': 0,
+                'id': project_id,
+                'name': project_id,
+                'description': '',
+                'team': [],
+                'start_date': '-',
+                'meeting_count': 0,
+                'pending_asr': 0,
+                'pending_minutes': 0,
+                'glossary_confirmed': 0,
+                'glossary_pending': 0,
+                'actions_total': 0,
+                'actions_overdue': 0,
+                'background_exists': False,
+                'pending_term_count': 0,
             },
             'meetings': [],
             'recent_actions': [],
@@ -897,13 +1012,21 @@ def api_workspace_project_glossary(project_id):
             })
         for t in view_model['rejected_terms']:
             terms.append({
-                'state': 'rejected',
-                'canonical': t.canonical,
-                'aliases': getattr(t, 'aliases', []),
-                'type': getattr(t, 'type', 'other') if not hasattr(t.type, 'value') else t.type.value,
-                'context': t.context or '',
-                'source_meeting': getattr(t, 'source_meeting', '') or '',
-                'reason': t.reason or '',
+                'state':
+                'rejected',
+                'canonical':
+                t.canonical,
+                'aliases':
+                getattr(t, 'aliases', []),
+                'type':
+                getattr(t, 'type', 'other')
+                if not hasattr(t.type, 'value') else t.type.value,
+                'context':
+                t.context or '',
+                'source_meeting':
+                getattr(t, 'source_meeting', '') or '',
+                'reason':
+                t.reason or '',
             })
         terms.reverse()
         return jsonify({'project': view_model['project'], 'terms': terms})
@@ -932,13 +1055,16 @@ def api_workspace_glossary_add_entry(project_id):
             term_type = _TermType(data.get('type', 'other'))
         except ValueError:
             term_type = _TermType.OTHER
-        entry = glossary_mgr.add_term(canonical=canonical, aliases=aliases_raw, type=term_type)
+        entry = glossary_mgr.add_term(canonical=canonical,
+                                      aliases=aliases_raw,
+                                      type=term_type)
         return jsonify({'ok': True, 'canonical': entry.canonical})
     except Exception as exc:
         return jsonify({'error': _safe_error(exc)}), 400
 
 
-@main_bp.route('/api/workspace/project/<project_id>/glossary/entries/<path:canonical>', methods=['PUT'])
+@main_bp.route('/api/workspace/project/<project_id>/glossary/entries/<path:canonical>',
+               methods=['PUT'])
 def api_workspace_glossary_update_entry(project_id, canonical):
     """更新术语表中的术语 (JSON)。"""
     try:
@@ -970,7 +1096,8 @@ def api_workspace_glossary_update_entry(project_id, canonical):
         return jsonify({'error': _safe_error(exc)}), 400
 
 
-@main_bp.route('/api/workspace/project/<project_id>/glossary/entries/<path:canonical>', methods=['DELETE'])
+@main_bp.route('/api/workspace/project/<project_id>/glossary/entries/<path:canonical>',
+               methods=['DELETE'])
 def api_workspace_glossary_delete_entry(project_id, canonical):
     """从术语表中删除术语 (JSON)。"""
     try:
@@ -1054,7 +1181,8 @@ def api_workspace_project_background(project_id):
         return jsonify({'error': _safe_error(exc)}), 500
 
 
-@main_bp.route('/api/workspace/project/<project_id>/background/entries', methods=['POST'])
+@main_bp.route('/api/workspace/project/<project_id>/background/entries',
+               methods=['POST'])
 def api_workspace_background_add_entry(project_id):
     """新增背景说明条目 (JSON)。"""
     try:
@@ -1077,7 +1205,8 @@ def api_workspace_background_add_entry(project_id):
         return jsonify({'error': _safe_error(exc)}), 400
 
 
-@main_bp.route('/api/workspace/project/<project_id>/background/entries/<entry_id>', methods=['PUT'])
+@main_bp.route('/api/workspace/project/<project_id>/background/entries/<entry_id>',
+               methods=['PUT'])
 def api_workspace_background_update_entry(project_id, entry_id):
     """更新背景说明条目 (JSON)。"""
     try:
@@ -1089,7 +1218,7 @@ def api_workspace_background_update_entry(project_id, entry_id):
             entry_id=entry_id,
             topic=data.get('topic') or None,
             question=data.get('question') or None,
-            answer=data.get('answer'),   # allow empty string to clear answer
+            answer=data.get('answer'),  # allow empty string to clear answer
         )
         if not entry:
             return jsonify({'error': '未找到条目'}), 404
@@ -1098,7 +1227,8 @@ def api_workspace_background_update_entry(project_id, entry_id):
         return jsonify({'error': _safe_error(exc)}), 400
 
 
-@main_bp.route('/api/workspace/project/<project_id>/background/entries/<entry_id>', methods=['DELETE'])
+@main_bp.route('/api/workspace/project/<project_id>/background/entries/<entry_id>',
+               methods=['DELETE'])
 def api_workspace_background_delete_entry(project_id, entry_id):
     """删除背景说明条目 (JSON)。"""
     try:
@@ -1112,12 +1242,14 @@ def api_workspace_background_delete_entry(project_id, entry_id):
         return jsonify({'error': _safe_error(exc)}), 400
 
 
-@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>', methods=['PUT'])
+@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>',
+               methods=['PUT'])
 def api_workspace_meeting_update(project_id, meeting_dir):
     """更新会议基本信息 (JSON)。"""
     try:
         data = request.get_json() or {}
-        handle, project_config, meeting_path = resolve_meeting_dir(project_id, meeting_dir)
+        handle, project_config, meeting_path = resolve_meeting_dir(
+            project_id, meeting_dir)
         scanner = MeetingScanner(project_config)
         meta = scanner.load_meeting_meta(meeting_path) or MeetingMeta(
             date=meeting_dir[:10], title=meeting_dir)
@@ -1133,12 +1265,13 @@ def api_workspace_meeting_update(project_id, meeting_dir):
         if 'notes' in data:
             meta.notes = data['notes'].strip() or None
         if 'primary_language' in data:
-            meta.primary_language = data['primary_language'].strip() or meta.primary_language
+            meta.primary_language = data['primary_language'].strip(
+            ) or meta.primary_language
         if 'secondary_language' in data:
             meta.secondary_language = data['secondary_language'].strip() or None
         if 'language_mode' in data:
-            mode_str = _normalize_language_mode(
-                data['language_mode'], meta.secondary_language or '')
+            mode_str = _normalize_language_mode(data['language_mode'],
+                                                meta.secondary_language or '')
             meta.language_mode = LanguageMode(mode_str)
         meta_file = meeting_path / MEETING_META_FILE
         with open(meta_file, 'w', encoding='utf-8') as f:
@@ -1168,8 +1301,10 @@ def api_workspace_meeting_audio_upload(project_id, meeting_dir):
     """上传音频 (multipart)。"""
     try:
         _, _, resolved_meeting_dir = resolve_meeting_dir(project_id, meeting_dir)
-        uploaded_files = [item for item in request.files.getlist('audio_files')
-                          if item and item.filename]
+        uploaded_files = [
+            item for item in request.files.getlist('audio_files')
+            if item and item.filename
+        ]
         if not uploaded_files:
             raise ValueError('请选择至少一个音频文件')
 
@@ -1185,14 +1320,14 @@ def api_workspace_meeting_audio_upload(project_id, meeting_dir):
         return jsonify({'error': _safe_error(exc)}), 400
 
 
-@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/audio/<path:filename>/rename',
-               methods=['POST'])
+@main_bp.route(
+    '/api/workspace/project/<project_id>/meeting/<meeting_dir>/audio/<path:filename>/rename',
+    methods=['POST'])
 def api_workspace_meeting_audio_rename(project_id, meeting_dir, filename):
     """重命名音频 (JSON)。"""
     try:
-        _, _, resolved_meeting_dir, audio_path = resolve_meeting_audio_file(project_id,
-                                                                            meeting_dir,
-                                                                            filename)
+        _, _, resolved_meeting_dir, audio_path = resolve_meeting_audio_file(
+            project_id, meeting_dir, filename)
         data = request.get_json() or {}
         new_name = _sanitize_audio_filename(data.get('new_name'))
         target_path = resolved_meeting_dir / new_name
@@ -1204,12 +1339,14 @@ def api_workspace_meeting_audio_rename(project_id, meeting_dir, filename):
         return jsonify({'error': _safe_error(exc)}), 400
 
 
-@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/audio/<path:filename>',
-               methods=['DELETE'])
+@main_bp.route(
+    '/api/workspace/project/<project_id>/meeting/<meeting_dir>/audio/<path:filename>',
+    methods=['DELETE'])
 def api_workspace_meeting_audio_delete(project_id, meeting_dir, filename):
     """删除音频 (JSON)。"""
     try:
-        _, _, _, audio_path = resolve_meeting_audio_file(project_id, meeting_dir, filename)
+        _, _, _, audio_path = resolve_meeting_audio_file(project_id, meeting_dir,
+                                                         filename)
         audio_path.unlink()
         return jsonify({'ok': True})
     except Exception as exc:
@@ -1233,9 +1370,12 @@ def _run_meeting_process_async(lock_file: Path, cmd: list, cwd: str):
         _logger.info('开始处理: %s cmd=%s', lock_file.parent.name, ' '.join(cmd))
         with open(log_file, 'w', encoding='utf-8') as log_fh:
             result = subprocess.run(
-                cmd, cwd=cwd,
-                stdout=log_fh, stderr=subprocess.STDOUT,
-                check=False, timeout=1800,
+                cmd,
+                cwd=cwd,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                check=False,
+                timeout=1800,
             )
         if result.returncode != 0:
             # 读取日志末尾作为错误摘要
@@ -1268,8 +1408,8 @@ def api_workspace_meeting_process(project_id, meeting_dir):
     data = request.get_json() or {}
     action = (data.get('action') or 'full').strip()
     try:
-        handle, project_config, resolved_meeting_dir = resolve_meeting_dir(project_id,
-                                                                           meeting_dir)
+        handle, project_config, resolved_meeting_dir = resolve_meeting_dir(
+            project_id, meeting_dir)
         scanner = MeetingScanner(project_config)
         task = next((item for item in scanner.scan_meetings()
                      if item.dir_name == resolved_meeting_dir.name), None)
@@ -1298,8 +1438,9 @@ def api_workspace_meeting_process(project_id, meeting_dir):
         return jsonify({'error': _safe_error(exc)}), 400
 
 
-@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/process/status',
-               methods=['GET'])
+@main_bp.route(
+    '/api/workspace/project/<project_id>/meeting/<meeting_dir>/process/status',
+    methods=['GET'])
 def api_workspace_meeting_process_status(project_id, meeting_dir):
     """查询会议处理状态 (JSON)。"""
     try:
@@ -1345,10 +1486,10 @@ def api_workspace_meeting_process_status(project_id, meeting_dir):
 @main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/asr/retry',
                methods=['POST'])
 def api_workspace_asr_retry(project_id, meeting_dir):
-    """立即重试 OpenRouter Chirp 3 ASR。"""
+    """立即重试 ASR（复用已完成的分块进度）。"""
     import logging as _logging
-    _logging.getLogger('meeting_agent.process').info(
-        'ASR 重试请求: project=%s, meeting=%s', project_id, meeting_dir)
+    _logging.getLogger('meeting_agent.process').info('ASR 重试请求: project=%s, meeting=%s',
+                                                     project_id, meeting_dir)
     try:
         handle, project_config, resolved_meeting_dir = resolve_meeting_dir(
             project_id, meeting_dir)
@@ -1376,13 +1517,13 @@ def api_workspace_asr_retry(project_id, meeting_dir):
         return jsonify({'error': _safe_error(exc)}), 400
 
 
-@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/asr/fallback',
+@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/asr/restart',
                methods=['POST'])
-def api_workspace_asr_fallback(project_id, meeting_dir):
-    """降级到智谱 ASR。"""
+def api_workspace_asr_restart(project_id, meeting_dir):
+    """丢弃分块进度，从头重新转写。"""
     import logging as _logging
     _logging.getLogger('meeting_agent.process').warning(
-        'ASR 降级请求: project=%s, meeting=%s, fallback=zhipu', project_id, meeting_dir)
+        'ASR 重头转写请求: project=%s, meeting=%s', project_id, meeting_dir)
     try:
         handle, project_config, resolved_meeting_dir = resolve_meeting_dir(
             project_id, meeting_dir)
@@ -1393,12 +1534,8 @@ def api_workspace_asr_fallback(project_id, meeting_dir):
 
         from meeting_agent.asr.router import ASRRouter
         asr_router = ASRRouter(project_config)
-        asr_router.fallback_to_zhipu(resolved_meeting_dir)
-
-        # 删除旧的 zhipu progress 文件（如果存在），让转写从头开始
-        progress_file = resolved_meeting_dir / 'transcript.json.progress'
-        if progress_file.exists():
-            progress_file.unlink(missing_ok=True)
+        asr_router.reset_progress(resolved_meeting_dir)
+        asr_router.retry_now(resolved_meeting_dir)
 
         # 触发后台处理
         lock_file.write_text(str(os.getpid()))
@@ -1415,11 +1552,13 @@ def api_workspace_asr_fallback(project_id, meeting_dir):
         return jsonify({'error': _safe_error(exc)}), 400
 
 
-@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/files/<path:filename>')
+@main_bp.route(
+    '/api/workspace/project/<project_id>/meeting/<meeting_dir>/files/<path:filename>')
 def api_workspace_meeting_file(project_id, meeting_dir, filename):
     """获取文件内容 (JSON)。"""
     try:
-        view_model = build_meeting_file_editor_view_model(project_id, meeting_dir, filename)
+        view_model = build_meeting_file_editor_view_model(project_id, meeting_dir,
+                                                          filename)
         return jsonify(view_model)
     except FileNotFoundError as exc:
         return jsonify({'error': _safe_error(exc)}), 404
@@ -1427,8 +1566,9 @@ def api_workspace_meeting_file(project_id, meeting_dir, filename):
         return jsonify({'error': _safe_error(exc)}), 500
 
 
-@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/files/<path:filename>',
-               methods=['PUT'])
+@main_bp.route(
+    '/api/workspace/project/<project_id>/meeting/<meeting_dir>/files/<path:filename>',
+    methods=['PUT'])
 def api_workspace_meeting_file_save(project_id, meeting_dir, filename):
     """保存文件内容 (JSON)。"""
     try:
@@ -1442,8 +1582,9 @@ def api_workspace_meeting_file_save(project_id, meeting_dir, filename):
         return jsonify({'error': _safe_error(exc)}), 400
 
 
-@main_bp.route('/api/workspace/project/<project_id>/meeting/<meeting_dir>/files/<path:filename>',
-               methods=['DELETE'])
+@main_bp.route(
+    '/api/workspace/project/<project_id>/meeting/<meeting_dir>/files/<path:filename>',
+    methods=['DELETE'])
 def api_workspace_meeting_file_delete(project_id, meeting_dir, filename):
     """删除会议文件（转写结果、纪要等）。"""
     try:
@@ -1492,7 +1633,11 @@ def create_realtime_session():
     language = _normalize_language_code(data.get('language')) or None
     prompt = data.get('prompt', '')
     transcription_config = _build_realtime_transcription_config(
-        TRANSCRIPTION_MODEL, language=language, prompt=prompt)
+        TRANSCRIPTION_MODEL,
+        language=language,
+        languages=data.get('languages'),
+        prompt=prompt,
+        keywords=data.get('keywords'))
 
     session_config = {
         'type': 'transcription',
@@ -1537,13 +1682,14 @@ def create_realtime_session():
         print(
             f'[realtime-session] Session created: {json.dumps(session_data, indent=2)[:500]}'
         )
-        _log_timing('realtime_session_created',
-                    elapsed_ms=round((time.perf_counter() - session_started_at) * 1000,
-                                     1),
-                    language=language,
-                    has_prompt=bool(prompt),
-                    turn_detection=session_config['audio']['input'].get(
-                        'turn_detection'))
+        _log_timing(
+            'realtime_session_created',
+            elapsed_ms=round((time.perf_counter() - session_started_at) * 1000, 1),
+            model=TRANSCRIPTION_MODEL,
+            languages=transcription_config.get('languages') or language,
+            has_prompt=bool(transcription_config.get('prompt')),
+            keyword_count=len(transcription_config.get('keywords') or []),
+            turn_detection=session_config['audio']['input'].get('turn_detection'))
         return jsonify({
             'clientSecret': client_secret,
             'expiresAt': expires_at,
@@ -1619,16 +1765,14 @@ def create_realtime_translation_session():
             expires_at = expires_at or session_data.get('client_secret',
                                                         {}).get('expires_at')
 
-        print(
-            '[realtime-translation-session] Session created: '
-            f'{json.dumps(session_data, indent=2)[:500]}')
-        _log_timing(
-            'realtime_translation_session_created',
-            elapsed_ms=round((time.perf_counter() - session_started_at) * 1000,
-                             1),
-            target_language=target_language,
-            model=REALTIME_TRANSLATION_MODEL,
-            input_model=REALTIME_TRANSLATION_INPUT_MODEL)
+        print('[realtime-translation-session] Session created: '
+              f'{json.dumps(session_data, indent=2)[:500]}')
+        _log_timing('realtime_translation_session_created',
+                    elapsed_ms=round((time.perf_counter() - session_started_at) * 1000,
+                                     1),
+                    target_language=target_language,
+                    model=REALTIME_TRANSLATION_MODEL,
+                    input_model=REALTIME_TRANSLATION_INPUT_MODEL)
         return jsonify({
             'clientSecret': client_secret,
             'expiresAt': expires_at,
@@ -1638,12 +1782,11 @@ def create_realtime_translation_session():
         })
 
     except Exception as e:
-        _log_timing(
-            'realtime_translation_session_failed',
-            elapsed_ms=round((time.perf_counter() - session_started_at) * 1000,
-                             1),
-            target_language=target_language,
-            error=str(e))
+        _log_timing('realtime_translation_session_failed',
+                    elapsed_ms=round((time.perf_counter() - session_started_at) * 1000,
+                                     1),
+                    target_language=target_language,
+                    error=str(e))
         return jsonify({'error': str(e)}), 500
 
 
@@ -1692,6 +1835,7 @@ def workspace_context_pack():
     except Exception as exc:  # pragma: no cover - defensive branch
         return jsonify({'error': _safe_error(exc)}), 500
 
+
 @main_bp.route('/api/translate', methods=['POST'])
 def translate():
     """稳定后置处理：智能修正、术语增强和双向翻译。"""
@@ -1716,47 +1860,67 @@ def translate():
     reasoning = _build_translation_reasoning(
         model, data.get('reasoningEffort', TRANSLATION_REASONING_EFFORT))
 
-    system_prompt = (
-        '你是会议字幕后置处理器。只修正有明确依据的 ASR 错误，不得改写意图或补充内容。'
-        '识别原文语言，并按以下规则翻译：原文若是第一语言，只译为第二语言；原文若是第二语言，'
-        '只译为第一语言；其他语言只译为第一语言。目标语言与原文相同的字段必须为 null。'
-        '仅当 enable_correction=true 时返回 correctedTranscript，否则必须为 null。'
-        '输出必须严格符合给定 JSON schema。')
-    user_content = json.dumps({
-        'language_mode': data.get('languageMode', 'single_primary'),
-        'primary_language': primary_language,
-        'secondary_language': secondary_language,
-        'original_language_hint': original_language_hint,
-        'enable_correction': enable_correction,
-        'glossary_entries': glossary_entries,
-        'meeting_context': data.get('meetingContext', ''),
-        'recent_context': data.get('context', ''),
-        'current_text': text,
-    }, ensure_ascii=False)
+    system_prompt = ('你是会议字幕后置处理器。只修正有明确依据的 ASR 错误，不得改写意图或补充内容。'
+                     '识别原文语言，并按以下规则翻译：原文若是第一语言，只译为第二语言；原文若是第二语言，'
+                     '只译为第一语言；其他语言只译为第一语言。目标语言与原文相同的字段必须为 null。'
+                     '仅当 enable_correction=true 时返回 correctedTranscript，否则必须为 null。'
+                     '输出必须严格符合给定 JSON schema。')
+    user_content = json.dumps(
+        {
+            'language_mode': data.get('languageMode', 'single_primary'),
+            'primary_language': primary_language,
+            'secondary_language': secondary_language,
+            'original_language_hint': original_language_hint,
+            'enable_correction': enable_correction,
+            'glossary_entries': glossary_entries,
+            'meeting_context': data.get('meetingContext', ''),
+            'recent_context': data.get('context', ''),
+            'current_text': text,
+        },
+        ensure_ascii=False)
 
     schema = {
-        'type': 'object',
-        'additionalProperties': False,
+        'type':
+        'object',
+        'additionalProperties':
+        False,
         'required': [
             'originalLanguage', 'correctedTranscript', 'correctionApplied',
             'primaryTranslation', 'secondaryTranslation'
         ],
         'properties': {
-            'originalLanguage': {'type': 'string'},
-            'correctedTranscript': {
-                'anyOf': [{'type': 'string'}, {'type': 'null'}]
+            'originalLanguage': {
+                'type': 'string'
             },
-            'correctionApplied': {'type': 'boolean'},
+            'correctedTranscript': {
+                'anyOf': [{
+                    'type': 'string'
+                }, {
+                    'type': 'null'
+                }]
+            },
+            'correctionApplied': {
+                'type': 'boolean'
+            },
             'primaryTranslation': {
-                'anyOf': [{'type': 'string'}, {'type': 'null'}]
+                'anyOf': [{
+                    'type': 'string'
+                }, {
+                    'type': 'null'
+                }]
             },
             'secondaryTranslation': {
-                'anyOf': [{'type': 'string'}, {'type': 'null'}]
+                'anyOf': [{
+                    'type': 'string'
+                }, {
+                    'type': 'null'
+                }]
             },
         },
     }
     payload = {
-        'model': model,
+        'model':
+        model,
         'input': [{
             'role': 'system',
             'content': system_prompt
@@ -1778,43 +1942,24 @@ def translate():
 
     started_at = time.perf_counter()
     try:
-        resp = requests.post(
-            'https://api.openai.com/v1/responses',
-            headers={
-                'Authorization': f'Bearer {api_key}',
-                'Content-Type': 'application/json',
-            },
-            json=payload,
-            timeout=30)
+        resp = requests.post('https://api.openai.com/v1/responses',
+                             headers={
+                                 'Authorization': f'Bearer {api_key}',
+                                 'Content-Type': 'application/json',
+                             },
+                             json=payload,
+                             timeout=30)
         if not resp.ok:
             return jsonify({'error': resp.text}), resp.status_code
 
-        result = resp.json()
-        structured = result.get('output_parsed')
-        if not structured:
-            for output in result.get('output') or []:
-                if output.get('type') != 'message':
-                    continue
-                for content in output.get('content') or []:
-                    text_out = content.get('text')
-                    if not text_out:
-                        continue
-                    try:
-                        structured = json.loads(text_out)
-                    except json.JSONDecodeError:
-                        structured = None
-                    break
-                if structured:
-                    break
-
+        structured = _extract_structured_output(resp.json())
         if not isinstance(structured, dict):
             raise ValueError('Responses API 未返回有效的结构化翻译结果')
 
         original_language = (structured.get('originalLanguage')
                              or original_language_hint)
         corrected = structured.get('correctedTranscript')
-        correction_applied = _coerce_bool(
-            structured.get('correctionApplied'))
+        correction_applied = _coerce_bool(structured.get('correctionApplied'))
         if enable_correction:
             corrected = (corrected or text).strip()
             correction_applied = correction_applied and corrected != text
@@ -1838,11 +1983,10 @@ def translate():
         if not secondary_language:
             secondary_translation = None
 
-        _log_timing(
-            'translate_request_completed',
-            model=model,
-            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
-            correction_applied=correction_applied)
+        _log_timing('translate_request_completed',
+                    model=model,
+                    elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                    correction_applied=correction_applied)
         return jsonify({
             'originalLanguage': original_language,
             'rawTranscript': text,
@@ -1852,9 +1996,174 @@ def translate():
             'secondaryTranslation': secondary_translation,
         })
     except Exception as exc:
-        _log_timing(
-            'translate_request_failed',
-            model=model,
-            elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
-            error=str(exc))
+        _log_timing('translate_request_failed',
+                    model=model,
+                    elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                    error=str(exc))
+        return jsonify({'error': str(exc)}), 500
+
+
+_REFINE_SYSTEM_PROMPT = ('你是会议字幕的术语校正器。输入是若干已经定格的字幕片段，可能来自原文转写，也可能'
+                         '来自机器翻译。你的唯一职责是：按 keywords 给出的正确写法，修正片段里明显是同音、'
+                         '音近、错误分词或错误音译造成的写法错误。'
+                         '严格约束：不得改写语义，不得增删内容，不得调整语序，不得翻译，不得修改标点风格，'
+                         '不得"顺便"润色。片段用什么语言写的就保持什么语言。'
+                         '只有当某处确实对应 keywords 中的某个词、且当前写法明显是识别错误时才改；'
+                         '拿不准就原样返回并把 changed 置为 false。'
+                         '必须原样返回所有输入片段的 id，数量和顺序都不变。严格输出给定 JSON schema。')
+
+_REFINE_SCHEMA = {
+    'type': 'object',
+    'additionalProperties': False,
+    'required': ['segments'],
+    'properties': {
+        'segments': {
+            'type': 'array',
+            'items': {
+                'type': 'object',
+                'additionalProperties': False,
+                'required': ['id', 'text', 'changed'],
+                'properties': {
+                    'id': {
+                        'type': 'string'
+                    },
+                    'text': {
+                        'type': 'string'
+                    },
+                    'changed': {
+                        'type': 'boolean'
+                    },
+                },
+            },
+        },
+    },
+}
+
+
+def _parse_refine_segments(raw_segments):
+    """清洗前端提交的待校正片段，超限的直接截断。"""
+    segments = []
+    total_chars = 0
+    for raw in raw_segments or []:
+        if not isinstance(raw, dict):
+            continue
+        segment_id = str(raw.get('id') or '').strip()
+        text = str(raw.get('text') or '').strip()
+        if not segment_id or not text:
+            continue
+        if total_chars + len(text) > REFINE_MAX_CHARS:
+            break
+        segments.append({
+            'id': segment_id,
+            'lang': _normalize_language_code(raw.get('lang')) or 'auto',
+            'text': text,
+        })
+        total_chars += len(text)
+        if len(segments) >= REFINE_MAX_SEGMENTS:
+            break
+    return segments
+
+
+@main_bp.route('/api/refine-transcript', methods=['POST'])
+def refine_transcript():
+    """按术语表批量校正已定格的字幕片段（原文和译文都走这里）。
+
+    Realtime transcription session 和 Realtime Translation session 都注入不了
+    术语表（translation session 连 keywords 字段都不收），所以术语准确性靠这条
+    后置文本链路补。前端先显示 realtime 原始结果，本接口返回后再原位替换。
+    """
+    try:
+        api_key = _get_api_key()
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 500
+
+    data = request.get_json() or {}
+    segments = _parse_refine_segments(data.get('segments'))
+    if not segments:
+        return jsonify({'segments': []})
+
+    keywords = _normalize_keyword_list(data.get('keywords'))
+    if not keywords:
+        # 没有术语表就没有校正依据，直接原样返回，省掉一次调用。
+        return jsonify({'segments': []})
+
+    model = data.get('model') or REFINE_MODEL
+    reasoning = _build_translation_reasoning(
+        model, data.get('reasoningEffort', REFINE_REASONING_EFFORT))
+
+    user_content = json.dumps(
+        {
+            'keywords': keywords,
+            'meeting_context': str(data.get('context') or '')[:1000],
+            'segments': segments,
+        },
+        ensure_ascii=False)
+
+    payload = {
+        'model':
+        model,
+        'input': [{
+            'role': 'system',
+            'content': _REFINE_SYSTEM_PROMPT
+        }, {
+            'role': 'user',
+            'content': user_content
+        }],
+        'text': {
+            'format': {
+                'type': 'json_schema',
+                'name': 'TranscriptTermFix',
+                'schema': _REFINE_SCHEMA,
+                'strict': True,
+            }
+        },
+    }
+    if reasoning:
+        payload['reasoning'] = reasoning
+
+    started_at = time.perf_counter()
+    try:
+        resp = requests.post('https://api.openai.com/v1/responses',
+                             headers={
+                                 'Authorization': f'Bearer {api_key}',
+                                 'Content-Type': 'application/json',
+                             },
+                             json=payload,
+                             timeout=60)
+        if not resp.ok:
+            print(
+                f'[refine-transcript] OpenAI error: {resp.status_code} {resp.text[:300]}'
+            )
+            return jsonify({'error': resp.text}), resp.status_code
+
+        structured = _extract_structured_output(resp.json())
+        if not isinstance(structured, dict):
+            raise ValueError('Responses API 未返回有效的结构化校正结果')
+
+        original_by_id = {item['id']: item['text'] for item in segments}
+        refined = []
+        for item in structured.get('segments') or []:
+            if not isinstance(item, dict):
+                continue
+            segment_id = str(item.get('id') or '')
+            text = str(item.get('text') or '').strip()
+            original = original_by_id.get(segment_id)
+            # 只回传真正变了的片段：模型偶尔会把 changed 标反，以文本比对为准。
+            if original is None or not text or text == original:
+                continue
+            refined.append({'id': segment_id, 'text': text})
+
+        _log_timing('refine_request_completed',
+                    model=model,
+                    elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                    segments=len(segments),
+                    keyword_count=len(keywords),
+                    changed=len(refined))
+        return jsonify({'segments': refined})
+
+    except Exception as exc:
+        _log_timing('refine_request_failed',
+                    model=model,
+                    elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+                    error=str(exc))
         return jsonify({'error': str(exc)}), 500

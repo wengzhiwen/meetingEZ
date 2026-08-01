@@ -1,4 +1,4 @@
-console.log('app.js loaded, build: 20260713e');
+console.log('app.js loaded, build: 20260801a');
 // MeetingEZ - 基于 OpenAI Realtime API (WebRTC) 的实时转写
 // API Key 由后端从环境变量读取，前端不接触
 
@@ -20,6 +20,12 @@ const HIDE_BEFORE_KEY = 'meetingEZ_hideBefore';
 const ORIGINAL_TRANSCRIPT_VISIBLE_KEY = 'meetingEZ_originalTranscriptVisible';
 
 let realtimeTranslationClients = [];
+// 术语校正队列：realtime session（无论转写还是翻译）都注入不了术语表，所以定格后的
+// 条目排队交给便宜的文本模型按术语表纠错，回来再原位替换。见 flushRefineQueue()。
+let refineQueue = [];
+let refineTimer = null;
+let refineInFlight = 0;
+let refineKeywords = [];
 let betaSplitContainer = null;
 let betaPaneWhisper = null;
 let betaPaneLang1 = null;
@@ -238,6 +244,7 @@ function buildEmptyContextPack() {
         glossaryLines: [],
         pendingActions: [],
         recentMeetings: [],
+        realtimeKeywords: [],
         realtimePrompt: ''
     };
 }
@@ -883,8 +890,9 @@ async function startMeeting() {
         startVolumeMonitor(mediaStream);
         meetingStartedAt = Date.now();
         await loadWorkspaceContextPack({ silent: true });
-        // 仅开 2 路翻译 session：第 0 路兼任权威源转写来源（session.input_transcript
-        // 自带源语言转写且自动检测语言），不再额外开独立转写 session。
+        resetRefineQueue();
+        // 只开 2 路翻译 session：第 0 路兼任权威源转写来源（session.input_transcript
+        // 自带源语言转写且自动检测语言）。术语表由定格后的文本校正兜底，见 refineQueue。
         await initRealtimeTranslationConnections(languageSelection);
 
         isConnected = true;
@@ -932,7 +940,7 @@ async function initRealtimeTranslationConnections(languageSelection = null) {
 
     const connectTasks = targets.map(async (target, clientIndex) => {
         // 第 0 路（目标=第一语言）兼任权威源转写来源：其 session.input_transcript 自带
-        // 源语言转写且自动检测语言（处理中日语码切换），喂给 Whisper pane，省去额外转写 session。
+        // 源语言转写且自动检测语言（处理中日语码切换），喂给原文 pane，省去额外转写 session。
         const isSourceAuthority = clientIndex === 0;
         const client = new RealtimeTranslationClass({
             targetLanguage: target.language,
@@ -973,7 +981,8 @@ async function initRealtimeTranslationConnections(languageSelection = null) {
     const results = await Promise.allSettled(connectTasks);
     const failures = results.filter(result => result.status === 'rejected');
     if (results[0]?.status === 'rejected') {
-        throw new Error(`Realtime Translation 原文转写会话连接失败: ${results[0].reason?.message || results[0].reason}`);
+        // 第 0 路兼任原文来源，它连不上就没有原文了。
+        throw new Error(`原文转写会话连接失败: ${results[0].reason?.message || results[0].reason}`);
     }
     if (failures.length) {
         console.warn('Realtime Translation 部分连接失败:', failures);
@@ -1042,8 +1051,11 @@ function finalizeRealtimeTranslationLiveEntry(targetLang, itemId, transcript) {
         if (finalText) liveEntry.text = finalText;
         delete liveEntry._liveItemId;
         delete realtimeTranslationLiveEntryMap[targetLang][entryKey];
+        enqueueRefine(liveEntry, liveEntry.text);
     } else if (finalText) {
-        insertTranscriptInRealtimeOrder(createRealtimeTranslationPaneEntry(targetLang, finalText));
+        const entry = createRealtimeTranslationPaneEntry(targetLang, finalText);
+        insertTranscriptInRealtimeOrder(entry);
+        enqueueRefine(entry, finalText);
     }
     saveTranscripts();
     updateControls();
@@ -1059,7 +1071,11 @@ function finalizeAllRealtimeLiveEntries() {
         const itemMap = realtimeTranslationLiveEntryMap[targetLang] || {};
         Object.keys(itemMap).forEach((itemId) => {
             const entry = itemMap[itemId];
-            if (entry) delete entry._liveItemId;
+            if (entry) {
+                delete entry._liveItemId;
+                // 这些条目不会再走 finalizeRealtimeTranslationLiveEntry，在这里补入队。
+                enqueueRefine(entry, entry.text);
+            }
             delete itemMap[itemId];
         });
     });
@@ -1094,7 +1110,7 @@ function commitRealtimeInputTranscript({ itemId, transcript } = {}) {
     const baseOrder = nextRealtimeSegmentOrder();
     const segments = splitTranscriptSentences(finalText, { group: true });
     segments.forEach((segment, index) => {
-        insertTranscriptInRealtimeOrder(buildTranscriptEntryFromSegment(
+        const entry = buildTranscriptEntryFromSegment(
             segment,
             `rt-input-${itemId || `${Date.now()}-${index}`}`,
             { order: baseOrder },
@@ -1105,7 +1121,9 @@ function commitRealtimeInputTranscript({ itemId, transcript } = {}) {
                 paneRole: 'original',
                 isRealtimeTranscriptionPaneEntry: true
             }
-        ));
+        );
+        insertTranscriptInRealtimeOrder(entry);
+        enqueueRefine(entry, segment);
     });
     saveTranscripts();
     rebuildTranslationContext();
@@ -1133,7 +1151,7 @@ function commitRealtimePaneLiveBeforeStop() {
         if (originalText && !isHallucinationText(originalText)) {
             const language = detectLanguage(originalText);
             splitTranscriptSentences(originalText).forEach((segment, index) => {
-                insertTranscriptInRealtimeOrder(buildTranscriptEntryFromSegment(
+                const entry = buildTranscriptEntryFromSegment(
                     segment,
                     `streaming-original-${channel}-${Date.now()}`,
                     {},
@@ -1144,7 +1162,9 @@ function commitRealtimePaneLiveBeforeStop() {
                         paneRole: 'original',
                         isRealtimeTranscriptionPaneEntry: true
                     }
-                ));
+                );
+                insertTranscriptInRealtimeOrder(entry);
+                enqueueRefine(entry, segment);
             });
         }
     });
@@ -1167,6 +1187,10 @@ async function stopMeeting(options = {}) {
         // 先定格所有未完成的译文 live 条目，再提交原文 live，避免丢失最后半句。
         finalizeAllRealtimeLiveEntries();
         commitRealtimePaneLiveBeforeStop();
+
+        // 排干校正队列。不 await：结束会议不该卡在网络上，结果回来时条目还在，
+        // applyRefineResults 照样能原位替换并重绘。
+        void flushRefineQueue({ force: true });
 
         realtimeTranslationClients.forEach(client => client.disconnect());
         realtimeTranslationClients = [];
@@ -1709,6 +1733,33 @@ function buildMergedGlossary() {
     return lines.join('\n');
 }
 
+const REALTIME_KEYWORDS_LIMIT = 100;
+
+function buildRealtimeKeywords() {
+    // keywords 要的是"希望模型写对的字面词"，所以只取 canonical（每行 `|` 前的部分），
+    // 不带别名——别名本身就是识别错误，喂进去会强化错误拼写。
+    const keywords = [];
+    const seen = new Set();
+    const push = (value) => {
+        const keyword = (value || '').trim();
+        if (!keyword || keywords.length >= REALTIME_KEYWORDS_LIMIT) return;
+        const key = keyword.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        keywords.push(keyword);
+    };
+
+    (currentContextPack?.realtimeKeywords || []).forEach(push);
+    (currentContextPack?.glossaryLines || []).forEach((line) => push(line.split('|')[0]));
+    const manualGlossary = document.getElementById('glossaryInput')?.value || '';
+    manualGlossary.split('\n').forEach((line) => {
+        if (line.trim().startsWith('#')) return;
+        push(line.split('|')[0]);
+    });
+
+    return keywords;
+}
+
 function buildMeetingContextSummary() {
     const parts = [];
     if (currentContextPack?.projectSummary) {
@@ -2204,6 +2255,129 @@ function initializeAutoScroll() {
         btn.classList.replace('btn-primary', 'btn-outline');
         btn.textContent = '滚';
     }
+}
+
+// ---- 术语校正后置处理（通过后端 /api/refine-transcript） ----
+//
+// Realtime transcription session 和 Realtime Translation session 都注入不了术语表
+// （translation session 连 keywords 字段都不收，会 400），所以术语准确性靠这条文本
+// 链路补：realtime 结果先直接上屏，条目定格后排队送给便宜的文本模型按术语表纠错，
+// 返回后原位替换。校正失败或超时都不影响已显示的字幕。
+
+const REFINE_BATCH_SIZE = 8;
+const REFINE_DEBOUNCE_MS = 1200;
+const REFINE_MAX_CONCURRENT = 2;
+
+function resetRefineQueue() {
+    refineQueue = [];
+    refineInFlight = 0;
+    if (refineTimer) {
+        clearTimeout(refineTimer);
+        refineTimer = null;
+    }
+    // 会中设置是锁死的，术语表整场不变，开场算一次就够。
+    refineKeywords = buildRealtimeKeywords();
+    console.log(`[refine] 术语校正${refineKeywords.length ? `已启用，术语 ${refineKeywords.length} 条` : '未启用（无术语表）'}`);
+}
+
+function enqueueRefine(entry, text) {
+    if (!entry || entry._refineQueued || !refineKeywords.length) return;
+    const trimmed = (text || '').trim();
+    if (!trimmed) return;
+
+    entry._refineQueued = true;
+    refineQueue.push({
+        id: String(entry.id),
+        lang: entry.language || '',
+        text: trimmed
+    });
+
+    if (refineTimer) {
+        clearTimeout(refineTimer);
+        refineTimer = null;
+    }
+    if (refineQueue.length >= REFINE_BATCH_SIZE) {
+        void flushRefineQueue();
+    } else {
+        refineTimer = setTimeout(() => void flushRefineQueue(), REFINE_DEBOUNCE_MS);
+    }
+}
+
+async function flushRefineQueue(options = {}) {
+    if (refineTimer) {
+        clearTimeout(refineTimer);
+        refineTimer = null;
+    }
+    if (!refineQueue.length) return;
+
+    // 并发满了就等下一轮，避免慢会议里请求堆积。force 时（结束会议）不限流，直接排干。
+    if (!options.force && refineInFlight >= REFINE_MAX_CONCURRENT) {
+        refineTimer = setTimeout(() => void flushRefineQueue(), REFINE_DEBOUNCE_MS);
+        return;
+    }
+
+    const batch = refineQueue.splice(0, REFINE_BATCH_SIZE);
+    refineInFlight += 1;
+    try {
+        const resp = await fetch('/api/refine-transcript', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                segments: batch,
+                keywords: refineKeywords,
+                context: buildMeetingContextSummary()
+            })
+        });
+        if (resp.status === 401) {
+            window.location.href = '/login';
+            return;
+        }
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        applyRefineResults(data.segments);
+    } catch (error) {
+        // 校正只是增强，失败就保留 realtime 原始文本，不打扰用户。
+        console.warn('[refine] 术语校正失败，保留原文:', error);
+    } finally {
+        refineInFlight -= 1;
+    }
+
+    if (refineQueue.length) {
+        void flushRefineQueue(options);
+    }
+}
+
+function applyRefineResults(segments) {
+    let applied = 0;
+    const dirtyChannels = new Set();
+
+    (segments || []).forEach(({ id, text }) => {
+        const fixed = (text || '').trim();
+        if (!fixed) return;
+        const entry = transcripts.find(item => String(item.id) === String(id));
+        if (!entry) return;
+        // 条目可能已经被别的路径改过，只在内容仍是我们送出去的那份时才替换。
+        const current = getDisplayTranscriptText(entry);
+        if (!current || current === fixed) return;
+
+        if (isStructuredTranscript(entry)) {
+            entry.correctedTranscript = fixed;
+            entry.correctionApplied = true;
+        } else {
+            entry.text = fixed;
+        }
+        entry.refined = true;
+        dirtyChannels.add(entry.channel || 'primary');
+        applied += 1;
+    });
+
+    if (!applied) return;
+    saveTranscripts();
+    rebuildTranslationContext();
+    dirtyChannels.forEach(channel => scheduleDisplayUpdate(channel));
+    console.log(`[refine] 术语校正生效 ${applied} 条`);
 }
 
 // ---- 稳定后置翻译（通过后端 /api/translate） ----

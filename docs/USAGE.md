@@ -20,10 +20,16 @@ python run.py
 
 - `ACCESS_CODE`
   配置后启用登录页；为空则直接进入应用。
+- `TRANSCRIPTION_MODEL`
+  实时原文转写模型，默认 `gpt-live-transcribe`。
 - `REALTIME_TRANSLATION_MODEL`
   实时翻译模型，默认 `gpt-realtime-translate`。
 - `REALTIME_TRANSLATION_INPUT_MODEL`
-  Realtime Translation 的输入转写模型，默认 `gpt-realtime-whisper`。
+  Realtime Translation 的输入转写模型，默认 `gpt-live-transcribe`。
+- `OPENAI_ASR_MODEL`
+  离线文件转写模型，默认 `gpt-transcribe`。
+- `ASR_CHUNK_SECONDS`
+  离线转写分块时长，默认 120 秒。越小时间戳越细、请求越多。
 
 参考：[`env.example`](/home/wengzhiwen/meetingEZ/env.example)
 
@@ -177,7 +183,9 @@ python run.py
 
 ### 连续讲话为什么以前会卡到说完才出字？
 
-当前默认实时模型为 `gpt-realtime-whisper`，并发送 `delay: "low"` 获取低延迟流式 transcript deltas。该模型当前不接受 `turn_detection` 字段。
+当前默认实时模型为 `gpt-live-transcribe`，并发送 `delay: "low"` 获取低延迟流式 transcript deltas。
+不发送 `turn_detection`。`delay` 可选 `minimal` / `low` / `medium` / `high` / `xhigh`，
+值越低首个 delta 越快、准确率略降。
 
 ## 浏览器要求
 

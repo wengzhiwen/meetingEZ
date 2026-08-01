@@ -20,14 +20,22 @@ from rich.panel import Panel
 from meeting_agent import __version__
 from meeting_agent.config import Config, MEETING_META_FILE
 from meeting_agent.scanner import MeetingScanner
-from meeting_agent.asr.router import ASRRouter, ASRBlockedException
+from meeting_agent.asr.router import ASRRouter
 from meeting_agent.llm import LLMClient
 from meeting_agent.memory import MemoryWriter
 from meeting_agent.glossary import GlossaryManager, ContextManager, get_combined_context
 from meeting_agent.models_glossary import TermType
 from meeting_agent.progress import (
-    clear_progress, complete_step, fail_step, init_progress, set_step,
-    update_chunks, STEP_ASR, STEP_PRE_HINT, STEP_ANALYZING, STEP_MEMORY,
+    clear_progress,
+    complete_step,
+    fail_step,
+    init_progress,
+    set_step,
+    update_chunks,
+    STEP_ASR,
+    STEP_PRE_HINT,
+    STEP_ANALYZING,
+    STEP_MEMORY,
 )
 
 console = Console()
@@ -73,7 +81,7 @@ def cmd_run(args):
 
     # 检查配置
     if not config.is_configured:
-        console.print("[red]错误: 请先配置 API Key（ZHIPU_API_KEY 和 OPENAI_API_KEY）[/red]")
+        console.print("[red]错误: 请先配置 API Key（OPENAI_API_KEY）[/red]")
         return 1
 
     # 确定项目目录
@@ -161,12 +169,15 @@ def cmd_run(args):
         # 1. ASR
         if task.needs_asr and task.audio_files:
             set_step(
-                task.meeting_dir, STEP_ASR, "音频转写中",
+                task.meeting_dir,
+                STEP_ASR,
+                "音频转写中",
                 audio_total=len(task.audio_files),
             )
             logger.info(
                 "开始 ASR: meeting=%s, audio_files=%s",
-                task.dir_name, [f.name for f in task.audio_files],
+                task.dir_name,
+                [f.name for f in task.audio_files],
             )
             with Progress(
                     SpinnerColumn(),
@@ -181,12 +192,14 @@ def cmd_run(args):
                         meeting_dir=task.meeting_dir,
                         force=getattr(args, 'force_asr', False),
                     )
-                except ASRBlockedException as e:
-                    logger.warning("ASR 被阻塞: meeting=%s, %s", task.dir_name, e)
+                except Exception as e:
+                    # 单个会议的 ASR 失败不应该中断整批处理：记录状态后跳到下一个会议。
+                    # 已完成的分块进度保留在 transcript.json.progress 里，重试时可续。
+                    logger.warning("ASR 失败: meeting=%s, %s", task.dir_name, e)
                     fail_step(task.meeting_dir, STEP_ASR, str(e))
-                    console.print(f"[red]ASR 失败，已阻塞等待重试[/red]")
+                    console.print("[red]ASR 失败[/red]")
                     console.print(f"[yellow]{e}[/yellow]")
-                    console.print("[dim]可通过 Web GUI 立即重试或降级到智谱 ASR[/dim]")
+                    console.print("[dim]可通过 Web GUI 立即重试（已完成的分块会复用）[/dim]")
                     continue
 
             if not transcript:
@@ -198,7 +211,9 @@ def cmd_run(args):
             console.print(f"[green]✓ ASR 完成: {len(transcript.segments)} 个片段[/green]")
             logger.info(
                 "ASR 完成: meeting=%s, segments=%d, duration=%.2fs",
-                task.dir_name, len(transcript.segments), transcript.duration,
+                task.dir_name,
+                len(transcript.segments),
+                transcript.duration,
             )
             complete_step(task.meeting_dir, STEP_ASR)
 
@@ -222,8 +237,7 @@ def cmd_run(args):
             if has_speaker:
                 transcript_text = "\n".join(
                     f"[{_fmt_ts(seg.get('start', 0))}] Speaker {seg.get('speaker', '?')}: {seg['text']}"
-                    for seg in segments
-                )
+                    for seg in segments)
             else:
                 transcript_text = "\n".join(seg["text"] for seg in segments)
 

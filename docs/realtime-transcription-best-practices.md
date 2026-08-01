@@ -137,40 +137,51 @@ Realtime transcription 指南说明，这类会话应使用 `type: "transcriptio
 
 ### 3. 模型选择
 
-Realtime transcription 文档列出了支持的转写模型，包括：
+OpenAI 在 2026-07 发布了两个新转写模型，本项目已全量迁移过去：
 
-- `gpt-realtime-whisper`
-- `gpt-4o-transcribe`
-- `gpt-4o-mini-transcribe`
-- `whisper-1`
+- `gpt-live-transcribe`：低延迟流式转写，只支持 `v1/realtime/transcription_sessions`。
+  官方 Real World Audio Benchmark 上 WER 从 11.65%（`gpt-realtime-whisper`）降到 9.60%。
+  价格同为 $0.017/分钟。
+- `gpt-transcribe`：完成文件/批量转写，只支持 `v1/audio/transcriptions`。
+  WER 从 15.21% 降到 8.98%，$0.0045/分钟。
 
-对于实时、增量、前端用户体验，我的建议是：
+对于实时、增量、前端用户体验的建议：
 
-- 默认：`gpt-realtime-whisper`
-- 非实时文件或不需要流式 delta 的请求-响应转写：`gpt-4o-transcribe`
-- 预算更敏感时：`gpt-4o-mini-transcribe`
-- 不优先选择：`whisper-1`
+- 实时字幕：`gpt-live-transcribe`
+- 离线文件转写：`gpt-transcribe`
+- 上一代 `gpt-realtime-whisper` / `gpt-4o-transcribe` / `whisper-1` 不再推荐：
+  同价或更贵、WER 更差，且不支持 `keywords`。
 
-原因是官方文档说明，`gpt-realtime-whisper` 是为 live audio、transcript deltas 和可调延迟设计的原生流式模型；`gpt-4o-transcribe` 更适合文件或不要求流式 delta 的转写工作流，而 `whisper-1` 在 Realtime 中不会提供同样理想的原生流式体验。
+### 4. 用 `languages` 给语言提示，而不是 `language` 硬锁
 
-### 4. 已知语言时显式设置 `language`
+`gpt-live-transcribe` 接受 `languages` 数组（ISO-639-1 短码），是**提示不是限制**。
+双语会议把两种语言都给上，中英/中日码切换时比单个 `language` 更稳，也比完全自动检测
+少抖动。上一代模型只有单数的 `language`，那是硬指定。
 
-如果你的产品场景是单语种或可预知语种，建议显式传入 ISO-639-1 语言码。这样通常能：
+### 5. 术语表走 `keywords`，不要走 `prompt`
 
-- 降低误识别
-- 减少语言自动判定抖动
-- 提升整体稳定性
+`gpt-live-transcribe` 和 `gpt-transcribe` 都接受两类上下文：
 
-只有在明显的多语混说场景下，才建议依赖自动语言识别。
+- `prompt`：自由文本的**录音场景描述**（主题、场合、背景），不是指令。
+- `keywords`：**希望模型写对的字面词**数组——人名、产品名、缩写、药品名。
 
-### 5. Realtime Translation 不注入术语表
+实测有效（gpt-transcribe，同一段 TTS 音频）：
 
-> 重要：GA 的 `gpt-realtime-whisper` 在 Realtime session 中**不支持 `prompt`**
-> （官方文档已明确）。早期示例里用 `prompt` 注入术语的写法已失效，发送也不会生效。
+| | 输出 |
+|---|---|
+| 不带 keywords | 我们这次在 **Meeting EZ** 里接入了 Chirp 3 和 **Vibe Voice** |
+| 带 keywords | 我们这次在 **MeetingEZ** 里接入了 Chirp 3 和 **VibeVoice** |
 
-当前 Web 实时页只使用 `gpt-realtime-translate`，该模式同样不支持 prompt/glossary。
-术语准确性主要依赖模型自身，重要专有名词仍建议人工复核。`/api/translate`
-仅作为兼容接口保留，不属于当前实时页运行链路。
+两个注意点：
+
+- **只喂 canonical，不要喂别名。** 别名是既有的识别错误，作为 keywords 会强化错误拼写。
+- **Realtime Translation session 不接受这些字段。** `audio.input.transcription` 下只允许
+  `model`，其余会 400 `unknown_parameter`。
+
+如果你的链路是 translation session（拿不到 `keywords`），还有第二条路：**后置文本校正**。
+本项目走的就是这条——realtime 字幕先上屏，定格后批量交给便宜的文本模型按术语表纠错，
+返回再原位替换。实测 `gpt-5.6-luna` + `effort=low` 约 4 秒 / 6 句，$0.20/$1.20 每百万 token，
+比多开一路 realtime session（$0.017/分钟）便宜一个数量级。代价是术语正确的文本会晚几秒出现。
 
 ---
 
@@ -365,8 +376,9 @@ client secret 用于安全创建会话，但会话建立后，不应为了“tok
 
 优先策略：
 
-- 实时字幕链路先使用 `gpt-realtime-whisper`，并用真实会议音频评估延迟与准确率
-- 如果不是实时流式场景，再评估 `gpt-4o-transcribe`
+- 实时字幕链路使用 `gpt-live-transcribe`，并用真实会议音频评估延迟与准确率
+- 如果不是实时流式场景，用 `gpt-transcribe`
+- 维护 `keywords`：人名和专有名词的收益最大
 - 正确配置 `noise_reduction`
 - 维护术语表
 - 使用 logprobs 做可疑文本复核
@@ -375,7 +387,7 @@ client secret 用于安全创建会话，但会话建立后，不应为了“tok
 
 优先策略：
 
-- `gpt-4o-mini-transcribe`
+- 离线批量走 `gpt-transcribe`（$0.0045/分钟，比实时便宜近 4 倍）
 - 通过 VAD 避免大量无意义静音
 - 减少过碎的 turn
 - 不要把无价值的长静音一直保留在活跃转写中
@@ -413,12 +425,12 @@ client secret 用于安全创建会话，但会话建立后，不应为了“tok
 - 连接方式：WebRTC
 - 会话类型：`transcription`
 - 音频格式：24kHz mono PCM
-- 模型：`gpt-realtime-whisper`
+- 模型：`gpt-live-transcribe`
 - 延迟：`delay` 档位可配（`TRANSCRIPTION_DELAY`，默认 `low`，可选 minimal/low/medium/high/xhigh）
-- 语言：已知则显式指定；双语混说场景依赖自动识别
-- 术语提示：GA ASR 与 Realtime Translation 都不支持当前产品所需的 prompt/glossary 注入，重要术语需人工复核
+- 语言：`languages` 数组给提示，双语会议把两种都给上
+- 术语提示：`keywords` 传项目术语表 canonical + 人员标准名；`prompt` 传项目背景
 - 噪声处理：`near_field`
-- VAD：`gpt-realtime-whisper` 当前不发送 `turn_detection`
+- VAD：不发送 `turn_detection`
 - 分段/出字：依赖 `delay`（默认 `low`）的低延迟流式 transcript deltas
 - 事件消费：`delta` + `completed`
 - 数据建模：按 `item_id` 管理 live/final 状态

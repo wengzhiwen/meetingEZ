@@ -19,24 +19,16 @@ load_dotenv()
 class Settings(BaseSettings):
     """应用配置"""
 
-    # 智谱 AI ASR（OpenRouter 不可用时降级）
-    zhipu_api_key: str = ""
-    zhipu_api_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
-    zhipu_asr_model: str = "glm-asr-2512"
-
-    # OpenRouter ASR (Google Chirp 3)
-    openrouter_api_key: str = ""
-    openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    openrouter_asr_model: str = "google/chirp-3"
-    openrouter_asr_language: str = ""
-    openrouter_asr_timeout: int = 120
-    openrouter_site_url: str = ""
-    openrouter_site_name: str = "MeetingEZ"
-
-    # OpenAI GPT
+    # OpenAI（转写 + 纪要，全系统唯一的模型供应商）
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-5.4"
+
+    # 离线文件转写：gpt-transcribe（/v1/audio/transcriptions）
+    openai_asr_model: str = "gpt-transcribe"
+    # 预期输入语言，逗号分隔的 ISO-639-1 短码；留空则由模型自动检测。
+    openai_asr_languages: str = ""
+    openai_asr_timeout: int = 300
 
     # 目录配置
     meetings_dir: Path = Path("./meetings")
@@ -47,22 +39,13 @@ class Settings(BaseSettings):
     default_language: str = "zh-CN"
     timezone: str = "Asia/Shanghai"
 
-    # ASR 分块配置
-    asr_chunk_seconds: float = 30.0
-    asr_overlap_seconds: float = 2.0
-
-    # VibeVoice ASR（暂时屏蔽，保留配置以便后续恢复）
-    vibevoice_base_url: str = "http://100.83.7.45:8000"
-    vibevoice_model: str = "vibevoice"
-    vibevoice_max_tokens: int = 32768
-    vibevoice_timeout: int = 12000
-    vibevoice_max_audio_seconds: int = 600
-    vibevoice_overlap_seconds: int = 15
-
-    # ASR 重试配置（历史 VibeVoice blocked 状态兼容）
-    asr_max_retries: int = 5
-    asr_initial_retry_delay: float = 30.0
-    asr_max_retry_delay: float = 3600.0
+    # ASR 分块配置。gpt-transcribe 不返回时间戳，分块边界就是时间戳精度来源；
+    # 块内再按字符数把时间摊到句子上。不使用重叠——没有时间戳无法去重。
+    asr_chunk_seconds: float = 120.0
+    # 传给下一块 prompt 的上文长度（字符）
+    asr_context_chars: int = 400
+    # 单次请求下发的 keywords 上限
+    asr_keywords_limit: int = 100
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -128,21 +111,13 @@ class Config:
             self.projects_dir.mkdir(parents=True, exist_ok=True)
 
     @property
-    def zhipu_api_key(self) -> str:
-        return self.settings.zhipu_api_key
-
-    @property
-    def openrouter_api_key(self) -> str:
-        return self.settings.openrouter_api_key
-
-    @property
     def openai_api_key(self) -> str:
         return self.settings.openai_api_key
 
     @property
     def is_configured(self) -> bool:
         """检查是否已配置必要的 API Key"""
-        return bool(self.settings.zhipu_api_key and self.settings.openai_api_key)
+        return bool(self.settings.openai_api_key)
 
 
 # 常量

@@ -860,21 +860,21 @@ python -m meeting_agent complete A001          # 标记待办完成
 ### `.env` 文件
 
 ```bash
-# 智谱 AI ASR
-ZHIPU_API_KEY=your_zhipu_api_key
-
-# OpenAI GPT-5.4
+# OpenAI（转写 + 纪要，唯一供应商）
 OPENAI_API_KEY=your_openai_api_key
 OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_ASR_MODEL=gpt-transcribe   # 离线文件转写
+OPENAI_ASR_LANGUAGES=             # 预期输入语言，留空自动检测
 
 # Agent 配置
 PROJECTS_DIR=./projects           # 多项目模式的根目录
 MEETINGS_DIR=./meetings           # 单项目模式的会议目录
 RECENT_MINUTES_COUNT=5            # 参考最近 N 份纪要
 
-# ASR 配置
-ASR_CHUNK_SECONDS=30              # ASR 分块时长
-ASR_OVERLAP_SECONDS=2             # ASR 重叠时长
+# ASR 分块配置（gpt-transcribe 不返回时间戳，分块边界即时间戳精度；不使用重叠）
+ASR_CHUNK_SECONDS=120             # ASR 分块时长
+ASR_CONTEXT_CHARS=400             # 传给下一块 prompt 的上文长度
+ASR_KEYWORDS_LIMIT=100            # 单次请求 keywords 上限
 
 # 输出配置
 DEFAULT_LANGUAGE=zh-CN            # 默认语言
@@ -898,7 +898,8 @@ meeting_agent/
 │
 ├── asr/
 │   ├── __init__.py
-│   └── engine.py            # ASR 引擎（复用 tools/zhipu_asr.py）
+│   ├── engine.py            # OpenAIASREngine（gpt-transcribe 分块转写）
+│   └── router.py            # ASR 状态编排
 │
 ├── memory/
 │   ├── __init__.py

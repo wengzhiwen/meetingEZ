@@ -312,19 +312,18 @@ function meetingCard(m, projectId) {
                 ${m.is_processing ? `
                 <div class="spa-meeting-actions">
                     <span class="spa-processing-indicator">&#9679; 处理中，请稍候...</span>
-                </div>` : (m.asr_state && m.asr_state.status === 'blocked') ? `
+                </div>` : (m.asr_state && ['failed', 'blocked'].includes(m.asr_state.status)) ? `
                 <div class="spa-asr-blocked-banner">
                     <div class="spa-asr-blocked-info">
                         <span class="spa-asr-blocked-icon">&#9888;</span>
                         <span>ASR 转写失败: ${esc(m.asr_state.last_error || '未知错误')}</span>
                     </div>
                     <div class="spa-asr-blocked-meta">
-                        ${m.asr_state.next_retry_at ? `<span>下次自动重试: ${esc(_formatRetryTime(m.asr_state.next_retry_at))}</span>` : ''}
-                        <span>已重试 ${esc(String(m.asr_state.retry_count || 0))} 次</span>
+                        <span>重试会复用已完成的分块，只补跑失败的部分</span>
                     </div>
                     <div class="spa-asr-blocked-actions">
-                        <button class="spa-btn spa-btn-primary spa-btn-xs btn-asr-retry">立即重试</button>
-                        <button class="spa-btn spa-btn-outline spa-btn-xs btn-asr-fallback">改用智谱 ASR</button>
+                        <button class="spa-btn spa-btn-primary spa-btn-xs btn-asr-retry">继续重试</button>
+                        <button class="spa-btn spa-btn-outline spa-btn-xs btn-asr-restart">从头重新转写</button>
                     </div>
                 </div>` : m.needs_asr || m.needs_minutes ? `
                 <div class="spa-meeting-actions">
@@ -503,7 +502,7 @@ function bindEvents(container, data, projectId) {
         });
     });
 
-    // ASR 重试 / 降级按钮
+    // ASR 继续重试 / 从头重新转写
     container.querySelectorAll('.btn-asr-retry').forEach(btn => {
         btn.addEventListener('click', async () => {
             const card = btn.closest('.spa-meeting-card');
@@ -520,21 +519,21 @@ function bindEvents(container, data, projectId) {
             } catch (e) {
                 showToast(e.message, 'error');
                 btn.disabled = false;
-                btn.textContent = '立即重试';
+                btn.textContent = '继续重试';
             }
         });
     });
 
-    container.querySelectorAll('.btn-asr-fallback').forEach(btn => {
+    container.querySelectorAll('.btn-asr-restart').forEach(btn => {
         btn.addEventListener('click', async () => {
             const card = btn.closest('.spa-meeting-card');
             const dir = card.dataset.dir;
-            if (!confirm('确认改用智谱 ASR 进行转写？')) return;
+            if (!confirm('确认丢弃已完成的分块进度，从头重新转写？整段音频会重新计费。')) return;
             btn.disabled = true;
-            btn.textContent = '切换中...';
+            btn.textContent = '启动中...';
             try {
-                await api.fallbackASR(projectId, dir);
-                showToast('已切换到智谱 ASR', 'success');
+                await api.restartASR(projectId, dir);
+                showToast('已触发从头重新转写', 'success');
                 invalidateCache(projectId);
                 const { render } = await import('./project-tabs.js');
                 await render(projectId, 'meetings');
@@ -542,7 +541,7 @@ function bindEvents(container, data, projectId) {
             } catch (e) {
                 showToast(e.message, 'error');
                 btn.disabled = false;
-                btn.textContent = '改用智谱 ASR';
+                btn.textContent = '从头重新转写';
             }
         });
     });
@@ -613,13 +612,4 @@ function esc(s) {
 
 function enc(s) {
     return encodeURIComponent(s || '');
-}
-
-function _formatRetryTime(isoStr) {
-    try {
-        const d = new Date(isoStr);
-        return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-    } catch {
-        return isoStr;
-    }
 }
