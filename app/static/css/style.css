@@ -192,19 +192,34 @@ body {
 
 /* Beta pane 视觉区分：每列左侧细色条，一眼区分原文与两路译文 */
 .transcript-beta-split .beta-pane-whisper {
-    border-left: 3px solid var(--subtitle-label, #60a5fa);
+    --pane-accent: var(--subtitle-label, #60a5fa);
+    border-left: 3px solid var(--pane-accent);
 }
 .transcript-beta-split .beta-pane-lang1 {
-    border-left: 3px solid var(--accent, #5eead4);
+    --pane-accent: var(--accent, #5eead4);
+    border-left: 3px solid var(--pane-accent);
 }
 .transcript-beta-split .beta-pane-lang2 {
-    border-left: 3px solid #f0abfc;
+    --pane-accent: #f0abfc;
+    border-left: 3px solid var(--pane-accent);
 }
 
+/* 栏名收成右上角的轻量标签，不再横向切断转写内容。 */
 .transcript-beta-split .transcript-pane::before {
-    font-size: 0.36em;
-    margin: 0 0 0.5rem;
-    padding: 0.12rem 0 0.28rem;
+    top: 0.5rem;
+    z-index: 2;
+    display: block;
+    width: max-content;
+    max-width: calc(100% - 1rem);
+    margin: -0.1rem 0.35rem -1.35rem auto;
+    padding: 0.32rem 0.62rem 0.3rem;
+    color: var(--pane-accent, var(--subtitle-label));
+    border: 1px solid color-mix(in srgb, var(--pane-accent, var(--subtitle-label)) 38%, transparent);
+    border-radius: 999px;
+    background: rgba(8, 13, 27, 0.88);
+    box-shadow: 0 0.3rem 0.8rem rgba(5, 9, 20, 0.2);
+    backdrop-filter: blur(10px);
+    pointer-events: none;
 }
 
 /* Section titles are redundant when the pane header already names the lane */
