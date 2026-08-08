@@ -61,7 +61,7 @@
 ### 3.1 主流程
 
 1. **扫描**：MeetingScanner 扫描项目目录，返回任务列表
-2. **ASr 夣写**： ASREngine 调用 GLM-ASR 进行转写
+2. **ASR 转写**： ASREngine 调用 gpt-transcribe 进行转写
 3. **纪要生成**： LLMClient.analyze_meeting() 调用 GPT-5.6 生成纪要
 4. **记忆更新**： MemoryWriter.process_analysis_result() 更新记忆文件
 
@@ -135,9 +135,9 @@ needs_minutes = has_minutes or (
 
 ### 4.4 ASR 处理
 
-#### 引擎： GLM-ASR
+#### 引擎： gpt-transcribe
 
-ASREngine 基于**智谱 AI GLM-ASR** 模型进行语音识别。
+ASREngine 基于 **OpenAI gpt-transcribe** 模型进行语音识别（/v1/audio/transcriptions）。
 
 #### 特性
 - **断点续传**： 中断后可从进度文件恢复
@@ -278,15 +278,14 @@ return lock_file.exists()
 
 | 模型 | 用途 |
 |------|------|
-| GLM-ASR-2512 | 语音识别 (智谱 AI) |
+| gpt-transcribe | 语音识别 (OpenAI) |
 | GPT-5.6 | 纪要生成 (OpenAI) |
 | GPT-4o | 翻译 (可选，gpt-4 等中英翻译) |
 
 ### 6.2 环境变量
 | 变量 | 说明 |
 |------|------|
-| ZHIPU_API_KEY | 智谱 AI API Key (ASr) |
-| OPENAI_API_KEY | OpenAI API Key (纪要生成、翻译) |
+| OPENAI_API_KEY | OpenAI API Key (ASR、纪要生成) |
 | OPENAI_BASE_URL | OpenAI API 地址 |
 | OPENAI_MODEL | 默认 gpt-5.6-sol |
 | OPENAI_REASONING_EFFORT | 默认 high（none/low/medium/high/xhigh/max） |

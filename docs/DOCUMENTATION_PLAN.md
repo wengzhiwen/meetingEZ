@@ -206,7 +206,7 @@
 6. 术语应用场景
    - 实时转写：注入 realtime session prompt
    - 翻译后置处理：智能修正时的术语对齐
-   - 会后 ASR：GLM-ASR 的术语提示
+   - 会后 ASR：gpt-transcribe 的术语提示
    - 纪要生成：人名、产品名的规范写法
 
 7. 术语类型说明
@@ -386,7 +386,7 @@
    - 状态判断：has_audio、has_transcript、has_minutes、is_processing
 
 4. ASR 处理
-   - 引擎：GLM-ASR（智谱 AI）
+   - 引擎：gpt-transcribe（OpenAI）
    - 输入：音频文件（支持多段合并）
    - 输出：transcript.json
    - 特性：断点续传、重叠分块

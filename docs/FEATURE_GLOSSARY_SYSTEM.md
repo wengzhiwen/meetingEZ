@@ -55,7 +55,7 @@
 │                               │ (人名规范)  │              │
 │                               └─────────────┘              │
 │                               ┌─────────────┐              │
-│                               │ GLM-ASR     │              │
+│                               │ 会后 ASR    │              │
 │                               │ (术语提示)  │              │
 │                               └─────────────┘              │
 │                                                             │
@@ -315,7 +315,7 @@ def build_correction_map(glossary: Glossary) -> dict[str, str]:
 
 ```python
 def build_glossary_prompt(glossary: Glossary) -> str:
-    """构建用于 GLM-ASR 的术语提示"""
+    """构建用于 gpt-transcribe 的术语提示"""
     # 按类型分组
     by_type: dict[TermType, list[GlossaryEntry]] = {}
     for entry in glossary.entries:

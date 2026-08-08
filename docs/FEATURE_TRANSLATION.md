@@ -225,7 +225,7 @@ Content-Type: application/json
     "originalLanguageHint": "zh",
     "enableCorrection": false,
     "enableGlossary": true,
-    "glossary": "OpenAI|Realtime API\nGLM-ASR",
+    "glossary": "OpenAI|Realtime API\ngpt-transcribe",
     "context": "最近上下文...",
     "meetingContext": "会议上下文..."
 }

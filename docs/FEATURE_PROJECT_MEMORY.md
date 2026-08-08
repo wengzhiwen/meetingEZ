@@ -339,7 +339,7 @@ def _find_similar_action(self, task, actions, threshold=0.4):
 ## 常见问题
 
 Q: 为什么实时转写和会后 ASR 结果不同？
-A: 实时转写使用 OpenAI Realtime API，会后 ASR 使用 GLM-ASR，引擎和模型不同。
+A: 实时转写使用 OpenAI Realtime API，会后 ASR 使用 gpt-transcribe，引擎和模型不同。
 ```
 
 ### 4.5 会前智能提示（pre_meeting_hint.md）
@@ -418,7 +418,7 @@ def generate_pre_meeting_hint(self, meeting_meta, context_md, actions_md):
         ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │ 3. ASR 转写                                                      │
-│    - 使用 GLM-ASR 处理音频                                       │
+│    - 使用 gpt-transcribe 处理音频                                │
 │    - 生成 transcript.json                                        │
 └─────────────────────────────────────────────────────────────────┘
         │
@@ -525,7 +525,7 @@ def build_context_pack(
     "projectName": "MeetingEZ",
     "glossary": [
         "OpenAI Realtime API | Realtime API",
-        "GLM-ASR",
+        "gpt-transcribe",
         "MeetingEZ"
     ],
     "backgroundContext": "项目背景说明内容...",
@@ -541,7 +541,7 @@ def build_context_pack(
         "2024-01-15 周会",
         "2024-01-12 技术评审"
     ],
-    "realtimePrompt": "你正在执行会议实时转写...\n高优先级术语：OpenAI Realtime API、GLM-ASR..."
+    "realtimePrompt": "你正在执行会议实时转写...\n高优先级术语：OpenAI Realtime API、gpt-transcribe..."
 }
 ```
 
