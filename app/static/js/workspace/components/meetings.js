@@ -5,6 +5,7 @@ import { api } from '../api.js';
 import { showToast } from '../toast.js';
 import { openFile } from './slide-over.js';
 import { invalidateCache, render as renderProject } from './project-tabs.js';
+import { loadSidebar } from './sidebar.js';
 import { openModal, closeModal, lockModal, unlockModal, getModalBody } from './modal.js';
 
 function formatSize(bytes) {
@@ -146,19 +147,42 @@ function _startPolling(projectId, dir) {
                 clearInterval(timerId);
                 _pollingTimers.delete(dir);
                 if (result.error) {
-                    showToast('处理失败：' + result.error, 'error');
+                    showToast(`处理失败（${dir}）：${result.error}`, 'error');
                 } else {
-                    showToast('处理完成', 'success');
+                    showToast(`处理完成：${dir}`, 'success');
                 }
                 invalidateCache(projectId);
-                const { render } = await import('./project-tabs.js');
-                await render(projectId, 'meetings');
+                // 不整页重渲染、不切换 Tab，避免打断用户正在进行的表单输入；
+                // 只原地刷新完成会议的卡片，并同步侧栏计数
+                await _refreshMeetingCard(projectId, dir);
+                loadSidebar();
             }
         } catch {
             // 忽略轮询错误，继续轮询
         }
     }, 2000);
     _pollingTimers.set(dir, timerId);
+}
+
+/** 局部刷新单个会议卡片：原地重建该卡片，保留页面其余部分（含进行中的表单输入） */
+async function _refreshMeetingCard(projectId, dir) {
+    const oldCard = document.querySelector(`.spa-meeting-card[data-dir="${dir}"]`);
+    // 不在会议 Tab 时无需操作：toast 已提示，缓存已失效，下次进入 Tab 会加载新数据
+    if (!oldCard) return;
+    try {
+        const data = await api.getProject(projectId);
+        const m = (data.meetings || []).find(x => x.dir_name === dir);
+        if (!m) return;
+        const tmp = document.createElement('div');
+        tmp.innerHTML = meetingCard(m, projectId).trim();
+        const newCard = tmp.firstElementChild;
+        if (!newCard) return;
+        if (oldCard.classList.contains('expanded')) newCard.classList.add('expanded');
+        oldCard.replaceWith(newCard);
+        bindEvents(newCard, data, projectId);
+    } catch {
+        // 局部刷新失败不打断用户，下次渲染自然会拿到新数据
+    }
 }
 
 function _updateProgressUI(dir, result) {
