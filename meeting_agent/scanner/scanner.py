@@ -184,10 +184,6 @@ class MeetingScanner:
         pending_asr = sum(1 for t in tasks if t.needs_asr)
         pending_minutes = sum(1 for t in tasks if t.needs_minutes)
 
-        # 统计待办（需要读取 actions.md）
-        actions_file = (project_dir or self.config.meetings_dir) / "actions.md"
-        # TODO: 解析 actions.md 统计待办
-
         return ProjectStatus(
             total_meetings=total,
             processed_meetings=processed,

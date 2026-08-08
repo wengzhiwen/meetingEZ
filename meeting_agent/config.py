@@ -134,7 +134,6 @@ PRE_HINT_FILE = "pre_meeting_hint.md"
 
 CONTEXT_FILE = "context.md"
 TIMELINE_FILE = "timeline.md"
-ACTIONS_FILE = "actions.md"
 STATE_FILE = "_state.json"
 PROCESSING_LOCK_FILE = "_processing.lock"
 PROCESSING_PROGRESS_FILE = "_processing_progress.json"

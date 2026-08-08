@@ -47,7 +47,6 @@ class LLMClient:
         transcript_text: str,
         meeting_meta: Optional[MeetingMeta] = None,
         project_context: Optional[str] = None,
-        existing_actions: Optional[str] = None,
         recent_minutes: Optional[list[str]] = None,
         pre_hint: Optional[str] = None,
         people_info: Optional[str] = None,
@@ -61,7 +60,6 @@ class LLMClient:
             transcript_text: 转写文本
             meeting_meta: 会议元信息
             project_context: 项目上下文 (context.md 内容)
-            existing_actions: 现有待办 (actions.md 内容)
             recent_minutes: 最近的会议纪要列表
             pre_hint: 会议前提示
             people_info: 人员信息
@@ -76,7 +74,6 @@ class LLMClient:
             transcript_text=transcript_text,
             meeting_meta=meeting_meta,
             project_context=project_context,
-            existing_actions=existing_actions,
             recent_minutes=recent_minutes,
             pre_hint=pre_hint,
             people_info=people_info,
@@ -113,7 +110,6 @@ class LLMClient:
         self,
         meeting_meta: MeetingMeta,
         context_md: Optional[str] = None,
-        actions_md: Optional[str] = None,
     ) -> Optional[str]:
         """
         生成会议前提示
@@ -121,7 +117,6 @@ class LLMClient:
         Args:
             meeting_meta: 会议元信息
             context_md: 项目上下文
-            actions_md: 现有待办
 
         Returns:
             会议前提示 Markdown 或 None
@@ -129,7 +124,6 @@ class LLMClient:
         prompt = PromptBuilder.build_pre_meeting_hint_prompt(
             meeting_meta=meeting_meta,
             context_md=context_md,
-            actions_md=actions_md,
         )
 
         try:

@@ -20,7 +20,7 @@ from meeting_agent.config import (AUDIO_EXTENSIONS, MEETING_META_FILE, MINUTES_F
                                   Config, Settings)
 from meeting_agent.glossary import GlossaryManager
 from meeting_agent.glossary.context_manager import ContextManager as BackgroundContextManager
-from meeting_agent.memory import ActionsManager, MemoryWriter
+from meeting_agent.memory import MemoryWriter
 from meeting_agent.models import (LanguageMode, MeetingMeta, MeetingType, ProjectConfig,
                                   TeamMember)
 from meeting_agent.models_glossary import GlossaryEntry, TermType
@@ -555,7 +555,6 @@ def build_empty_context_pack(
         "backgroundSummary": "",
         "confirmedTermsCount": 0,
         "glossaryLines": [],
-        "pendingActions": [],
         "recentMeetings": [],
         "realtimeKeywords": [],
         "realtimePrompt": "",
@@ -644,17 +643,12 @@ def build_context_pack(
     project_config = clone_config_for_dir(config, handle.path)
 
     scanner = MeetingScanner(project_config)
-    actions_mgr = ActionsManager(project_config)
     glossary_mgr = GlossaryManager(project_config)
     background_mgr = BackgroundContextManager(project_config)
 
     project_meta = _load_or_build_project_meta(handle, scanner)
     glossary = glossary_mgr.load_glossary()
     background_context = background_mgr.load() or ""
-    actions = actions_mgr.load()
-    pending_actions = [
-        action for action in actions if action.status.value != "completed"
-    ]
 
     confirmed_terms = [entry for entry in glossary.entries if entry.confirmed_at]
     confirmed_terms.sort(key=lambda entry: entry.canonical.lower())
@@ -677,11 +671,6 @@ def build_context_pack(
                                                         secondary_language)
     primary = (primary_language or "zh-CN").strip()
     secondary = (secondary_language or "").strip()
-
-    action_lines = []
-    for action in pending_actions[:6]:
-        owner = action.owner or "未指定"
-        action_lines.append(f"{action.id}: {action.task}（负责人: {owner}）")
 
     project_summary_parts = [project_meta.name]
     if project_meta.description:
@@ -706,7 +695,6 @@ def build_context_pack(
         "backgroundSummary": background_excerpt,
         "confirmedTermsCount": len(confirmed_terms),
         "glossaryLines": glossary_lines,
-        "pendingActions": action_lines,
         "recentMeetings": recent_meetings,
         "realtimeKeywords": realtime_keywords,
         "realtimePrompt": realtime_prompt,
@@ -717,12 +705,10 @@ def _build_project_card(config: Config, handle: ProjectHandle) -> dict:
     """构建控制台项目卡片数据。"""
     project_config = clone_config_for_dir(config, handle.path)
     scanner = MeetingScanner(project_config)
-    actions_mgr = ActionsManager(project_config)
     glossary_mgr = GlossaryManager(project_config)
     background_mgr = BackgroundContextManager(project_config)
 
     status = scanner.get_project_status()
-    action_stats = actions_mgr.get_stats()
     glossary = glossary_mgr.load_glossary()
     pending_terms = glossary_mgr.load_pending()
     rejected_terms = glossary_mgr.load_rejected()
@@ -750,10 +736,6 @@ def _build_project_card(config: Config, handle: ProjectHandle) -> dict:
         status.pending_asr,
         "pending_minutes":
         status.pending_minutes,
-        "actions_total":
-        action_stats["total"],
-        "actions_overdue":
-        action_stats["overdue"],
         "glossary_confirmed":
         len([entry for entry in glossary.entries if entry.confirmed_at]),
         "glossary_pending":

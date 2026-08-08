@@ -242,7 +242,7 @@ def cmd_run(args):
                 transcript_text = "\n".join(seg["text"] for seg in segments)
 
             # 加载上下文
-            context_md, actions_md, recent_minutes = memory_writer.get_context_for_meeting(
+            context_md, recent_minutes = memory_writer.get_context_for_meeting(
                 project_dir)
 
             # 加载术语表和人工维护的上下文 (_context.md)
@@ -264,6 +264,15 @@ def cmd_run(args):
             # 加载会议元信息
             meeting_meta = scanner.load_meeting_meta(task.meeting_dir)
 
+            # 加载项目团队名单：注入 prompt，并用于过滤人名类术语/背景建议
+            project_config = scanner.load_project_config(project_dir)
+            people_info = None
+            if project_config and project_config.team:
+                people_info = "\n".join(
+                    f"- {m.name}" + (f"（{m.nickname}）" if m.nickname else "") +
+                    (f"：{m.role}" if m.role else "")
+                    for m in project_config.team)
+
             # 生成会议前提示
             pre_hint = None
             if meeting_meta:
@@ -277,7 +286,6 @@ def cmd_run(args):
                     pre_hint = llm_client.generate_pre_meeting_hint(
                         meeting_meta=meeting_meta,
                         context_md=context_md,
-                        actions_md=actions_md,
                     )
                     if pre_hint:
                         memory_writer.save_pre_meeting_hint(pre_hint, task.meeting_dir)
@@ -296,9 +304,9 @@ def cmd_run(args):
                     transcript_text=transcript_text,
                     meeting_meta=meeting_meta,
                     project_context=context_md,
-                    existing_actions=actions_md,
                     recent_minutes=recent_minutes,
                     pre_hint=pre_hint if meeting_meta else None,
+                    people_info=people_info,
                     glossary_context=glossary_context,
                     has_speaker_info=has_speaker,
                 )
@@ -307,6 +315,31 @@ def cmd_run(args):
                 fail_step(task.meeting_dir, STEP_ANALYZING, "GPT 分析失败")
                 console.print("[red]GPT 分析失败[/red]")
                 continue
+
+            # 项目概要中已明确的人名/昵称/职位不再进入术语建议或待解释问题
+            if project_config:
+                if result.term_suggestions:
+                    kept_terms = [
+                        t for t in result.term_suggestions
+                        if not project_config.matches_known_person(
+                            t.get("canonical", ""))
+                    ]
+                    dropped = len(result.term_suggestions) - len(kept_terms)
+                    if dropped:
+                        console.print(
+                            f"[dim]已按项目团队名单过滤 {dropped} 个已知人员术语建议[/dim]")
+                    result.term_suggestions = kept_terms
+                if result.context_questions:
+                    kept_questions = [
+                        q for q in result.context_questions
+                        if not project_config.matches_known_person(
+                            q.get("topic", ""))
+                    ]
+                    dropped = len(result.context_questions) - len(kept_questions)
+                    if dropped:
+                        console.print(
+                            f"[dim]已按项目团队名单过滤 {dropped} 个已知人员待解释问题[/dim]")
+                    result.context_questions = kept_questions
 
             # 处理术语建议
             if result.term_suggestions:
@@ -401,12 +434,10 @@ def cmd_status(args):
         table = Table()
         table.add_column("项目名称", style="cyan")
         table.add_column("会议数", justify="right")
-        table.add_column("待办数", justify="right")
 
         for proj in projects:
             status = scanner.get_project_status(proj)
-            table.add_row(proj.name, str(status.total_meetings),
-                          str(status.total_actions or "-"))
+            table.add_row(proj.name, str(status.total_meetings))
 
         console.print(table)
         return 0
@@ -428,117 +459,7 @@ def cmd_status(args):
 
     console.print(table)
 
-    # 待办统计
-    from meeting_agent.memory import ActionsManager
-    actions_mgr = ActionsManager(config)
-    stats = actions_mgr.get_stats(project_dir)
-
-    console.print("\n[bold]待办统计[/bold]")
-
-    action_table = Table()
-    action_table.add_column("状态", style="cyan")
-    action_table.add_column("数量", justify="right")
-
-    action_table.add_row("总计", str(stats["total"]))
-    action_table.add_row("已完成", f"[green]{stats['completed']}[/green]")
-    action_table.add_row("进行中", f"[yellow]{stats['in_progress']}[/yellow]")
-    action_table.add_row("待处理", str(stats["pending"]))
-    action_table.add_row("超期", f"[red]{stats['overdue']}[/red]")
-
-    console.print(action_table)
-
     return 0
-
-
-def cmd_actions(args):
-    """管理待办事项"""
-    config = Config()
-    from meeting_agent.memory import ActionsManager
-    actions_mgr = ActionsManager(config)
-
-    if getattr(args, 'overdue', False):
-        # 显示超期待办
-        overdue = actions_mgr.get_overdue()
-        if not overdue:
-            console.print("[green]没有超期待办[/green]")
-            return 0
-
-        console.print("[bold red]超期待办[/bold red]\n")
-
-        table = Table()
-        table.add_column("ID", style="cyan")
-        table.add_column("任务", max_width=40)
-        table.add_column("负责人")
-        table.add_column("截止日期")
-        table.add_column("超期天数")
-
-        from datetime import date
-        today = date.today()
-
-        for action in overdue:
-            overdue_days = (today - action.due_date).days if action.due_date else 0
-            table.add_row(
-                action.id,
-                action.task[:40],
-                action.owner,
-                str(action.due_date) if action.due_date else "-",
-                f"[red]{overdue_days}[/red]",
-            )
-
-        console.print(table)
-        return 0
-
-    # 显示所有待办
-    actions = actions_mgr.load()
-
-    if not actions:
-        console.print("[yellow]暂无待办事项[/yellow]")
-        return 0
-
-    console.print("[bold]待办事项[/bold]\n")
-
-    table = Table()
-    table.add_column("ID", style="cyan")
-    table.add_column("任务", max_width=40)
-    table.add_column("负责人")
-    table.add_column("截止日期")
-    table.add_column("状态")
-
-    status_emoji = {
-        "completed": "✅",
-        "in_progress": "🔄",
-        "overdue": "🔴",
-        "pending": "⏳",
-    }
-
-    for action in actions:
-        emoji = status_emoji.get(action.status.value, "⏳")
-        table.add_row(
-            action.id,
-            action.task[:40],
-            action.owner,
-            str(action.due_date) if action.due_date else "-",
-            emoji,
-        )
-
-    console.print(table)
-    return 0
-
-
-def cmd_complete(args):
-    """标记待办完成"""
-    config = Config()
-    from meeting_agent.memory import ActionsManager
-    actions_mgr = ActionsManager(config)
-
-    action_id = args.action_id
-
-    if actions_mgr.mark_completed(action_id):
-        console.print(f"[green]✓ 待办 {action_id} 已标记为完成[/green]")
-        return 0
-    else:
-        console.print(f"[red]✗ 未找到待办 {action_id}[/red]")
-        return 1
 
 
 def cmd_init_project(args):
@@ -825,16 +746,6 @@ def main():
     status_parser = subparsers.add_parser("status", help="显示项目状态")
     status_parser.add_argument("--project", type=str, help="项目名称（多项目模式）")
     status_parser.set_defaults(func=cmd_status)
-
-    # actions 命令
-    actions_parser = subparsers.add_parser("actions", help="管理待办事项")
-    actions_parser.add_argument("--overdue", action="store_true", help="仅显示超期待办")
-    actions_parser.set_defaults(func=cmd_actions)
-
-    # complete 命令
-    complete_parser = subparsers.add_parser("complete", help="标记待办完成")
-    complete_parser.add_argument("action_id", help="待办 ID（如 A001）")
-    complete_parser.set_defaults(func=cmd_complete)
 
     # init-project 命令
     init_project_parser = subparsers.add_parser("init-project", help="初始化项目")

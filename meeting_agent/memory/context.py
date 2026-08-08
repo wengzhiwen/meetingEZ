@@ -21,7 +21,6 @@ class ContextManager:
 
 > 最后更新: {last_updated}
 > 会议总数: {total_meetings}
-> 待办总数: {total_actions}（完成 {completed_actions}，进行中 {in_progress_actions}，超期 {overdue_actions}）
 
 ---
 
@@ -50,12 +49,6 @@ class ContextManager:
 ---
 
 ## 近期关注
-
-### 本周待办
-{week_actions}
-
-### 超期待办
-{overdue_actions_list}
 
 ### 下次会议
 {next_meeting}
@@ -171,7 +164,6 @@ class ContextManager:
 
 > 最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M')}
 > 会议总数: 0
-> 待办总数: 0
 
 ---
 
@@ -213,12 +205,6 @@ class ContextManager:
 ---
 
 ## 近期关注
-
-### 本周待办
-*暂无*
-
-### 超期待办
-*暂无*
 
 ### 下次会议
 *待安排*

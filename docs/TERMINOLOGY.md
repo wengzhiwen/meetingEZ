@@ -13,7 +13,6 @@
 - `live transcript` / `final transcript` / `正式转写`
 - `术语表` / `专有名词表` / `glossary`
 - `context.md` / `_context.md`
-- `行动项` / `待办`
 
 这份文档的目标，是给后续设计、文档、UI 文案、代码命名提供一套统一参照，减少讨论和实现过程中的歧义。
 
@@ -138,8 +137,6 @@ Realtime API 中某个条目 completed，只能说明它在会中状态上已完
 | 推荐术语 | 英文别名 | 说明 |
 |----------|----------|------|
 | 会议纪要 | Meeting Minutes | `minutes.md`，本次会议的结构化总结 |
-| 行动项 | Action Item | 从会议中提炼出的可追踪任务 |
-| 待办 | Todo / Task List Item | 面向列表和 UI 的简化叫法，可视为行动项的展示别名 |
 | 项目时间线 | Project Timeline | `timeline.md`，跨会议的里程碑、决策与风险演进 |
 | 项目上下文 | Project Context | `context.md`，自动维护的项目状态摘要 |
 | 会议前提示 | Pre-Meeting Hint | `pre_meeting_hint.md`，面向下一次会议的提示信息 |
@@ -147,8 +144,6 @@ Realtime API 中某个条目 completed，只能说明它在会中状态上已完
 
 ### 约定
 
-- 设计和数据模型层优先使用“行动项（Action Item）”
-- UI 和列表标题可以继续用“待办”这种更短的词
 - “项目记忆”是总称，“项目上下文”只是其中一个文件
 
 ## 2.6 术语与背景知识资产
@@ -271,22 +266,6 @@ Realtime API 中某个条目 completed，只能说明它在会中状态上已完
   建议未来改为 `BackgroundContextManager` 或 `ReferenceContextManager`
 
 这不是要求现在立刻改代码，而是先把语义边界定清楚。
-
-## 3.5 `行动项` vs `待办`
-
-### 推荐结论
-
-统一采用：
-
-- 规范术语：行动项（Action Item）
-- UI 简称：待办
-
-### 原因
-
-- 数据模型、LLM 输出、`actions.md` 的语义更接近“行动项”
-- 用户界面里“待办”更短、更易读
-
-因此，二者不是冲突关系，而是“规范名 + 展示名”的关系。
 
 ## 四、语言相关术语
 

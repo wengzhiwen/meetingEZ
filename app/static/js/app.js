@@ -242,7 +242,6 @@ function buildEmptyContextPack() {
         backgroundSummary: '',
         confirmedTermsCount: 0,
         glossaryLines: [],
-        pendingActions: [],
         recentMeetings: [],
         realtimeKeywords: [],
         realtimePrompt: ''
@@ -1767,9 +1766,6 @@ function buildMeetingContextSummary() {
     }
     if (currentContextPack?.backgroundSummary) {
         parts.push(`背景说明: ${currentContextPack.backgroundSummary}`);
-    }
-    if (currentContextPack?.pendingActions?.length) {
-        parts.push(`近期行动项: ${currentContextPack.pendingActions.join('；')}`);
     }
     if (currentContextPack?.recentMeetings?.length) {
         parts.push(`近期会议: ${currentContextPack.recentMeetings.join('；')}`);

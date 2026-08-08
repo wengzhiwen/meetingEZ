@@ -6,8 +6,6 @@ __version__ = "0.1.0"
 
 from meeting_agent.config import Config, get_settings
 from meeting_agent.models import (
-    ActionItem,
-    ActionType,
     GPTAnalysisResult,
     LanguageMode,
     MeetingMeta,
@@ -25,8 +23,6 @@ from meeting_agent.models import (
 __all__ = [
     "Config",
     "get_settings",
-    "ActionItem",
-    "ActionType",
     "GPTAnalysisResult",
     "LanguageMode",
     "MeetingMeta",

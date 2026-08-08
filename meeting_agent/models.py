@@ -28,15 +28,6 @@ class LanguageMode(str, Enum):
     BILINGUAL = "bilingual"  # 双语言会议
 
 
-class ActionType(str, Enum):
-    """待办状态"""
-    PENDING = "pending"  # 待处理
-    IN_PROGRESS = "in_progress"  # 进行中
-    COMPLETED = "completed"  # 已完成
-    OVERDUE = "overdue"  # 已超期
-    BLOCKED = "blocked"  # 阻塞中
-
-
 class RiskLevel(str, Enum):
     """风险等级"""
     HIGH = "high"
@@ -85,7 +76,6 @@ class MeetingMeta(BaseModel):
     participants: list[str] = Field(default_factory=list)
     host: Optional[str] = None
     notes: Optional[str] = None
-    expected_actions: list[str] = Field(default_factory=list)
     language: str = "zh-CN"  # 兼容旧字段，等价于 primary_language 的默认来源
     language_mode: LanguageMode = LanguageMode.SINGLE_PRIMARY
     primary_language: Optional[str] = None
@@ -150,20 +140,27 @@ class ProjectConfig(BaseModel):
     tags: list[str] = Field(default_factory=list)
     meeting_types: list[dict[str, str]] = Field(default_factory=list)
 
+    def matches_known_person(self, text: str) -> bool:
+        """判断文本是否命中团队名单中已明确的姓名/昵称/职位。
 
-class ActionItem(BaseModel):
-    """待办事项"""
-    id: str
-    task: str
-    owner: str
-    due_date: Optional[date] = None
-    status: ActionType = ActionType.PENDING
-    created_at: datetime
-    created_in_meeting: str  # 会议目录名
-    priority: str = "P1"
-    mentions: list[str] = Field(default_factory=list)  # 后续提及的会议
-    blocked_by: Optional[str] = None
-    notes: Optional[str] = None
+        姓名和昵称按双向包含匹配（覆盖"本金（标准姓名待确认）"这类写法），
+        职位只做精确匹配（避免"研发"命中"上海研发负责人"这类误伤）。
+        """
+        if not text:
+            return False
+        norm = text.strip().lower()
+        if len(norm) < 2:
+            return False
+        for member in self.team:
+            for value in (member.name, member.nickname):
+                if value and len(value.strip()) >= 2:
+                    token = value.strip().lower()
+                    if token in norm or norm in token:
+                        return True
+            if member.role and member.role.strip():
+                if norm == member.role.strip().lower():
+                    return True
+        return False
 
 
 class TimelineEntry(BaseModel):
@@ -240,13 +237,6 @@ class GPTAnalysisResult(BaseModel):
     # 会议纪要
     minutes: str = ""
 
-    # 新增待办
-    new_actions: list[dict[str, Any]] = Field(default_factory=list)
-
-    # 已完成/提及的待办 ID
-    completed_actions: list[str] = Field(default_factory=list)
-    mentioned_actions: list[str] = Field(default_factory=list)
-
     # 时间线条目
     timeline_entry: Optional[dict[str, Any]] = None
 
@@ -266,9 +256,6 @@ class ProjectStatus(BaseModel):
     processed_meetings: int = 0
     pending_asr: int = 0
     pending_minutes: int = 0
-    total_actions: int = 0
-    completed_actions: int = 0
-    overdue_actions: int = 0
     last_updated: Optional[datetime] = None
 
 

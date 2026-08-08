@@ -132,7 +132,6 @@ export function renderOverview(container, data, projectId) {
                     ${p.pending_asr ? `<span class="spa-pill spa-pill-warn">${p.pending_asr} 待转写</span>` : ''}
                     ${p.pending_minutes ? `<span class="spa-pill spa-pill-warn">${p.pending_minutes} 待纪要</span>` : ''}
                     ${p.glossary_confirmed ? `<span class="spa-pill">${p.glossary_confirmed} 术语</span>` : ''}
-                    ${p.actions_overdue ? `<span class="spa-pill spa-pill-warn">${p.actions_overdue} 逾期</span>` : ''}
                 </div>
             </div>
         </div>

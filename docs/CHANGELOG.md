@@ -1,3 +1,14 @@
+2026-08-08 已知成员不再进入术语/背景建议
+- **人员角色注入分析 prompt**：`_project.json` 团队名单（姓名/昵称/职位）通过 `people_info` 参数传入分析 prompt（该参数此前一直闲置），prompt 明确禁止对已知成员再提术语建议或待解释问题
+- **确定性后置过滤**：新增 `ProjectConfig.matches_known_person()`，姓名/昵称双向包含匹配、职位精确匹配；术语建议按 `canonical`、待解释问题按 `topic` 在写入前过滤，过滤数量在 CLI 输出中提示
+
+2026-08-08 移除行动项子系统
+- **纪要不再整理行动项**：分析 prompt 移除 `new_actions` / `completed_actions` / `mentioned_actions` 输出字段和"现有待办"输入段，各会议纪要模板删除行动项表格
+- **删除待办追踪子系统**：移除 `ActionsManager`（`memory/actions.py`）、`actions` / `complete` CLI 命令、`status` 待办统计、context.md 待办段落、会前提示中的待办相关项
+- **Web 同步移除**：项目卡片 `actions_total` / `actions_overdue` 统计、概览页"逾期" pill、Context Pack 的 `pendingActions`，实时页上下文摘要不再包含近期行动项
+- 既有项目目录里的 `actions.md` 数据文件保留在磁盘上，仅不再生成和读取
+- **prompt 增加显式禁令**：移除字段后 GPT-5.6 仍会模仿 context.md 旧"待办"段落和纪要写作惯例自行生成"行动项"章节，系统提示和输出要求中补充明确禁止，责任人/截止时间信息并入议题讨论记录或关键决策
+
 2026-08-08 纪要模型升级 GPT-5.6 与调用方式迁移
 - **纪要生成模型升级**：`gpt-5.4` → `gpt-5.6-sol`，默认 `reasoning.effort = high`（新增 `OPENAI_REASONING_EFFORT` 环境变量）
 - **纪要调用迁移到 Responses API**：`LLMClient` 从 Chat Completions 改为 `client.responses.create`（`instructions` + `input` + `reasoning`）；GPT-5.6 只支持默认 temperature，不再下发该参数

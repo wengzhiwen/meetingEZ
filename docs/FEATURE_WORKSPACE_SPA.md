@@ -233,8 +233,6 @@ function subscribe(fn) {
     pending_minutes: 1,
     glossary_confirmed: 15,
     glossary_pending: 3,
-    actions_total: 20,
-    actions_overdue: 1,
     background_exists: true
   },
   meetings: [

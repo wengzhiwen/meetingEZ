@@ -11,18 +11,13 @@ from typing import Optional
 
 from meeting_agent.config import (
     Config,
-    CONTEXT_FILE,
-    TIMELINE_FILE,
-    ACTIONS_FILE,
     MINUTES_FILE,
     MEETING_META_FILE,
     PRE_HINT_FILE,
 )
 from meeting_agent.memory.context import ContextManager
-from meeting_agent.memory.actions import ActionsManager
 from meeting_agent.memory.timeline import TimelineManager
 from meeting_agent.models import (
-    ActionItem,
     GPTAnalysisResult,
     MeetingMeta,
     TimelineEntry,
@@ -38,7 +33,6 @@ class MemoryWriter:
     def __init__(self, config: Optional[Config] = None):
         self.config = config or Config()
         self.context_mgr = ContextManager(config)
-        self.actions_mgr = ActionsManager(config)
         self.timeline_mgr = TimelineManager(config)
 
     def process_analysis_result(
@@ -60,32 +54,7 @@ class MemoryWriter:
         # 1. 保存会议纪要
         self._save_minutes(result.minutes, meeting_dir)
 
-        # 2. 添加新待办
-        for action_data in result.new_actions:
-            due_date = None
-            if action_data.get("due_date"):
-                try:
-                    due_date = datetime.strptime(action_data["due_date"], "%Y-%m-%d").date()
-                except ValueError:
-                    pass
-
-            self.actions_mgr.add(
-                task=action_data.get("task", ""),
-                owner=action_data.get("owner", ""),
-                due_date=due_date,
-                meeting_dir=meeting_dir.name,
-                priority=action_data.get("priority", "P1"),
-                project_dir=project_dir,
-            )
-
-        # 3. 标记已完成/提及的待办
-        for action_id in result.completed_actions:
-            self.actions_mgr.mark_completed(action_id, project_dir)
-
-        for action_id in result.mentioned_actions:
-            self.actions_mgr.mark_mentioned(action_id, meeting_dir.name, project_dir)
-
-        # 4. 添加时间线条目
+        # 2. 添加时间线条目
         if result.timeline_entry:
             entry = TimelineEntry(
                 date=meeting_meta.date,
@@ -98,7 +67,7 @@ class MemoryWriter:
             )
             self.timeline_mgr.add_entry(entry, project_dir)
 
-        # 5. 更新项目上下文
+        # 3. 更新项目上下文
         self.context_mgr.update(
             project_dir=project_dir,
             new_decisions=result.context_updates.get("new_decisions", []),
@@ -128,22 +97,19 @@ class MemoryWriter:
     def get_context_for_meeting(
         self,
         project_dir: Optional[Path] = None,
-    ) -> tuple[Optional[str], Optional[str], list[str]]:
+    ) -> tuple[Optional[str], list[str]]:
         """
         获取会议所需的上下文信息
 
         Returns:
-            (context_md, actions_md, recent_minutes_list)
+            (context_md, recent_minutes_list)
         """
         context_md = self.context_mgr.load(project_dir)
-
-        actions = self.actions_mgr.load(project_dir)
-        actions_md = self.actions_mgr._generate_actions_md(actions) if actions else None
 
         # 获取最近的纪要
         recent_minutes = self._get_recent_minutes(project_dir)
 
-        return context_md, actions_md, recent_minutes
+        return context_md, recent_minutes
 
     def _get_recent_minutes(
         self,
@@ -220,9 +186,6 @@ class MemoryWriter:
             start_date=start_date,
             project_dir=project_dir,
         )
-
-        # 创建空的待办列表
-        self.actions_mgr.save([], project_dir)
 
         # 创建初始时间线
         self.timeline_mgr.save(f"""# 项目时间线

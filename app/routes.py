@@ -925,8 +925,6 @@ def api_workspace_project_detail(project_id):
                 'pending_minutes': 0,
                 'glossary_confirmed': 0,
                 'glossary_pending': 0,
-                'actions_total': 0,
-                'actions_overdue': 0,
                 'background_exists': False,
                 'pending_term_count': 0,
             },

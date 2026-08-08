@@ -207,7 +207,6 @@ def _save_progress(progress_file, idx, chunk_start, chunk_end, result):
 - transcript_text: 转写文本
 - meeting_meta: 会议元信息
 - project_context: 项目上下文 (可选)
-- existing_actions: 现有待办 (可选)
 - recent_minutes: 最近 5 份纪要
 - pre_hint: 会前提示(可选)
 - glossary_context: 术语表和背景说明
@@ -220,9 +219,6 @@ def _save_progress(progress_file, idx, chunk_start, chunk_end, result):
   - meeting_type: 会议类型
   - summary: 摘要
   - key_decisions: 关键决策
-  - new_actions: 新增待办列表
-  - completed_actions: 已完成待办 ID 刽数
-  - mentioned_actions: 被提及待办 ID 刽数
   - timeline_entry: 时间线条目
   - context_updates: 上下文更新
   - term_suggestions: 术语建议

@@ -318,7 +318,7 @@
 说明：
 
 - 当 `project=__none__` 时，表示快速模式，返回空增强包
-- 当传入真实项目时，会返回项目摘要、背景说明、术语、近期会议和待办摘要
+- 当传入真实项目时，会返回项目摘要、背景说明、术语和近期会议
 
 返回字段示例：
 
@@ -331,7 +331,6 @@
   "secondaryLanguage": "",
   "confirmedTermsCount": 12,
   "glossaryLines": ["MeetingEZ | 米听易"],
-  "pendingActions": ["整理评审反馈"],
   "recentMeetings": ["2026-03-23 需求评审"],
   "realtimePrompt": ""
 }
