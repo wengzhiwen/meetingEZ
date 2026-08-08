@@ -578,8 +578,8 @@ Web 工作台
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `OPENAI_API_KEY` | 必需 | OpenAI API Key |
-| `TRANSLATION_MODEL` | `gpt-5.4-mini-2026-03-17` | 翻译模型 |
-| `TRANSLATION_REASONING_EFFORT` | `low` | 推理强度（仅 gpt-5 系列） |
+| `TRANSLATION_MODEL` | `gpt-5.6-luna` | 翻译模型 |
+| `TRANSLATION_REASONING_EFFORT` | `high` | 推理强度（仅 gpt-5 系列） |
 | `ACCESS_CODE` | 空 | 访问码（空则关闭登录保护） |
 
 ### 7.2 前端设置
@@ -603,11 +603,11 @@ Web 工作台
 const TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
 
 // 翻译模型
-const TRANSLATION_MODEL = 'gpt-5.4-mini-2026-03-17';
+const TRANSLATION_MODEL = 'gpt-5.6-luna';
 
 // 推理配置（仅 gpt-5 系列支持）
 const reasoning = {
-  effort: 'low'    // low | medium | high
+  effort: 'high'   // none | low | medium | high | xhigh | max
 };
 ```
 

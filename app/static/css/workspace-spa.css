@@ -477,33 +477,6 @@
     color: #fbbf24;
 }
 
-/* ---- Actions list ---- */
-.spa-action-list {
-    font-size: 0.83rem;
-}
-.spa-action-row {
-    display: flex;
-    gap: 0.6rem;
-    padding: 0.35rem 0;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-    align-items: baseline;
-}
-.spa-action-row:last-child { border-bottom: none; }
-.spa-action-id {
-    color: var(--accent);
-    font-family: monospace;
-    font-size: 0.78rem;
-    flex-shrink: 0;
-}
-.spa-action-task {
-    flex: 1;
-    color: var(--text);
-}
-.spa-action-owner {
-    color: var(--muted);
-    font-size: 0.78rem;
-}
-
 /* ---- Create meeting form ---- */
 .spa-form {
     display: flex;

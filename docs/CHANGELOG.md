@@ -1,3 +1,10 @@
+2026-08-08 纪要模型升级 GPT-5.6 与调用方式迁移
+- **纪要生成模型升级**：`gpt-5.4` → `gpt-5.6-sol`，默认 `reasoning.effort = high`（新增 `OPENAI_REASONING_EFFORT` 环境变量）
+- **纪要调用迁移到 Responses API**：`LLMClient` 从 Chat Completions 改为 `client.responses.create`（`instructions` + `input` + `reasoning`）；GPT-5.6 只支持默认 temperature，不再下发该参数
+- **后置处理默认 effort 统一为 high**：`TRANSLATION_REASONING_EFFORT`、`REFINE_REASONING_EFFORT` 默认从 `low` 改为 `high`；实时字幕后置翻译/术语校正会更准但更慢，延迟敏感可用环境变量降回 `low`
+- **翻译兜底模型清理**：`TRANSLATION_MODEL` 代码兜底默认从 `gpt-5.4-mini-2026-03-17` 改为 `gpt-5.6-luna`，与 `.env` 生产固定值一致
+- **基础设施修复**：nginx 不再拦截会议文件接口的 `.log` URL，`_processing.log` 可在线预览
+
 2026-03-23 控制台入口与项目协同流程重构
 - **默认入口改为控制台**：`/` 不再直接进入实时字幕页，而是先进入控制台
 - **新增双入口流程**：控制台同时提供 `项目模式` 和 `快速模式`

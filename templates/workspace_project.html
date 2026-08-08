@@ -65,21 +65,6 @@
                         <span class="workspace-pill">待纪要 {{ project.pending_minutes }}</span>
                         <span class="workspace-pill">超期行动项 {{ project.actions_overdue }}</span>
                     </div>
-
-                    {% if recent_actions %}
-                    <div class="workspace-subsection">
-                        <h3>最近行动项</h3>
-                        <div class="workspace-simple-list">
-                            {% for action in recent_actions %}
-                            <div class="workspace-simple-row">
-                                <strong>{{ action.id }}</strong>
-                                <span>{{ action.task }}</span>
-                                <span>{{ action.owner }}</span>
-                            </div>
-                            {% endfor %}
-                        </div>
-                    </div>
-                    {% endif %}
                 </article>
 
                 <article class="workspace-panel">

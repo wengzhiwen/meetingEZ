@@ -62,7 +62,7 @@
 
 1. **扫描**：MeetingScanner 扫描项目目录，返回任务列表
 2. **ASr 夣写**： ASREngine 调用 GLM-ASR 进行转写
-3. **纪要生成**： LLMClient.analyze_meeting() 调用 GPT-5.4 生成纪要
+3. **纪要生成**： LLMClient.analyze_meeting() 调用 GPT-5.6 生成纪要
 4. **记忆更新**： MemoryWriter.process_analysis_result() 更新记忆文件
 
 5. **术语提取**： 从纪要中提取新术语，添加到待审核队列
@@ -202,7 +202,7 @@ def _save_progress(progress_file, idx, chunk_start, chunk_end, result):
 
 ### 4.5 纪要生成
 
-#### 模型: GPT-5.4
+#### 模型: GPT-5.6
 #### 输入
 - transcript_text: 转写文本
 - meeting_meta: 会议元信息
@@ -279,7 +279,7 @@ return lock_file.exists()
 | 模型 | 用途 |
 |------|------|
 | GLM-ASR-2512 | 语音识别 (智谱 AI) |
-| GPT-5.4 | 纪要生成 (OpenAI) |
+| GPT-5.6 | 纪要生成 (OpenAI) |
 | GPT-4o | 翻译 (可选，gpt-4 等中英翻译) |
 
 ### 6.2 环境变量
@@ -288,7 +288,8 @@ return lock_file.exists()
 | ZHIPU_API_KEY | 智谱 AI API Key (ASr) |
 | OPENAI_API_KEY | OpenAI API Key (纪要生成、翻译) |
 | OPENAI_BASE_URL | OpenAI API 地址 |
-| OPENAI_MODEL | 默认 gpt-5.4 |
+| OPENAI_MODEL | 默认 gpt-5.6-sol |
+| OPENAI_REASONING_EFFORT | 默认 high（none/low/medium/high/xhigh/max） |
 
 | MEETINGS_DIR | 会议目录 |
 

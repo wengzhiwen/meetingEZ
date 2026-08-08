@@ -159,7 +159,7 @@ realtime 层注入不了术语表，所以三栏字幕（原文 + 两栏译文�
 realtime 条目定格
   -> enqueueRefine(entry, text)      前端队列，攒够 8 条或静默 1.2 秒
   -> POST /api/refine-transcript     批量提交，最多 2 个并发
-  -> gpt-5.6-luna (effort=low)       按 keywords 纠错，只返回改动过的片段
+  -> gpt-5.6-luna (effort=high)      按 keywords 纠错，只返回改动过的片段
   -> applyRefineResults()            按 entry.id 原位替换 + 重绘
 ```
 

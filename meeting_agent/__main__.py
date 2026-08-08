@@ -290,7 +290,7 @@ def cmd_run(args):
                     TextColumn("[progress.description]{task.description}"),
                     console=console,
             ) as progress:
-                progress.add_task("调用 GPT-5.4 分析...", total=None)
+                progress.add_task("调用 GPT-5.6 分析...", total=None)
 
                 result = llm_client.analyze_meeting(
                     transcript_text=transcript_text,

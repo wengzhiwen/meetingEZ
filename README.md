@@ -10,7 +10,7 @@
 - 三栏显示原文与两种目标语言译文，原文栏可隐藏
 
 模型全部来自 OpenAI：实时翻译 `gpt-realtime-translate`、术语校正 `gpt-5.6-luna`、
-离线文件转写 `gpt-transcribe`、纪要生成 `gpt-5.4`。
+离线文件转写 `gpt-transcribe`、纪要生成 `gpt-5.6-sol`。
 
 ## 当前特性
 

@@ -1,5 +1,5 @@
 """
-LLM 客户端 - OpenAI GPT-5.4
+LLM 客户端 - OpenAI GPT-5.6
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ class LLMClient:
         self.api_key = self.config.openai_api_key
         self.base_url = self.config.settings.openai_base_url
         self.model = self.config.settings.openai_model
+        self.reasoning_effort = self.config.settings.openai_reasoning_effort
         self._client = None
 
     @property
@@ -85,17 +86,15 @@ class LLMClient:
 
         # 调用 GPT
         try:
-            response = self.client.chat.completions.create(
+            response = self.client.responses.create(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": PromptBuilder.SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.3,
-                max_completion_tokens=16000,  # GPT-5.4 使用 max_completion_tokens
+                instructions=PromptBuilder.SYSTEM_PROMPT,
+                input=prompt,
+                max_output_tokens=16000,  # 需同时覆盖 reasoning tokens 和纪要正文
+                reasoning={"effort": self.reasoning_effort},
             )
 
-            content = response.choices[0].message.content
+            content = response.output_text
             if not content:
                 logger.error("GPT 返回空内容")
                 return None
@@ -134,20 +133,15 @@ class LLMClient:
         )
 
         try:
-            response = self.client.chat.completions.create(
+            response = self.client.responses.create(
                 model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "你是一位专业的项目管理助手，负责在会议前生成提示清单，帮助参会者做好准备。"
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.5,
-                max_completion_tokens=4096,  # GPT-5.4 使用 max_completion_tokens
+                instructions="你是一位专业的项目管理助手，负责在会议前生成提示清单，帮助参会者做好准备。",
+                input=prompt,
+                max_output_tokens=4096,
+                reasoning={"effort": self.reasoning_effort},
             )
 
-            return response.choices[0].message.content
+            return response.output_text
 
         except Exception as e:
             logger.error("生成会议前提示失败: %s", e)

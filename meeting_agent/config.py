@@ -22,7 +22,9 @@ class Settings(BaseSettings):
     # OpenAI（转写 + 纪要，全系统唯一的模型供应商）
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
-    openai_model: str = "gpt-5.4"
+    openai_model: str = "gpt-5.6-sol"
+    # 纪要生成的推理档位：none/low/medium/high/xhigh/max
+    openai_reasoning_effort: str = "high"
 
     # 离线文件转写：gpt-transcribe（/v1/audio/transcriptions）
     openai_asr_model: str = "gpt-transcribe"

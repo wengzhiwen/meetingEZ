@@ -315,7 +315,6 @@ def build_project_detail_view_model(project_id: Optional[str],
     handle = resolve_project_handle(project_id, config)
     project_config = clone_config_for_dir(config, handle.path)
     scanner = MeetingScanner(project_config)
-    actions_mgr = ActionsManager(project_config)
     glossary_mgr = GlossaryManager(project_config)
     background_mgr = BackgroundContextManager(project_config)
 
@@ -325,21 +324,6 @@ def build_project_detail_view_model(project_id: Optional[str],
     pending_terms = glossary_mgr.load_pending()
     meetings = [_build_meeting_card(task) for task in scanner.scan_meetings()]
     meetings.sort(key=lambda item: item["date_sort"], reverse=True)
-
-    recent_actions = []
-    for action in actions_mgr.load()[:8]:
-        recent_actions.append({
-            "id":
-            action.id,
-            "task":
-            action.task,
-            "owner":
-            action.owner or "未分配",
-            "status":
-            action.status.value,
-            "due_date":
-            str(action.due_date) if action.due_date else "未设置",
-        })
 
     project = {
         **project_card,
@@ -359,7 +343,6 @@ def build_project_detail_view_model(project_id: Optional[str],
     return {
         "project": project,
         "meetings": meetings,
-        "recent_actions": recent_actions,
     }
 
 

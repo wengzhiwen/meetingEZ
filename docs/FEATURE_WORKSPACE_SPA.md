@@ -263,9 +263,6 @@ function subscribe(fn) {
       ]
     }
   ],
-  recent_actions: [
-    { id: "A001", task: "完成文档", owner: "张三", status: "in_progress" }
-  ],
   meeting_type_options: [
     ["review", "评审会"],
     ["weekly", "周会"],

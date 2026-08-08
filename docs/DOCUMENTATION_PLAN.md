@@ -392,7 +392,7 @@
    - 特性：断点续传、重叠分块
 
 5. 纪要生成
-   - 模型：GPT-5.4
+   - 模型：GPT-5.6
    - 输入：transcript + meeting_meta + project_context
    - 输出：minutes.md
    - 模板：按会议类型选择（review/weekly/brainstorm/retro）

@@ -33,8 +33,8 @@ from meeting_agent.scanner import MeetingScanner
 
 main_bp = Blueprint('main', __name__)
 TRANSCRIPTION_MODEL = os.getenv('TRANSCRIPTION_MODEL', 'gpt-live-transcribe')
-TRANSLATION_MODEL = os.getenv('TRANSLATION_MODEL', 'gpt-5.4-mini-2026-03-17')
-TRANSLATION_REASONING_EFFORT = os.getenv('TRANSLATION_REASONING_EFFORT', 'low').strip()
+TRANSLATION_MODEL = os.getenv('TRANSLATION_MODEL', 'gpt-5.6-luna')
+TRANSLATION_REASONING_EFFORT = os.getenv('TRANSLATION_REASONING_EFFORT', 'high').strip()
 # 实时转写模型的延迟/准确率档位：minimal/low/medium/high/xhigh。
 # 值越低首个 delta 越快，但准确率略降；默认 low 适合实时字幕。
 _TRANSCRIPTION_DELAY_OPTIONS = ('minimal', 'low', 'medium', 'high', 'xhigh')
@@ -46,9 +46,10 @@ if TRANSCRIPTION_DELAY not in _TRANSCRIPTION_DELAY_OPTIONS:
 # 单次 session 下发的 keywords 上限，避免把整张术语表塞进去拖慢识别。
 REALTIME_KEYWORDS_LIMIT = 100
 # 术语校正后置处理：realtime session 注入不了术语表，定格后的字幕交给便宜的文本
-# 模型按术语表纠错。gpt-5.6-luna + effort=low 实测约 4 秒 / 6 句，$0.20/$1.20 每百万 token。
+# 模型按术语表纠错。默认 effort=high 质量优先；字幕延迟敏感时可降 low
+# （gpt-5.6-luna + effort=low 实测约 4 秒 / 6 句，$0.20/$1.20 每百万 token）。
 REFINE_MODEL = os.getenv('REFINE_MODEL', 'gpt-5.6-luna')
-REFINE_REASONING_EFFORT = os.getenv('REFINE_REASONING_EFFORT', 'low').strip()
+REFINE_REASONING_EFFORT = os.getenv('REFINE_REASONING_EFFORT', 'high').strip()
 REFINE_MAX_SEGMENTS = 12
 REFINE_MAX_CHARS = 4000
 REALTIME_TRANSLATION_MODEL = os.getenv('REALTIME_TRANSLATION_MODEL',
@@ -930,7 +931,6 @@ def api_workspace_project_detail(project_id):
                 'pending_term_count': 0,
             },
             'meetings': [],
-            'recent_actions': [],
             'meeting_type_options': MEETING_TYPE_OPTIONS,
             'language_options': LANGUAGE_OPTIONS,
         })

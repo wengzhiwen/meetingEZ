@@ -280,7 +280,7 @@
 说明：
 
 - 模型由 `REFINE_MODEL` 决定，默认 `gpt-5.6-luna`；reasoning effort 由
-  `REFINE_REASONING_EFFORT` 决定，默认 `low`。
+  `REFINE_REASONING_EFFORT` 决定，默认 `high`。
 - 单次最多 `REFINE_MAX_SEGMENTS`（12）个片段、`REFINE_MAX_CHARS`（4000）字符，超出直接截断。
 - `keywords` 为空时直接返回 `{"segments": []}`，不调用模型——没有术语表就没有校正依据。
 - 模型偶尔会把 `changed` 标反，后端以文本比对为准，只回传 `text != 原文` 的片段。

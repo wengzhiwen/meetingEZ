@@ -646,7 +646,7 @@ projects/
     │       │
     │       ▼
     │   ┌─────────────────────────────────────┐
-    │   │ 4. GPT-5.4 分析与生成               │
+    │   │ 4. GPT-5.6 分析与生成               │
     │   │    - 识别会议类型                    │
     │   │    - 生成会议纪要                    │
     │   │    - 提取新待办                      │
@@ -668,32 +668,30 @@ projects/
 完成/等待新会议
 ```
 
-### GPT-5.4 调用策略
+### GPT-5.6 调用策略
 
-使用**单次调用**让 GPT-5.4 同时完成多项分析，利用其 1M+ context window：
+使用**单次调用**让 GPT-5.6 同时完成多项分析，利用其 1M+ context window：
 
 ```python
-response = client.chat.completions.create(
-    model="gpt-5.4",
-    messages=[
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": build_comprehensive_prompt(
-            transcript=transcript_text,
-            meeting_meta=meeting_meta,
-            project_context=context_md,
-            existing_actions=actions_md,
-            recent_minutes=last_5_minutes,
-            pre_hint=pre_meeting_hint,
-        )}
-    ],
-    temperature=0.3,
-    max_tokens=16000,  # 需要较长输出
+response = client.responses.create(
+    model="gpt-5.6-sol",
+    instructions=SYSTEM_PROMPT,
+    input=build_comprehensive_prompt(
+        transcript=transcript_text,
+        meeting_meta=meeting_meta,
+        project_context=context_md,
+        existing_actions=actions_md,
+        recent_minutes=last_5_minutes,
+        pre_hint=pre_meeting_hint,
+    ),
+    max_output_tokens=16000,  # 需覆盖 reasoning tokens + 正文
+    reasoning={"effort": "high"},  # GPT-5.6 只支持默认 temperature，不单独下发
 )
 ```
 
 ### 结构化输出
 
-要求 GPT-5.4 返回结构化 JSON：
+要求 GPT-5.6 返回结构化 JSON：
 
 ```json
 {

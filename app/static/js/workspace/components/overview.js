@@ -72,7 +72,6 @@ function collectTeam(container) {
 
 export function renderOverview(container, data, projectId) {
     const p = data.project || {};
-    const actions = data.recent_actions || [];
     const typeOptions = (data.meeting_type_options || []).map(([v, l]) =>
         `<option value="${esc(v)}">${esc(l)}</option>`).join('');
     const langOptions = (data.language_options || []).map(([v, l]) =>
@@ -135,21 +134,6 @@ export function renderOverview(container, data, projectId) {
                     ${p.glossary_confirmed ? `<span class="spa-pill">${p.glossary_confirmed} 术语</span>` : ''}
                     ${p.actions_overdue ? `<span class="spa-pill spa-pill-warn">${p.actions_overdue} 逾期</span>` : ''}
                 </div>
-            </div>
-
-            <div class="spa-panel">
-                <h4>最近行动项</h4>
-                ${actions.length ? `
-                    <div class="spa-action-list">
-                        ${actions.map(a => `
-                            <div class="spa-action-row">
-                                <span class="spa-action-id">${esc(a.id)}</span>
-                                <span class="spa-action-task">${esc(a.task)}</span>
-                                <span class="spa-action-owner">${esc(a.owner)}</span>
-                            </div>
-                        `).join('')}
-                    </div>
-                ` : '<div class="spa-empty" style="padding:1rem 0;">暂无行动项</div>'}
             </div>
         </div>
 
