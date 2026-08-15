@@ -1769,3 +1769,46 @@ body.workspace-page {
         grid-row: 2;
     }
 }
+
+/* ---- 设置面板分节与本地端点输入 ---- */
+.settings-section-title {
+    margin: 1.35rem 0 0.7rem;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: rgba(238, 242, 255, 0.55);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    padding-bottom: 0.35rem;
+}
+
+.settings-section-title:first-of-type {
+    margin-top: 0.4rem;
+}
+
+.setting-input {
+    flex: 1;
+    min-width: 0;
+    padding: 0.65rem 0.85rem;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text);
+    font-size: 0.88rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.setting-input::placeholder {
+    color: rgba(238, 242, 255, 0.4);
+}
+
+.setting-input-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.setting-input-row .btn {
+    flex-shrink: 0;
+}
+

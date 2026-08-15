@@ -56,6 +56,10 @@ REALTIME_TRANSLATION_MODEL = os.getenv('REALTIME_TRANSLATION_MODEL',
                                        'gpt-realtime-translate')
 REALTIME_TRANSLATION_INPUT_MODEL = os.getenv('REALTIME_TRANSLATION_INPUT_MODEL',
                                              'gpt-live-transcribe')
+# 本地 ASR（Qwen3-ASR）服务地址。浏览器直连该地址进行实时转写，不经后端中转。
+# 注入到前端作为「转写引擎」本地端点输入框的默认值，用户可在设置面板覆盖；
+# 留空则输入框初始为空（引擎选项仍显示）。
+LOCAL_ASR_BASE_URL = os.getenv('LOCAL_ASR_BASE_URL', '').strip()
 REALTIME_TRANSLATION_LANGUAGES = {
     'es', 'pt', 'fr', 'ja', 'ru', 'zh', 'de', 'ko', 'hi', 'id', 'vi', 'it', 'en'
 }
@@ -512,22 +516,16 @@ def realtime():
             'api': 'Realtime API',
             'model': TRANSCRIPTION_MODEL
         },
-        'translation': {
-            'purpose':
-            '后置翻译',
-            'api':
-            'Responses API',
-            'model':
-            TRANSLATION_MODEL,
-            'reasoning_effort':
-            _build_translation_reasoning(TRANSLATION_MODEL,
-                                         TRANSLATION_REASONING_EFFORT)
-        },
         'realtime_translation': {
             'purpose': '实时翻译',
             'api': 'Realtime Translation API',
             'model': REALTIME_TRANSLATION_MODEL,
             'input_model': REALTIME_TRANSLATION_INPUT_MODEL
+        },
+        'local_asr': {
+            'purpose': '本地转写',
+            'api': 'Qwen3-ASR Streaming HTTP',
+            'base_url': LOCAL_ASR_BASE_URL
         }
     }
     return render_template(

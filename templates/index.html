@@ -81,6 +81,7 @@
                 </div>
             </div>
 
+            <div class="settings-section-title">连接与模型</div>
             <div class="setting-item compact-row">
                 <label>API 连接</label>
                 <button id="testConnection" class="btn btn-small btn-secondary" title="测试连接">测试连接</button>
@@ -96,43 +97,25 @@
                 <div class="model-info-list">
                     <div class="model-info-card">
                         <div class="model-info-header">
-                            <span class="model-purpose">{{ model_info.transcription.purpose }}</span>
-                            <span class="model-api">{{ model_info.transcription.api }}</span>
+                            <span id="engineModelPurpose" class="model-purpose">—</span>
+                            <span id="engineModelApi" class="model-api"></span>
                         </div>
-                        <div class="model-name">{{ model_info.transcription.model }}</div>
+                        <div id="engineModelName" class="model-name"></div>
+                        <div id="engineModelMeta" class="model-meta"></div>
                     </div>
                     <div class="model-info-card">
                         <div class="model-info-header">
-                            <span id="translationModelPurpose" class="model-purpose">{{ model_info.realtime_translation.purpose }}</span>
-                            <span id="translationModelApi" class="model-api">{{ model_info.realtime_translation.api }}</span>
+                            <span id="translateModelPurpose" class="model-purpose">—</span>
+                            <span id="translateModelApi" class="model-api"></span>
                         </div>
-                        <div id="translationModelName" class="model-name">{{ model_info.realtime_translation.model }}</div>
-                        <div id="translationModelMeta" class="model-meta">input transcription: {{ model_info.realtime_translation.input_model }}</div>
+                        <div id="translateModelName" class="model-name"></div>
+                        <div id="translateModelMeta" class="model-meta"></div>
                     </div>
                 </div>
                 <script type="application/json" id="modelInfoData">{{ model_info|tojson }}</script>
             </div>
 
-            <div class="setting-item stack">
-                <label>会议上下文</label>
-                <div class="setting-help">Realtime Translation 固定使用两种目标语言，不注入提示词或术语表。</div>
-                <label for="workspaceProject" class="setting-sub-label">项目工作区</label>
-                <select id="workspaceProject">
-                    {% for project in workspace_projects %}
-                    <option value="{{ project.id }}" {% if project.id == default_project_id %}selected{% endif %}>{{ project.label }}</option>
-                    {% endfor %}
-                </select>
-                <label for="languageMode" class="setting-sub-label">语言模式</label>
-                <select id="languageMode">
-                    <option value="single_primary" selected>单主语言会议</option>
-                    <option value="bilingual">双语言会议</option>
-                </select>
-                <div id="contextPackStatus" class="status-message info">
-                    还未关联项目上下文
-                </div>
-                <div id="contextPackPreview" class="setting-help"></div>
-            </div>
-
+            <div class="settings-section-title">音频输入</div>
             <div class="setting-item stack">
                 <label>音频输入源</label>
                 <div class="radio-group">
@@ -167,6 +150,70 @@
                 </select>
             </div>
 
+            <div class="settings-section-title">转写引擎</div>
+            <div class="setting-item stack" id="asrEngineContainer">
+                <div class="radio-group">
+                    <label class="radio-label">
+                        <input type="radio" name="asrEngine" value="openai" id="asrEngineOpenai" checked>
+                        <span>OpenAI Realtime</span>
+                    </label>
+                    <label class="radio-label">
+                        <input type="radio" name="asrEngine" value="local" id="asrEngineLocal">
+                        <span>本地 Qwen3-ASR</span>
+                    </label>
+                </div>
+                <div id="localServiceConfig" style="display: none; margin-top: 8px;">
+                    <label for="localAsrBaseUrl" class="setting-sub-label">Qwen3-ASR 流式服务端点</label>
+                    <div class="setting-input-row">
+                        <input type="text" id="localAsrBaseUrl" class="setting-input"
+                               placeholder="http://192.168.1.10:8000" autocomplete="off" spellcheck="false">
+                        <button id="testLocalAsr" class="btn btn-small btn-secondary" type="button">测试</button>
+                    </div>
+                    <label class="radio-label" style="margin-top: 8px;">
+                        <input type="checkbox" id="localTranslateEnabled">
+                        <span>启用本地翻译（OpenAI 兼容 API）</span>
+                    </label>
+                    <div id="localTranslateFields" style="display: none; margin-top: 6px;">
+                        <label for="localTranslateBaseUrl" class="setting-sub-label">翻译 API 端点</label>
+                        <div class="setting-input-row">
+                            <input type="text" id="localTranslateBaseUrl" class="setting-input"
+                                   placeholder="http://192.168.1.10:8001/v1" autocomplete="off" spellcheck="false">
+                            <button id="testLocalTranslate" class="btn btn-small btn-secondary" type="button">测试</button>
+                        </div>
+                        <label for="localTranslateModel" class="setting-sub-label">翻译模型</label>
+                        <input type="text" id="localTranslateModel" class="setting-input"
+                               placeholder="qwen3-8b" autocomplete="off" spellcheck="false">
+                        <label for="localTranslateApiKey" class="setting-sub-label">API Key（可选）</label>
+                        <input type="password" id="localTranslateApiKey" class="setting-input"
+                               placeholder="通常留空" autocomplete="off">
+                        <div class="setting-help" id="localTranslateHint">
+                            本地翻译为逐段后置（非实时）。本地模式不调用云端 OpenAI（含术语校正）。
+                            端点需开启 CORS（vLLM 启动加 --allowed-origins）。
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="settings-section-title">会议上下文</div>
+            <div class="setting-item stack">
+                <label for="workspaceProject" class="setting-sub-label">项目工作区</label>
+                <select id="workspaceProject">
+                    {% for project in workspace_projects %}
+                    <option value="{{ project.id }}" {% if project.id == default_project_id %}selected{% endif %}>{{ project.label }}</option>
+                    {% endfor %}
+                </select>
+                <label for="languageMode" class="setting-sub-label">语言模式</label>
+                <select id="languageMode">
+                    <option value="single_primary" selected>单主语言会议</option>
+                    <option value="bilingual">双语言会议</option>
+                </select>
+                <div id="contextPackStatus" class="status-message info">
+                    还未关联项目上下文
+                </div>
+                <div id="contextPackPreview" class="setting-help"></div>
+            </div>
+
+            <div class="settings-section-title">语言</div>
             <div class="setting-item stack">
                 <label for="primaryLanguage">主要语言</label>
                 <select id="primaryLanguage">
@@ -181,10 +228,7 @@
                     <option value="ru">Русский</option>
                     <option value="pt">Português</option>
                 </select>
-            </div>
-
-            <div class="setting-item stack">
-                <label for="secondaryLanguage">第二语言</label>
+                <label for="secondaryLanguage" class="setting-sub-label">第二语言（本地模式的翻译目标）</label>
                 <select id="secondaryLanguage">
                     <option value="zh">中文 (简体)</option>
                     <option value="zh-TW">中文 (繁體)</option>
@@ -199,6 +243,7 @@
                 </select>
             </div>
 
+            <div class="settings-section-title">显示</div>
             <div class="setting-item stack">
                 <label for="fontSize">字体大小</label>
                 <select id="fontSize">
@@ -224,6 +269,8 @@
     </div>
 
     <script src="{{ url_for('static', filename='js/realtime-translation.js') }}?v=20260713a"></script>
-    <script type="module" src="{{ url_for('static', filename='js/app.js') }}?v=20260801a"></script>
+    <script src="{{ url_for('static', filename='js/local-asr-client.js') }}?v=20260815b"></script>
+    <script src="{{ url_for('static', filename='js/local-translate-client.js') }}?v=20260815a"></script>
+    <script type="module" src="{{ url_for('static', filename='js/app.js') }}?v=20260815h"></script>
 </body>
 </html>
