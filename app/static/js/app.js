@@ -1,4 +1,4 @@
-console.log('app.js loaded, build: 20260801a');
+console.log('app.js loaded, build: 20260815o');
 // MeetingEZ - 基于 OpenAI Realtime API (WebRTC) 的实时转写
 // API Key 由后端从环境变量读取，前端不接触
 
@@ -16,7 +16,7 @@ let currentStreamingTextMap = { primary: '' };
 const STORAGE_KEY = 'meetingEZ_transcripts';
 const STORAGE_VERSION = 3;
 const HIDE_BEFORE_KEY = 'meetingEZ_hideBefore';
-const ORIGINAL_TRANSCRIPT_VISIBLE_KEY = 'meetingEZ_originalTranscriptVisible';
+let originalTranscriptVisible = true;
 
 let realtimeTranslationClients = [];
 // 术语校正队列：realtime session（无论转写还是翻译）都注入不了术语表，所以定格后的
@@ -105,7 +105,7 @@ function getLanguageMode() {
 }
 
 function isOriginalTranscriptVisible() {
-    return localStorage.getItem(ORIGINAL_TRANSCRIPT_VISIBLE_KEY) !== 'false';
+    return originalTranscriptVisible;
 }
 
 function updateOriginalTranscriptVisibility() {
@@ -127,10 +127,7 @@ function updateOriginalTranscriptVisibility() {
 }
 
 function toggleOriginalTranscript() {
-    localStorage.setItem(
-        ORIGINAL_TRANSCRIPT_VISIBLE_KEY,
-        String(!isOriginalTranscriptVisible())
-    );
+    originalTranscriptVisible = !originalTranscriptVisible;
     updateOriginalTranscriptVisibility();
     if (document.getElementById('autoScroll')?.classList.contains('btn-primary')) {
         scrollToBottom('secondary');
@@ -375,7 +372,11 @@ function normalizeStoredTranscriptEntry(entry) {
             language: entry.language || entry.originalLanguage || '',
             text: entry.text || entry.rawTranscript || '',
             rawTranscript: entry.rawTranscript || entry.text || '',
-            isRealtimeTranscriptionPaneEntry: true
+            correctedTranscript: entry.correctedTranscript || null,
+            correctionApplied: !!entry.correctionApplied,
+            refined: !!entry.refined,
+            isRealtimeTranscriptionPaneEntry: true,
+            realtimeOrder: Number.isFinite(entry.realtimeOrder) ? entry.realtimeOrder : null
         };
     }
     if (isRealtimeTranslationPaneEntry(entry)) {
@@ -388,6 +389,7 @@ function normalizeStoredTranscriptEntry(entry) {
             text: entry.text || '',
             isTranslation: true,
             isRealtimeTranslationPaneEntry: true,
+            sourceEntryId: entry.sourceEntryId || null,
             realtimeOrder: Number.isFinite(entry.realtimeOrder) ? entry.realtimeOrder : null
         };
     }
@@ -434,7 +436,11 @@ function insertTranscriptInRealtimeOrder(entry) {
     });
 }
 
-function splitTranscriptSentences(text, { group = true } = {}) {
+function splitTranscriptSentences(text, {
+    group = true,
+    maxSentences = 3,
+    maxChars = 150,
+} = {}) {
     const normalized = normalizeText(text);
     if (!normalized) return [];
 
@@ -457,7 +463,9 @@ function splitTranscriptSentences(text, { group = true } = {}) {
     const tail = normalized.slice(start).trim();
     if (tail) sentences.push(tail);
     const roughSegments = (sentences.length ? sentences : [normalized]).flatMap(splitLongTranscriptSegment);
-    return group ? groupSubtitleSegments(roughSegments) : roughSegments;
+    return group
+        ? groupSubtitleSegments(roughSegments, { maxSentences, maxChars })
+        : roughSegments;
 }
 
 function splitLongTranscriptSegment(segment) {
@@ -482,24 +490,22 @@ function splitLongTranscriptSegment(segment) {
     return parts.filter(Boolean);
 }
 
-function groupSubtitleSegments(segments) {
+function groupSubtitleSegments(segments, { maxSentences = 3, maxChars = 150 } = {}) {
     const grouped = [];
     let current = [];
-    const maxSentences = 3;
-    const maxChars = 150;
 
     segments.forEach((segment) => {
         const normalized = (segment || '').trim();
         if (!normalized) return;
-        const nextText = [...current, normalized].join(' ');
+        const nextText = joinTranscriptSegments([...current, normalized]);
         if (current.length > 0 && (current.length >= maxSentences || nextText.length > maxChars)) {
-            grouped.push(current.join(' '));
+            grouped.push(joinTranscriptSegments(current));
             current = [];
         }
         current.push(normalized);
     });
 
-    if (current.length) grouped.push(current.join(' '));
+    if (current.length) grouped.push(joinTranscriptSegments(current));
     return grouped;
 }
 
@@ -692,6 +698,50 @@ function isLocalTranslateEnabled() {
     return getSetting(LOCAL_TRANSLATE_ENABLED_KEY, '') === 'true';
 }
 
+/** 读取当前可见输入值；测试/启动时同步持久化，避免 autofill 未触发 change。 */
+function getLocalTranslateConfig({ persist = false } = {}) {
+    const readValue = (id, key) => {
+        const input = document.getElementById(id);
+        return (input ? input.value : getSetting(key, '')).trim();
+    };
+    const config = {
+        baseUrl: readValue('localTranslateBaseUrl', LOCAL_TRANSLATE_BASEURL_KEY),
+        model: readValue('localTranslateModel', LOCAL_TRANSLATE_MODEL_KEY),
+        apiKey: readValue('localTranslateApiKey', LOCAL_TRANSLATE_APIKEY_KEY),
+    };
+    if (persist) {
+        setSetting(LOCAL_TRANSLATE_BASEURL_KEY, config.baseUrl);
+        setSetting(LOCAL_TRANSLATE_MODEL_KEY, config.model);
+        setSetting(LOCAL_TRANSLATE_APIKEY_KEY, config.apiKey);
+    }
+    return config;
+}
+
+function setLocalTestFeedback(button, statusId, message, state) {
+    const status = document.getElementById(statusId);
+    if (status) {
+        status.textContent = message;
+        status.className = `setting-test-status ${state || ''}`.trim();
+    }
+    if (!button) return;
+    const labels = {
+        pending: '测试中…',
+        success: '已连接',
+        error: '重试',
+    };
+    button.textContent = labels[state] || '测试';
+}
+
+function resetLocalTestFeedback(buttonId, statusId) {
+    const status = document.getElementById(statusId);
+    if (status) {
+        status.textContent = '';
+        status.className = 'setting-test-status';
+    }
+    const button = document.getElementById(buttonId);
+    if (button) button.textContent = '测试';
+}
+
 /** 恢复引擎选择与本地端点输入框；引擎选项始终显示。 */
 function restoreAsrEngineSelection() {
     const localRadio = document.getElementById('asrEngineLocal');
@@ -738,18 +788,26 @@ function initAsrEngineToggle() {
         updateEngineInfoCard();
     });
 
-    const bindInput = (id, key) => {
+    const bindInput = (id, key, feedback) => {
         const input = document.getElementById(id);
         if (!input) return;
+        input.addEventListener('input', () => {
+            if (feedback) resetLocalTestFeedback(feedback.buttonId, feedback.statusId);
+        });
         input.addEventListener('change', () => {
             setSetting(key, input.value.trim());
             updateEngineInfoCard();
         });
     };
-    bindInput('localAsrBaseUrl', LOCAL_ASR_BASEURL_KEY);
-    bindInput('localTranslateBaseUrl', LOCAL_TRANSLATE_BASEURL_KEY);
-    bindInput('localTranslateModel', LOCAL_TRANSLATE_MODEL_KEY);
-    bindInput('localTranslateApiKey', LOCAL_TRANSLATE_APIKEY_KEY);
+    const asrFeedback = { buttonId: 'testLocalAsr', statusId: 'localAsrTestStatus' };
+    const translateFeedback = {
+        buttonId: 'testLocalTranslate',
+        statusId: 'localTranslateTestStatus',
+    };
+    bindInput('localAsrBaseUrl', LOCAL_ASR_BASEURL_KEY, asrFeedback);
+    bindInput('localTranslateBaseUrl', LOCAL_TRANSLATE_BASEURL_KEY, translateFeedback);
+    bindInput('localTranslateModel', LOCAL_TRANSLATE_MODEL_KEY, translateFeedback);
+    bindInput('localTranslateApiKey', LOCAL_TRANSLATE_APIKEY_KEY, translateFeedback);
 
     const translateToggle = document.getElementById('localTranslateEnabled');
     translateToggle?.addEventListener('change', () => {
@@ -759,31 +817,43 @@ function initAsrEngineToggle() {
     });
 
     document.getElementById('testLocalAsr')?.addEventListener('click', async (e) => {
-        const btn = e.target;
+        const btn = e.currentTarget;
+        const input = document.getElementById('localAsrBaseUrl');
+        const baseUrl = (input?.value || getLocalAsrEndpoint()).trim().replace(/\/+$/, '');
+        setSetting(LOCAL_ASR_BASEURL_KEY, baseUrl);
         btn.disabled = true;
+        setLocalTestFeedback(btn, 'localAsrTestStatus', '正在连接本地 ASR 服务…', 'pending');
         try {
-            const resp = await fetch(`${getLocalAsrEndpoint()}/api/stats`, { signal: AbortSignal.timeout(8000) });
-            showStatus(resp.ok ? '本地 ASR 服务连接正常' : `本地 ASR 服务响应 HTTP ${resp.status}`, resp.ok ? 'success' : 'error');
+            if (!baseUrl) throw new Error('请先填写 ASR 服务端点');
+            const resp = await fetch(`${baseUrl}/api/stats`, { signal: AbortSignal.timeout(8000) });
+            if (!resp.ok) throw new Error(`服务响应 HTTP ${resp.status}`);
+            setLocalTestFeedback(btn, 'localAsrTestStatus', '连接成功，本地 ASR 服务可用。', 'success');
         } catch (err) {
-            showStatus(`本地 ASR 服务不可达: ${err.message || err}`, 'error');
+            setLocalTestFeedback(btn, 'localAsrTestStatus',
+                `连接失败：${err.message || err}`, 'error');
         } finally {
             btn.disabled = false;
         }
     });
 
     document.getElementById('testLocalTranslate')?.addEventListener('click', async (e) => {
-        const btn = e.target;
+        const btn = e.currentTarget;
         btn.disabled = true;
+        setLocalTestFeedback(btn, 'localTranslateTestStatus',
+            '正在连接翻译 API 并读取模型列表…', 'pending');
         try {
-            const client = new window.LocalTranslateClient({
-                baseUrl: getSetting(LOCAL_TRANSLATE_BASEURL_KEY, ''),
-                model: getSetting(LOCAL_TRANSLATE_MODEL_KEY, ''),
-                apiKey: getSetting(LOCAL_TRANSLATE_APIKEY_KEY, ''),
-            });
+            const config = getLocalTranslateConfig({ persist: true });
+            if (!config.baseUrl) throw new Error('请先填写翻译 API 端点');
+            console.log('[local-translate] 测试连接: baseUrl=%s, hasApiKey=%s',
+                config.baseUrl || '(空)', Boolean(config.apiKey));
+            const client = new window.LocalTranslateClient(config);
             const models = await client.testConnection();
-            showStatus(`翻译端点连接正常，共 ${models.length} 个模型`, 'success');
+            const modelHint = models.length ? `：${models.slice(0, 3).join('、')}` : '';
+            setLocalTestFeedback(btn, 'localTranslateTestStatus',
+                `连接成功，发现 ${models.length} 个模型${modelHint}`, 'success');
         } catch (err) {
-            showStatus(`翻译端点不可达: ${err.message || err}`, 'error');
+            setLocalTestFeedback(btn, 'localTranslateTestStatus',
+                `连接失败：${err.message || err}`, 'error');
         } finally {
             btn.disabled = false;
         }
@@ -1023,6 +1093,19 @@ async function startMeeting() {
 // 每次返回的累积全文写入 realtimePaneLiveMap.primary.original（live 覆盖），
 // 停顿后提取增量、调用 commitRealtimeInputTranscript 定格成段落。
 
+// Qwen3-ASR 用英文语言名做提示；zh/zh-TW 合并为 Chinese。
+// 主/第二语言随 /api/start 下发，让服务端锁定转写语言，避免纯自动检测
+// 把日语等整段错检成英语（需服务端支持，旧版服务端会忽略参数）。
+const LOCAL_ASR_LANGUAGE_NAMES = {
+    zh: 'Chinese', 'zh-TW': 'Chinese', en: 'English', ja: 'Japanese',
+    ko: 'Korean', es: 'Spanish', fr: 'French', de: 'German',
+    ru: 'Russian', pt: 'Portuguese'
+};
+
+function toLocalAsrLanguageName(selectValue) {
+    return LOCAL_ASR_LANGUAGE_NAMES[(selectValue || '').trim()] || '';
+}
+
 async function startLocalAsrPipeline(stream) {
     const baseUrl = getLocalAsrEndpoint();
     if (!baseUrl) {
@@ -1034,11 +1117,16 @@ async function startLocalAsrPipeline(stream) {
 
     lastCommittedServer = '';
     localAsrTextLogCount = 0;
+    resetLocalAsrBatchState();
     localAsrClient = new window.LocalAsrClient({
         baseUrl,
+        languages: {
+            primary: toLocalAsrLanguageName(document.getElementById('primaryLanguage')?.value),
+            secondary: toLocalAsrLanguageName(document.getElementById('secondaryLanguage')?.value)
+        },
         onText: (text, language, data) => updateLocalAsrLiveText(text, language, data),
         onStatus: (kind, detail) => {
-            if (kind === 'error') console.warn('[local-asr]', detail);
+            if (kind === 'error' || kind === 'warning') console.warn('[local-asr]', detail);
         }
     });
     await localAsrClient.start();
@@ -1054,11 +1142,8 @@ async function startLocalAsrPipeline(stream) {
         if (typeof window.LocalTranslateClient !== 'function') {
             throw new Error('本地翻译客户端未加载');
         }
-        const client = new window.LocalTranslateClient({
-            baseUrl: getSetting(LOCAL_TRANSLATE_BASEURL_KEY, ''),
-            model: getSetting(LOCAL_TRANSLATE_MODEL_KEY, ''),
-            apiKey: getSetting(LOCAL_TRANSLATE_APIKEY_KEY, ''),
-        });
+        const config = getLocalTranslateConfig({ persist: true });
+        const client = new window.LocalTranslateClient(config);
         console.log('[local-translate] client ready=%s, baseUrl=%s, model=%s',
             client.ready, client.baseUrl || '(空)', client.model || '(空)');
         if (!client.ready) {
@@ -1094,12 +1179,158 @@ async function startLocalAsrPipeline(stream) {
  * 服务端（强化版 demo_streaming）在响应里区分：
  *   - committed_text：已收段定格的文本，收段后不再变化（稳定）
  *   - segment_text：当前段累积中的文本，每步可能被改写（易变，仅作 live 行显示）
- * 字幕条目的边界由服务端分段决定：committed_text 增长即提交增量。
- * 客户端不再自行 diff 全文——ASR 累积重转写会频繁改写前文，客户端侧的
+ * committed_text 只用于取得稳定增量；客户端再把连续的多个短增量合并
+ * 成可读字幕。客户端不对易变全文自行 diff——累积重转写会频繁改写前文，
  * 前缀 diff 过于脆弱（曾产生碎句条目与整段重复条目）。
  */
 let localAsrTextLogCount = 0;
 let lastCommittedServer = '';
+let localAsrPendingSegments = [];
+let localAsrCurrentSegment = '';
+let localAsrBatchTimer = null;
+// 最近已接受的定稿分段（不受批 flush 影响）。窗口式转写在静音/低能量段
+// 会沿已定稿上文复读同一短语（幻觉循环），第 3 次起按复读丢弃。
+let localAsrRecentCommitted = [];
+const LOCAL_ASR_BATCH_IDLE_MS = 4200;
+const LOCAL_ASR_BATCH_TARGET_CHARS = 64;
+const LOCAL_ASR_BATCH_MAX_SEGMENTS = 6;
+
+function joinTranscriptSegments(segments) {
+    return segments.reduce((combined, rawSegment) => {
+        const segment = (rawSegment || '').trim();
+        if (!segment) return combined;
+        if (!combined) return segment;
+        // 中日韩文本和其标点通常不加空格；拉丁文本的相邻片段补一个空格。
+        const startsWithCjk = /^[\u3000-\u30ff\u3400-\u9fff\uf900-\ufaff]/u.test(segment);
+        const endsWithCjk = /[\u3000-\u30ff\u3400-\u9fff\uf900-\ufaff]$/u.test(combined);
+        return `${combined}${startsWithCjk || endsWithCjk ? '' : ' '}${segment}`;
+    }, '');
+}
+
+/** 修复本地流式 ASR 在相邻服务分段边界产生的重复字和词中断句。 */
+function joinLocalAsrSegments(segments) {
+    const trailingPunctuation = /[。！？；，、,.!?;\s]+$/u;
+    const continuationParticle = /^(?:的|地|得|了|着|过)/u;
+    const conjunction = /^(?:而|但|却|和|与|及|或|并)/u;
+    const tightPairs = new Set(['前后', '上下', '就是', '也是', '都是', '是在']);
+
+    return segments.reduce((combined, rawSegment) => {
+        const segment = (rawSegment || '').trim();
+        if (!segment) return combined;
+        if (!combined) return segment;
+
+        const trimmedCombined = combined.trimEnd();
+        const stem = trimmedCombined.replace(trailingPunctuation, '');
+        const hadBoundaryPunctuation = stem.length < trimmedCombined.length;
+
+        // “最重。重要”“举行加。加冕”一类边界：保留新段较完整的开头。
+        const maxOverlap = Math.min(12, stem.length, segment.length);
+        for (let overlap = maxOverlap; overlap >= 1; overlap--) {
+            if (stem.slice(-overlap) !== segment.slice(0, overlap)) continue;
+            const oneCjkChar = overlap === 1 && /^[\u3400-\u9fff]$/u.test(segment[0]);
+            if (overlap >= 2 || (hadBoundaryPunctuation && oneCjkChar)) {
+                return `${stem.slice(0, -overlap)}${segment}`;
+            }
+        }
+
+        // “一千年。的历史”“我们前。后到”“也就。是”属于词内误断句。
+        const boundaryPair = `${stem.slice(-1)}${segment.slice(0, 1)}`;
+        const isTightPhrase = tightPairs.has(boundaryPair) ||
+            (stem.endsWith('最具') && segment.startsWith('代表'));
+        if (hadBoundaryPunctuation && (continuationParticle.test(segment) || isTightPhrase)) {
+            return `${stem}${segment}`;
+        }
+        if (hadBoundaryPunctuation && conjunction.test(segment)) {
+            return `${stem}，${segment}`;
+        }
+        return joinTranscriptSegments([combined, segment]);
+    }, '');
+}
+
+/**
+ * 从服务端累计 committed_text 中提取不会重放历史的安全增量。
+ * 服务端偶尔会重写累计文本尾部；此时不能把整段 current 当作新增内容。
+ */
+function extractLocalAsrCommittedDelta(previous, current) {
+    const prev = previous || '';
+    const next = current || '';
+    if (!next || next === prev) return '';
+    if (!prev) return next;
+    if (next.startsWith(prev)) return next.slice(prev.length);
+    if (prev.startsWith(next)) return '';
+
+    // 兼容服务端返回“上一窗口尾部 + 新文本”的滚动窗口格式。
+    const maxOverlap = Math.min(prev.length, next.length);
+    for (let overlap = maxOverlap; overlap >= 6; overlap--) {
+        if (prev.slice(-overlap) === next.slice(0, overlap)) {
+            return next.slice(overlap);
+        }
+    }
+
+    // 累计文本尾部被重写时，只接受长度增长对应的末尾部分；绝不重放整段历史。
+    const growth = next.length - prev.length;
+    return growth > 0 ? next.slice(-growth) : '';
+}
+
+function resetLocalAsrBatchState() {
+    if (localAsrBatchTimer) clearTimeout(localAsrBatchTimer);
+    localAsrBatchTimer = null;
+    localAsrPendingSegments = [];
+    localAsrCurrentSegment = '';
+    localAsrRecentCommitted = [];
+}
+
+/** 同一分段与前两条已接受分段一字不差时视为复读幻觉。 */
+function isRepeatedLocalAsrSegment(segment) {
+    const tail = localAsrRecentCommitted.slice(-2);
+    return tail.length === 2 && tail.every(s => s === segment);
+}
+
+function refreshLocalAsrBufferedLiveText() {
+    realtimePaneLiveMap.primary.original = joinLocalAsrSegments([
+        ...localAsrPendingSegments,
+        localAsrCurrentSegment,
+    ]);
+    scheduleDisplayUpdate('primary');
+}
+
+function flushLocalAsrPendingBatch() {
+    if (localAsrBatchTimer) clearTimeout(localAsrBatchTimer);
+    localAsrBatchTimer = null;
+    const batchedText = joinLocalAsrSegments(localAsrPendingSegments);
+    localAsrPendingSegments = [];
+    if (!batchedText) {
+        refreshLocalAsrBufferedLiveText();
+        return;
+    }
+    console.log('[local-asr] 合并定格: %s... (%d字)',
+        batchedText.slice(0, 32), batchedText.length);
+    commitRealtimeInputTranscript({
+        transcript: batchedText,
+        onSegment: (entry, segment) => enqueueLocalTranslation(entry, segment),
+        segmentGrouping: { maxSentences: 6, maxChars: 100 },
+    });
+    // commitRealtimeInputTranscript 会清空 live 行；恢复尚未定格的当前段。
+    refreshLocalAsrBufferedLiveText();
+}
+
+function queueLocalAsrCommittedSegment(segment) {
+    const normalized = (segment || '').trim();
+    if (!normalized || isHallucinationText(normalized)) return;
+    if (isRepeatedLocalAsrSegment(normalized)) return;
+    localAsrRecentCommitted.push(normalized);
+    if (localAsrRecentCommitted.length > 4) localAsrRecentCommitted.shift();
+    localAsrPendingSegments.push(normalized);
+    const pendingText = joinLocalAsrSegments(localAsrPendingSegments);
+    const shouldFlush = localAsrPendingSegments.length >= LOCAL_ASR_BATCH_MAX_SEGMENTS ||
+        pendingText.length >= LOCAL_ASR_BATCH_TARGET_CHARS;
+    if (shouldFlush) {
+        flushLocalAsrPendingBatch();
+        return;
+    }
+    if (localAsrBatchTimer) clearTimeout(localAsrBatchTimer);
+    localAsrBatchTimer = setTimeout(flushLocalAsrPendingBatch, LOCAL_ASR_BATCH_IDLE_MS);
+}
 
 function updateLocalAsrLiveText(text, _language, data) {
     if (localAsrTextLogCount < 5 || localAsrTextLogCount % 20 === 0) {
@@ -1110,44 +1341,44 @@ function updateLocalAsrLiveText(text, _language, data) {
     localAsrTextLogCount += 1;
 
     if (data && typeof data.committed_text === 'string') {
-        // 服务端收段：committed_text 增长 → 提交新增的段作为字幕条目。
+        // 服务端收段：只提交可确认的新增长量，累计尾部被改写时绝不重放历史。
         if (data.committed_text !== lastCommittedServer) {
-            let delta;
-            if (!lastCommittedServer || data.committed_text.startsWith(lastCommittedServer)) {
-                delta = data.committed_text.slice(lastCommittedServer.length);
-            } else {
-                delta = data.committed_text;  // 服务端异常回退，整段提交
+            const currentCommitted = data.committed_text;
+            const delta = extractLocalAsrCommittedDelta(lastCommittedServer, currentCommitted);
+            if (lastCommittedServer && !currentCommitted.startsWith(lastCommittedServer)) {
+                console.warn('[local-asr] committed_text 发生改写，仅提取安全增量: prev=%d, next=%d, delta=%d',
+                    lastCommittedServer.length, currentCommitted.length, delta.length);
             }
-            lastCommittedServer = data.committed_text;
+            lastCommittedServer = currentCommitted;
             const trimmed = delta.trim();
             if (trimmed && !isHallucinationText(trimmed)) {
-                console.log('[local-asr] 段定格: %s... (%d字)', trimmed.slice(0, 24), trimmed.length);
-                commitRealtimeInputTranscript({
-                    transcript: trimmed,
-                    onSegment: (entry, segment) => enqueueLocalTranslation(entry, segment),
-                });
+                console.log('[local-asr] 服务分段: %s... (%d字)', trimmed.slice(0, 24), trimmed.length);
+                queueLocalAsrCommittedSegment(trimmed);
             }
         }
-        // live 行 = 当前段（只在段内被改写，收段后自然清空重开）。
-        realtimePaneLiveMap.primary.original = data.segment_text || '';
-        scheduleDisplayUpdate('primary');
+        // live 行同时展示尚未合并定格的小段与当前易变段，避免缓冲期间文字消失。
+        localAsrCurrentSegment = data.segment_text || '';
+        refreshLocalAsrBufferedLiveText();
         return;
     }
 
     // 旧版服务端（无分段字段）兜底：只显示全文 live 行，不提交条目。
-    realtimePaneLiveMap.primary.original = text || '';
-    scheduleDisplayUpdate('primary');
+    localAsrCurrentSegment = text || '';
+    refreshLocalAsrBufferedLiveText();
 }
 
-/** 停止前兜底：把当前段残留文本提交上去（/api/finish 的响应已先行到达）。 */
+/** 停止前兜底：先冲刷已提交小段，再提交服务端尚未收段的 live 文本。 */
 function commitLocalAsrLiveBeforeStop() {
-    const liveText = (realtimePaneLiveMap.primary.original || '').trim();
+    flushLocalAsrPendingBatch();
+    const liveText = (localAsrCurrentSegment || '').trim();
+    localAsrCurrentSegment = '';
     realtimePaneLiveMap.primary.original = '';
     scheduleDisplayUpdate('primary');
     if (!liveText || isHallucinationText(liveText)) return;
     commitRealtimeInputTranscript({
         transcript: liveText,
         onSegment: (entry, segment) => enqueueLocalTranslation(entry, segment),
+        segmentGrouping: { maxSentences: 6, maxChars: 100 },
     });
 }
 
@@ -1160,6 +1391,7 @@ function enqueueLocalTranslation(entry, segment) {
     const text = (segment || entry.text || '').trim();
     if (!text) return;
     localTranslateQueue.push({
+        entryId: String(entry.id),
         text,
         languageHint: entry.language || entry.originalLanguage || '',
         order: Number.isFinite(entry.realtimeOrder) ? entry.realtimeOrder : nextRealtimeSegmentOrder(),
@@ -1173,6 +1405,35 @@ function enqueueLocalTranslation(entry, segment) {
 // 在连续解说场景下会积压几十秒；LM Studio 对并发请求自行排队，安全。
 const LOCAL_TRANSLATE_CONCURRENCY = 2;
 
+function addLocalTranslationPaneEntry(
+    targetLang,
+    text,
+    order,
+    targetIndex = 0,
+    sourceEntryId = null
+) {
+    const entry = createRealtimeTranslationPaneEntry(targetLang, text);
+    entry.realtimeOrder = order + 0.5 + targetIndex / 1000;
+    entry.sourceEntryId = sourceEntryId;
+    insertTranscriptInRealtimeOrder(entry);
+    return entry;
+}
+
+function applyLocalTranscriptPolish(item, polishedText) {
+    const fixed = (polishedText || '').trim();
+    if (!fixed || fixed === item.text) return;
+    const entry = transcripts.find(candidate => String(candidate.id) === String(item.entryId));
+    if (!entry) return;
+    // 保留 rawTranscript，只把译校稿放进 correctedTranscript，刷新后仍可追溯原始 ASR。
+    entry.correctedTranscript = fixed;
+    entry.correctionApplied = true;
+    entry.refined = true;
+    console.log('[local-translate] 原文译校完成: %s...', fixed.slice(0, 24));
+    rebuildTranslationContext();
+    saveTranscripts();
+    scheduleDisplayUpdate('primary');
+}
+
 async function flushLocalTranslationQueue() {
     if (!localTranslateClient) return;
     while (localTranslateInFlight < LOCAL_TRANSLATE_CONCURRENCY && localTranslateQueue.length) {
@@ -1184,22 +1445,42 @@ async function flushLocalTranslationQueue() {
                 const contextInfo = translationContext.length > 0
                     ? translationContext.slice(-5).map((t) => t.text).join('\n')
                     : '';
-                // 各目标语言并行翻译（本地 LLM 单条完成需要数秒）。
-                await Promise.all(realtimeTranslationTargetLanguages.map(async (targetLang) => {
-                    // 与源语言相同的目标不翻译（与 OpenAI 路径的行为一致）。
-                    if (normalizeRealtimeTranslationLanguage(item.languageHint) ===
-                        normalizeRealtimeTranslationLanguage(targetLang)) {
+                const sourceLang = normalizeRealtimeTranslationLanguage(item.languageHint) ||
+                    normalizeRealtimeTranslationLanguage(detectLanguage(item.text));
+                let polishedText = item.text;
+                // 先在原语言内修复 ASR 的重叠、错词和断句，再把整理后的整句并行翻译。
+                try {
+                    polishedText = await localTranslateClient.translate(item.text, {
+                        targetLanguage: sourceLang || item.languageHint,
+                        sourceLanguageHint: item.languageHint,
+                        context: contextInfo,
+                        mode: 'polish',
+                    });
+                    applyLocalTranscriptPolish(item, polishedText);
+                } catch (err) {
+                    console.warn('[local-translate] 原文译校失败，保留原始 ASR:', err.message || err);
+                    polishedText = item.text;
+                }
+
+                // 各目标语言并行翻译；同语目标复用上面的译校稿，不再照抄原始 ASR。
+                await Promise.all(realtimeTranslationTargetLanguages.map(async (targetLang, targetIndex) => {
+                    const normalizedTarget = normalizeRealtimeTranslationLanguage(targetLang);
+                    if (sourceLang && sourceLang === normalizedTarget) {
+                        addLocalTranslationPaneEntry(
+                            targetLang, polishedText, item.order, targetIndex, item.entryId);
+                        console.log('[local-translate] 同语译校稿到达: target=%s, %s...',
+                            targetLang, polishedText.slice(0, 20));
                         return;
                     }
                     try {
-                        const translated = await localTranslateClient.translate(item.text, {
+                        const translated = await localTranslateClient.translate(polishedText, {
                             targetLanguage: targetLang,
                             sourceLanguageHint: item.languageHint,
                             context: contextInfo,
+                            mode: 'translate',
                         });
-                        const entry = createRealtimeTranslationPaneEntry(targetLang, translated);
-                        entry.realtimeOrder = item.order + 0.5; // 与对应原文条目紧邻排序
-                        insertTranscriptInRealtimeOrder(entry);
+                        addLocalTranslationPaneEntry(
+                            targetLang, translated, item.order, targetIndex, item.entryId);
                         console.log('[local-translate] 译文到达: target=%s, %s...',
                             targetLang, translated.slice(0, 20));
                     } catch (err) {
@@ -1223,11 +1504,12 @@ async function flushLocalTranslationQueue() {
 
 /** 释放本地 ASR 相关资源（stopMeeting 时调用）。 */
 async function teardownLocalAsrPipeline() {
-    commitLocalAsrLiveBeforeStop();
     if (localAsrClient) {
         try { await localAsrClient.finish(); } catch (e) { console.warn('[local-asr] finish:', e); }
         localAsrClient = null;
     }
+    // finish 的最终响应也会进入 updateLocalAsrLiveText；等它返回后再统一冲刷。
+    commitLocalAsrLiveBeforeStop();
     if (localAsrSource) { try { localAsrSource.disconnect(); } catch (e) {} localAsrSource = null; }
     if (localAsrProcessor) { try { localAsrProcessor.disconnect(); } catch (e) {} localAsrProcessor = null; }
     if (localAsrAudioCtx) {
@@ -1235,6 +1517,7 @@ async function teardownLocalAsrPipeline() {
         localAsrAudioCtx = null;
     }
     lastCommittedServer = '';
+    resetLocalAsrBatchState();
     // 丢弃未完成的本地翻译（正文已定格在 transcripts，缺译可接受）。
     localTranslateQueue = [];
     localTranslateClient = null;
@@ -1421,7 +1704,12 @@ function updateRealtimeTranslationSplitHeaders() {
     }
 }
 
-function commitRealtimeInputTranscript({ itemId, transcript, onSegment } = {}) {
+function commitRealtimeInputTranscript({
+    itemId,
+    transcript,
+    onSegment,
+    segmentGrouping,
+} = {}) {
     // 权威源转写完成：把最终文本切分提交为 original 条目（Whisper pane），并清空 live 文本。
     // 文本来源优先用完成事件的 transcript，缺失时回退到已累积的 live 文本。
     // onSegment(entry, segment)：每个切句条目上屏后的回调（本地翻译模式用来入队翻译，
@@ -1435,7 +1723,10 @@ function commitRealtimeInputTranscript({ itemId, transcript, onSegment } = {}) {
     if (isHallucinationText(finalText)) return;
 
     const baseOrder = nextRealtimeSegmentOrder();
-    const segments = splitTranscriptSentences(finalText, { group: true });
+    const segments = splitTranscriptSentences(finalText, {
+        group: true,
+        ...(segmentGrouping || {}),
+    });
     segments.forEach((segment, index) => {
         const entry = buildTranscriptEntryFromSegment(
             segment,
@@ -1911,10 +2202,28 @@ function updateDisplay(channel = 'primary') {
         realtimeTranslationTargetLanguages.forEach((lang, idx) => {
             const pane = idx === 0 ? betaPaneLang1 : betaPaneLang2;
             if (!pane) return;
-            const langEntries = displayTranscripts.filter(entry =>
-                (entry.paneRole === 'translation' || isRealtimeTranslationPaneEntry(entry)) &&
-                normalizeRealtimeTranslationLanguage(entry.language) ===
-                normalizeRealtimeTranslationLanguage(lang));
+            const normalizedLang = normalizeRealtimeTranslationLanguage(lang);
+            const translatedSourceIds = new Set(displayTranscripts
+                .filter((entry) => {
+                    const entryLanguage = normalizeRealtimeTranslationLanguage(entry.language);
+                    return (entry.paneRole === 'translation' || isRealtimeTranslationPaneEntry(entry)) &&
+                        entryLanguage === normalizedLang && entry.sourceEntryId;
+                })
+                .map((entry) => String(entry.sourceEntryId)));
+            const langEntries = displayTranscripts.filter((entry) => {
+                const entryLanguage = normalizeRealtimeTranslationLanguage(
+                    entry.language || entry.originalLanguage);
+                const isTargetTranslation =
+                    (entry.paneRole === 'translation' || isRealtimeTranslationPaneEntry(entry)) &&
+                    entryLanguage === normalizedLang;
+                // 新字幕等待同语译校时先显示原文；译校条目到达后按 sourceEntryId 替换。
+                // 历史数据没有 sourceEntryId，仍保留原来的直通显示兼容性。
+                const isLocalSameLanguageSource = selectedAsrEngine === 'local' &&
+                    (entry.paneRole === 'original' || isRealtimeTranscriptionPaneEntry(entry)) &&
+                    entryLanguage === normalizedLang &&
+                    !translatedSourceIds.has(String(entry.id));
+                return isTargetTranslation || isLocalSameLanguageSource;
+            });
             rewritePane(pane, renderRealtimePaneSection(
                 getSubtitleLanguageLabel(lang),
                 langEntries,

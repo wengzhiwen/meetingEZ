@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MeetingEZ - 智能会议助手</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=20260713e">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=20260815a">
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo.svg') }}">
 </head>
 <body
@@ -166,9 +166,10 @@
                     <label for="localAsrBaseUrl" class="setting-sub-label">Qwen3-ASR 流式服务端点</label>
                     <div class="setting-input-row">
                         <input type="text" id="localAsrBaseUrl" class="setting-input"
-                               placeholder="http://192.168.1.10:8000" autocomplete="off" spellcheck="false">
+                               placeholder="http://192.168.1.10:8001" autocomplete="off" spellcheck="false">
                         <button id="testLocalAsr" class="btn btn-small btn-secondary" type="button">测试</button>
                     </div>
+                    <div id="localAsrTestStatus" class="setting-test-status" role="status" aria-live="polite"></div>
                     <label class="radio-label" style="margin-top: 8px;">
                         <input type="checkbox" id="localTranslateEnabled">
                         <span>启用本地翻译（OpenAI 兼容 API）</span>
@@ -180,6 +181,7 @@
                                    placeholder="http://192.168.1.10:8001/v1" autocomplete="off" spellcheck="false">
                             <button id="testLocalTranslate" class="btn btn-small btn-secondary" type="button">测试</button>
                         </div>
+                        <div id="localTranslateTestStatus" class="setting-test-status" role="status" aria-live="polite"></div>
                         <label for="localTranslateModel" class="setting-sub-label">翻译模型</label>
                         <input type="text" id="localTranslateModel" class="setting-input"
                                placeholder="qwen3-8b" autocomplete="off" spellcheck="false">
@@ -187,7 +189,7 @@
                         <input type="password" id="localTranslateApiKey" class="setting-input"
                                placeholder="通常留空" autocomplete="off">
                         <div class="setting-help" id="localTranslateHint">
-                            本地翻译为逐段后置（非实时）。本地模式不调用云端 OpenAI（含术语校正）。
+                            本地模型先译校 ASR 的错词与断句，再逐段翻译（非实时）。本地模式不调用云端 OpenAI。
                             端点需开启 CORS（vLLM 启动加 --allowed-origins）。
                         </div>
                     </div>
@@ -269,8 +271,8 @@
     </div>
 
     <script src="{{ url_for('static', filename='js/realtime-translation.js') }}?v=20260713a"></script>
-    <script src="{{ url_for('static', filename='js/local-asr-client.js') }}?v=20260815b"></script>
-    <script src="{{ url_for('static', filename='js/local-translate-client.js') }}?v=20260815a"></script>
-    <script type="module" src="{{ url_for('static', filename='js/app.js') }}?v=20260815h"></script>
+    <script src="{{ url_for('static', filename='js/local-asr-client.js') }}?v=20260815c"></script>
+    <script src="{{ url_for('static', filename='js/local-translate-client.js') }}?v=20260815d"></script>
+    <script type="module" src="{{ url_for('static', filename='js/app.js') }}?v=20260815o"></script>
 </body>
 </html>
