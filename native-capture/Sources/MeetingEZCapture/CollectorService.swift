@@ -165,6 +165,11 @@ final class CollectorService: @unchecked Sendable {
             return
         }
 
+        if case .apps(let ids) = mode {
+            logToFile("start request: apps [\(ids.joined(separator: ", "))]")
+        } else {
+            logToFile("start request: system")
+        }
         pendingOp = true
         source.start(mode: mode) { result in
             self.serviceQueue.async {
