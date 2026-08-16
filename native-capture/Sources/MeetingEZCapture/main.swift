@@ -22,12 +22,40 @@ struct ServeOptions {
           --mock-audio         使用 440Hz 假音频源（Web 端无权限联调用）
           -h, --help           显示本帮助
 
-        隐藏子命令: ws-probe（协议层测试客户端，ws-probe --help 看用法）
+        配置文件 ~/.meetingez-capture.json 提供同名默认值（port/allowOrigins/
+        mockAudio/noGui），命令行参数可覆盖、--allow-origin 为并集。
+        授权后系统"退出并重新打开"、开机自启等无法携带命令行参数的启动路径
+        都依赖它保留白名单。隐藏子命令: ws-probe（ws-probe --help 看用法）。
         """
 
-    /// 解析失败时打印用法并返回 nil。
-    static func parse(_ args: [String]) -> ServeOptions? {
+    /// ~/.meetingez-capture.json 提供的默认值；CLI 参数可覆盖。
+    static let configFilePath = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".meetingez-capture.json")
+
+    static func loadConfigDefaults() -> ServeOptions {
         var options = ServeOptions()
+        guard let data = try? Data(contentsOf: configFilePath),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return options
+        }
+        if let port = object["port"] as? Int, (1...65535).contains(port) {
+            options.port = UInt16(port)
+        }
+        if let origins = object["allowOrigins"] as? [String] {
+            options.extraOrigins.append(contentsOf: origins.filter { !$0.isEmpty })
+        }
+        if object["mockAudio"] as? Bool == true {
+            options.mockAudio = true
+        }
+        if object["noGui"] as? Bool == true {
+            options.noGui = true
+        }
+        return options
+    }
+
+    /// 解析失败时打印用法并返回 nil。
+    static func parse(_ args: [String], defaults: ServeOptions = ServeOptions.loadConfigDefaults()) -> ServeOptions? {
+        var options = defaults
         var i = 0
         while i < args.count {
             let arg = args[i]

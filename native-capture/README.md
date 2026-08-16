@@ -67,6 +67,23 @@ meetingez-capture [--port N] [--allow-origin 值]... [--no-gui] [--mock-audio]
 | `--no-gui` | 不启动菜单栏，纯服务模式（自动化/CI 用） |
 | `--mock-audio` | 440Hz 假音源 + 固定应用列表，权限恒为已授予（web 端无权限联调用） |
 
+### 配置文件 `~/.meetingez-capture.json`
+
+命令行参数无法覆盖所有启动路径——授权屏幕录制后系统的"退出并重新打开"、
+菜单栏"重启采集器"、开机自启、双击启动都不会带上参数。白名单等配置写进
+配置文件后任何方式启动都生效；命令行参数可覆盖（`--allow-origin` 为并集）：
+
+```json
+{
+  "port": 17642,
+  "allowOrigins": ["https://mez.example.com", "http://192.168.1.10:5090"],
+  "mockAudio": false,
+  "noGui": false
+}
+```
+
+该文件是本机用户配置，不进仓库。
+
 ## 与 web 端配合
 
 1. 启动采集器（菜单栏出现波形图标）。
