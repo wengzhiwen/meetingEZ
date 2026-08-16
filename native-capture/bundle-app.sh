@@ -26,7 +26,15 @@ mkdir -p "${APP_BUNDLE}/Contents/MacOS" "${APP_BUNDLE}/Contents/Resources"
 cp ".build/release/${BINARY}" "${APP_BUNDLE}/Contents/MacOS/${BINARY}"
 cp Info.plist "${APP_BUNDLE}/Contents/Info.plist"
 
-IDENTITY="${MEETINGEZ_SIGN_IDENTITY:--}"
+IDENTITY="${MEETINGEZ_SIGN_IDENTITY:-}"
+if [ -z "${IDENTITY}" ]; then
+    # 自动检测钥匙串里的 MeetingEZ Dev 自签名证书；没有则退回 ad-hoc。
+    if security find-identity -v -p codesigning 2>/dev/null | grep -q "MeetingEZ Dev"; then
+        IDENTITY="MeetingEZ Dev"
+    else
+        IDENTITY="-"
+    fi
+fi
 echo "==> codesign (identity: ${IDENTITY})"
 codesign --force --sign "${IDENTITY}" "${APP_BUNDLE}"
 codesign --verify --verbose=1 "${APP_BUNDLE}"

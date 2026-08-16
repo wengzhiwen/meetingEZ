@@ -49,6 +49,7 @@ final class CollectorService: @unchecked Sendable {
             self.serviceQueue.async {
                 self.framesSent += 1
                 self.server.broadcastAudio(data)
+                self.observeLevel(data)
             }
         }
         source.onStopped = { [weak self] reason, message in
@@ -61,6 +62,7 @@ final class CollectorService: @unchecked Sendable {
 
     private func handleCommand(_ conn: ClientConnection, _ object: [String: Any]) {
         let type = object["type"] as? String ?? ""
+        logToFile("command: \(type) state(capturing=\(isCapturing), pendingOp=\(pendingOp))")
         let ref = object["ref"]
 
         func reply(_ payload: [String: Any]) {
@@ -119,6 +121,7 @@ final class CollectorService: @unchecked Sendable {
             source.stop {
                 self.serviceQueue.async {
                     self.pendingOp = false
+                    logToFile("stop completed, replying stopped")
                     self.setCapturing(false, detail: "")
                     self.stopStatsTimer()
                     reply(["type": "stopped", "reason": "request"])
@@ -166,6 +169,7 @@ final class CollectorService: @unchecked Sendable {
         source.start(mode: mode) { result in
             self.serviceQueue.async {
                 self.pendingOp = false
+                logToFile("start result: \(result)")
                 switch result {
                 case let .success(format):
                     self.setCapturing(true, detail: self.describe(mode: mode))
@@ -266,6 +270,31 @@ final class CollectorService: @unchecked Sendable {
         } else {
             NotificationCenter.default.post(name: .capturePermissionNeedsRestart, object: nil)
         }
+    }
+
+    // ---- 实时电平（状态面板用，约 250ms 一次通知） ----
+
+    private var levelSamples = 0
+    private var levelSquares: Double = 0
+    private var lastLevelPost = Date()
+
+    private func observeLevel(_ data: Data) {
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            let buffer = raw.bindMemory(to: Float32.self)
+            for sample in buffer {
+                levelSquares += Double(sample) * Double(sample)
+            }
+            levelSamples += buffer.count
+        }
+        guard Date().timeIntervalSince(lastLevelPost) >= 0.25 else { return }
+        lastLevelPost = Date()
+        let rms = levelSamples > 0 ? (levelSquares / Double(levelSamples)).squareRoot() : 0
+        levelSamples = 0
+        levelSquares = 0
+        NotificationCenter.default.post(
+            name: .captureAudioLevel, object: nil,
+            userInfo: ["rms": rms, "framesSent": framesSent,
+                       "framesDropped": server.totalFramesDropped()])
     }
 
     // ---- 统计 ----

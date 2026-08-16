@@ -37,7 +37,9 @@ mv "build/MeetingEZ Capture.app" ~/Applications/   # 固定路径，避免重复
 open ~/Applications/"MeetingEZ\ Capture.app"
 ```
 
-菜单栏图标（波形）：显示采集状态，菜单里可退出；端口被占用会弹窗报错。
+菜单栏图标（波形）：菜单里有「显示状态面板」——只读展示服务地址、屏幕录制权限、
+Web 客户端连接、采集目标、实时音频电平条与帧统计（配置仍在 web 端，面板不含任何设置项）。
+端口被占用会弹窗报错。
 
 ## 权限（屏幕录制）
 

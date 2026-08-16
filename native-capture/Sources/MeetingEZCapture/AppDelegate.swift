@@ -1,9 +1,9 @@
 import AppKit
 import Darwin
 import Foundation
+import SwiftUI
 
-/// 菜单栏外壳：状态展示 + 退出 + （需要时）重启。无任何配置 GUI——
-/// 一切采集配置由 web 端通过 WebSocket 下发。
+/// 菜单栏外壳 + 只读状态面板。无任何配置 GUI——一切采集配置由 web 端通过 WebSocket 下发。
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let options: ServeOptions
     private var server: CaptureServer?
@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var stateMenuItem: NSMenuItem?
     private var clientMenuItem: NSMenuItem?
     private var restartMenuItem: NSMenuItem?
+    private var statusModel: CollectorStatusModel?
+    private var statusPanel: NSPanel?
 
     private var clientConnected = false
     private var capturingDetail = ""
@@ -41,6 +43,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         service.run()
         self.server = server
         self.service = service
+
+        let model = CollectorStatusModel()
+        model.start(port: options.port, source: source)
+        statusModel = model
+
         updateMenu()
     }
 
@@ -53,6 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image?.isTemplate = true
         }
         let menu = NSMenu()
+
+        let panel = NSMenuItem(title: "显示状态面板", action: #selector(toggleStatusPanel), keyEquivalent: "")
+        panel.target = self
+        menu.addItem(panel)
 
         let state = NSMenuItem(title: "启动中…", action: nil, keyEquivalent: "")
         state.isEnabled = false
@@ -102,6 +113,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.restartMenuItem?.isHidden = false
             self?.updateMenu()
         }
+    }
+
+    // ---- 状态面板 ----
+
+    @objc private func toggleStatusPanel() {
+        if let panel = statusPanel, panel.isVisible {
+            panel.orderOut(nil)
+            return
+        }
+        if statusPanel == nil, let model = statusModel {
+            let panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 320, height: 400),
+                styleMask: [.titled, .closable, .nonactivatingPanel],
+                backing: .buffered, defer: false)
+            panel.title = "MeetingEZ Capture"
+            panel.contentView = NSHostingView(rootView: StatusPanelView(model: model))
+            panel.isFloatingPanel = true
+            panel.level = .floating
+            panel.isReleasedWhenClosed = false
+            panel.center()
+            statusPanel = panel
+        }
+        statusPanel?.makeKeyAndOrderFront(nil)
     }
 
     private func updateMenu() {

@@ -103,8 +103,8 @@ CLI Agent
 Float32 PCM。浏览器端 `local-collector-client.js` 经 AudioWorklet 把 PCM 重建成
 MediaStream，喂给与麦克风/标签页完全相同的下游链路。
 
-- 采集器只解决采集，无业务 GUI——应用选择、权限引导等 UI 全在 web 端，
-  web 端改版不需要更新采集器。
+- 采集器只解决采集：除只读状态面板（服务/权限/电平/帧统计）外无任何 GUI——
+  应用选择、权限引导等配置 UI 全在 web 端，web 端改版不需要更新采集器。
 - WS 握手校验 Origin（默认只放行 localhost/127.0.0.1/[::1] 任意端口），
   Origin 缺失即拒绝，防恶意网页连本机端口窃听音频。
 - 应用选择合同是 bundleId（不是 pid），容忍应用重启；连接模型 last-wins；

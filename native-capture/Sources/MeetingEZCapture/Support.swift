@@ -94,3 +94,17 @@ func jsonLine(_ object: [String: Any]) -> String {
           let text = String(data: data, encoding: .utf8) else { return "{}" }
     return text
 }
+
+/// 简易文件日志：open 启动的 GUI 进程没有 stdout，关键生命周期事件落到这里。
+/// 路径固定 /tmp/meetingez-capture.log，轮转不管（量极小）。
+func logToFile(_ message: String) {
+    let line = "\(Date()) \(message)\n"
+    let url = URL(fileURLWithPath: "/tmp/meetingez-capture.log")
+    if let handle = try? FileHandle(forWritingTo: url) {
+        handle.seekToEndOfFile()
+        handle.write(Data(line.utf8))
+        try? handle.close()
+    } else {
+        try? Data(line.utf8).write(to: url)
+    }
+}
