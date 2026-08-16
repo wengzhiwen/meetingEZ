@@ -183,7 +183,26 @@ final class CaptureServer {
         self.originPolicy = originPolicy
     }
 
+    /// 启动监听（带重试）：重启自身时新实例可能先于旧实例尝试绑定端口，
+    /// 重试覆盖旧实例退出释放 17642 的窗口（最长约 4 秒）。
     func start() throws {
+        var lastError: Error?
+        for attempt in 0..<8 {
+            do {
+                try startOnce()
+                startHeartbeat()
+                return
+            } catch {
+                lastError = error
+                if attempt < 7 {
+                    Thread.sleep(forTimeInterval: 0.5)
+                }
+            }
+        }
+        throw lastError!
+    }
+
+    private func startOnce() throws {
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
         guard let endpointPort = NWEndpoint.Port(rawValue: port) else {
@@ -230,9 +249,11 @@ final class CaptureServer {
         listener.start(queue: queue)
         let waitResult = startup.wait(timeout: .now() + 5)
         if waitResult == .timedOut {
+            listener.cancel()
             throw CollectorError.startFailed("WebSocket 服务启动超时（端口 \(port)）。")
         }
         if let startupError {
+            listener.cancel()
             throw CollectorError.startFailed("WebSocket 服务启动失败（端口 \(port) 被占用？）: \(startupError.localizedDescription)")
         }
         listener.stateUpdateHandler = { state in
@@ -241,8 +262,6 @@ final class CaptureServer {
             }
         }
         self.listener = listener
-
-        startHeartbeat()
     }
 
     private func accept(_ connection: NWConnection) {

@@ -130,13 +130,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // ---- 重启（使 TCC 权限生效） ----
+    // 必须原样带上启动参数（如 --allow-origin），否则重启后白名单丢失。
 
     @objc private func relaunch() {
+        let arguments = Array(CommandLine.arguments.dropFirst())
         let bundleURL = Bundle.main.bundleURL
         if bundleURL.pathExtension == "app" {
-            // .app 形态：重新打开 bundle。
-            NSWorkspace.shared.open(bundleURL)
-            NSApp.terminate(nil)
+            // .app 形态：OpenConfiguration 透传参数后退出；
+            // 新实例的端口绑定重试会等旧实例释放 17642。
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.arguments = arguments
+            NSWorkspace.shared.openApplication(at: bundleURL, configuration: configuration)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                NSApp.terminate(nil)
+            }
             return
         }
         // 裸二进制形态：posix_spawn 自身并退出。
