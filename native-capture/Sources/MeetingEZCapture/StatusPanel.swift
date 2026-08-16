@@ -24,6 +24,11 @@ final class CollectorStatusModel: ObservableObject {
     @Published var level: Double = 0
     @Published var framesSent = 0
     @Published var framesDropped = 0
+    /// 追加放行的页面 Origin（默认回环地址之外的），面板可增删、即时生效并写回配置文件。
+    @Published var extraOrigins: [String] = []
+
+    /// 面板编辑后的持久化回调（由 AppDelegate 注入：更新运行中白名单 + 写配置文件）。
+    var persistOrigins: (([String]) -> Void)?
 
     private weak var source: CaptureSource?
     private var pollTimer: Timer?
@@ -71,6 +76,20 @@ final class CollectorStatusModel: ObservableObject {
         } else {
             permissionState = .denied
         }
+    }
+
+    // ---- Origin 白名单编辑（即时生效 + 写回 ~/.meetingez-capture.json） ----
+
+    func addOrigin(_ raw: String) {
+        let normalized = OriginPolicy.normalize(raw)
+        guard !normalized.isEmpty, !extraOrigins.contains(normalized) else { return }
+        extraOrigins.append(normalized)
+        persistOrigins?(extraOrigins)
+    }
+
+    func removeOrigin(_ origin: String) {
+        extraOrigins.removeAll { $0 == origin }
+        persistOrigins?(extraOrigins)
     }
 }
 
@@ -151,6 +170,10 @@ struct StatusPanelView: View {
 
             Divider()
 
+            OriginEditorSection(model: model)
+
+            Divider()
+
             Text("Web 客户端在 meetingEZ 实时页选择「应用 / 系统音频」后自动连接。"
                  + "此面板仅展示状态，采集配置均在 web 端进行。")
                 .font(.caption2)
@@ -175,5 +198,58 @@ private struct StatusRow<Content: View>: View {
             content
             Spacer(minLength: 0)
         }
+    }
+}
+
+/// 放行页面（Origin）编辑区：默认回环地址之外需要显式放行，
+/// 增删即时生效并写回 ~/.meetingez-capture.json。
+private struct OriginEditorSection: View {
+    @ObservedObject var model: CollectorStatusModel
+    @State private var newOrigin = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("放行页面（默认已放行本机 localhost；远程部署的页面需加到这里）")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if model.extraOrigins.isEmpty {
+                Text("（仅默认本机页面）")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else {
+                ForEach(model.extraOrigins, id: \.self) { origin in
+                    HStack(spacing: 4) {
+                        Circle().fill(Color.green).frame(width: 6, height: 6)
+                        Text(origin)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                        Spacer()
+                        Button {
+                            model.removeOrigin(origin)
+                        } label: {
+                            Image(systemName: "minus.circle.fill")
+                                .foregroundStyle(.red.opacity(0.7))
+                        }
+                        .buttonStyle(.plain)
+                        .help("移除该 Origin")
+                    }
+                }
+            }
+            HStack(spacing: 6) {
+                TextField("https://meeting.example.com", text: $newOrigin)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.caption, design: .monospaced))
+                    .onSubmit(add)
+                Button("添加", action: add)
+                    .buttonStyle(.bordered)
+                    .disabled(OriginPolicy.normalize(newOrigin).isEmpty)
+            }
+        }
+    }
+
+    private func add() {
+        guard !OriginPolicy.normalize(newOrigin).isEmpty else { return }
+        model.addOrigin(newOrigin)
+        newOrigin = ""
     }
 }

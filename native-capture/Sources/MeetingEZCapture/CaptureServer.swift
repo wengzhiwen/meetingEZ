@@ -2,16 +2,38 @@ import Foundation
 import Network
 
 /// Origin 白名单：默认只放行本机回环地址上的 http(s) 页面（meetingEZ Web 端），
-/// `--allow-origin` 可追加精确值（写法容忍大小写与尾部斜杠），"*" 全放行（仅限本地联调）。
+/// 追加项来自 `--allow-origin` 与配置文件（状态面板可即时增删并写回）。
+/// 写法容忍大小写与尾部斜杠；"*" 全放行（仅限本地联调）。
 /// 浏览器 WebSocket 握手必带 Origin；缺失即非浏览器客户端，默认拒绝。
-struct OriginPolicy {
-    var extraAllowed: [String]
+final class OriginPolicy: @unchecked Sendable {
+    private let lock = NSLock()
+    private var extra: [String]
+
+    init(extraAllowed: [String] = []) {
+        self.extra = extraAllowed.map(OriginPolicy.normalize).filter { !$0.isEmpty }
+    }
+
+    /// 当前追加的白名单（已规范化）。
+    var entries: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return extra
+    }
+
+    /// 整体替换（状态面板保存时用）。
+    func set(_ origins: [String]) {
+        let normalized = origins.map(OriginPolicy.normalize).filter { !$0.isEmpty }
+        lock.lock()
+        defer { lock.unlock() }
+        extra = normalized
+    }
 
     func allows(origin: String?) -> Bool {
-        if extraAllowed.contains("*") { return true }
+        let extras = entries
+        if extras.contains("*") { return true }
         guard let origin, !origin.isEmpty else { return false }
-        let normalized = Self.normalize(origin)
-        if extraAllowed.contains(where: { Self.normalize($0) == normalized }) { return true }
+        let normalized = OriginPolicy.normalize(origin)
+        if extras.contains(normalized) { return true }
 
         let lowered = normalized
         guard let schemeEnd = lowered.firstIndex(of: ":") else { return false }
@@ -37,7 +59,7 @@ struct OriginPolicy {
     }
 
     /// 规范化为 scheme://host[:port]：小写、去尾部斜杠与路径（Origin 头本无路径，
-    /// 这里容错用户在 --allow-origin 里按 URL 习惯书写的情况）。
+    /// 这里容错按 URL 习惯书写的情况）。
     static func normalize(_ value: String) -> String {
         var normalized = value.trimmingCharacters(in: .whitespaces).lowercased()
         while normalized.hasSuffix("/") { normalized.removeLast() }
@@ -181,6 +203,16 @@ final class CaptureServer {
     init(port: UInt16, originPolicy: OriginPolicy) {
         self.port = port
         self.originPolicy = originPolicy
+    }
+
+    /// 当前追加白名单（状态面板展示用；含 CLI 与配置文件来源）。
+    var currentExtraOrigins: [String] {
+        originPolicy.entries
+    }
+
+    /// 整体更新追加白名单，握手校验立即按新表生效。
+    func setExtraOrigins(_ origins: [String]) {
+        originPolicy.set(origins)
     }
 
     /// 启动监听（带重试）：重启自身时新实例可能先于旧实例尝试绑定端口，

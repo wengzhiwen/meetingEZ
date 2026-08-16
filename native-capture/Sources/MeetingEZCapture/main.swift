@@ -53,6 +53,20 @@ struct ServeOptions {
         return options
     }
 
+    /// 把当前生效配置写回配置文件（状态面板编辑白名单后调用，
+    /// 使 CLI 传入的值也随之固化）。
+    static func persist(_ options: ServeOptions, extraOrigins: [String]) {
+        let object: [String: Any] = [
+            "port": Int(options.port),
+            "allowOrigins": extraOrigins.map(OriginPolicy.normalize),
+            "mockAudio": options.mockAudio,
+            "noGui": options.noGui
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: object,
+                                                      options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? data.write(to: configFilePath, options: .atomic)
+    }
+
     /// 解析失败时打印用法并返回 nil。
     static func parse(_ args: [String], defaults: ServeOptions = ServeOptions.loadConfigDefaults()) -> ServeOptions? {
         var options = defaults

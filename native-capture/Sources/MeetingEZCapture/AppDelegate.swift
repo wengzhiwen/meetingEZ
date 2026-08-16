@@ -46,6 +46,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let model = CollectorStatusModel()
         model.start(port: options.port, source: source)
+        model.extraOrigins = server.currentExtraOrigins
+        // 面板编辑白名单：立即更新握手校验 + 固化到配置文件（含 CLI 传入值）。
+        model.persistOrigins = { [weak self] origins in
+            guard let self else { return }
+            self.server?.setExtraOrigins(origins)
+            ServeOptions.persist(self.options, extraOrigins: origins)
+        }
         statusModel = model
 
         updateMenu()
