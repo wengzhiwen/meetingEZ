@@ -9,7 +9,7 @@
 MeetingEZ 是一个轻量的会议实时转写、按需翻译和会后纪要工具。当前 Web 应用已经收敛为“控制台 + 实时页”双入口：
 
 - 控制台 `/`：项目选择、会议创建、会议文件/音频/术语/背景管理。
-- 实时页 `/realtime`：采集麦克风或标签页音频，通过 OpenAI Realtime API WebRTC session 做实时转写和实时翻译。
+- 实时页 `/realtime`：采集麦克风、标签页音频或 macOS 应用/系统音频（经本地采集器），通过 OpenAI Realtime API WebRTC session 做实时转写和实时翻译。
 - 后端只签发短期 Realtime `client secret`，浏览器不保存标准 API Key。
 - Web 实时页翻译只使用 `gpt-realtime-translate`，不提供翻译方式选择。
 - 仓库仍保留 CLI 会议纪要 Agent，用于离线音频转写、纪要生成和项目记忆维护。
@@ -66,6 +66,11 @@ Web GUI
   app/static/js/realtime-transcription.js
   app/static/js/workspace/*.js
 
+macOS 本地采集器（第三音源：其他应用/系统音频）
+  native-capture/                     SwiftPM，无第三方依赖，详见其 README
+  app/static/js/local-collector-client.js    浏览器侧 WS 客户端 + PCM→MediaStream 管线
+  app/static/js/collector-pcm-worklet.js      AudioWorklet 环形缓冲
+
 CLI Agent
   meeting_agent/__main__.py
   meeting_agent/asr/router.py
@@ -90,6 +95,22 @@ CLI Agent
 4. input/output delta 不保证携带 `item_id`，前端按当前流累积并以 done 或静音超时收尾。
 
 不要把标准 API Key 放入浏览器端代码。不要回退到旧的浏览器 WebSocket + Base64 PCM 推流实现。
+
+### 第三音源：macOS 本地采集器（应用/系统音频）
+
+`native-capture/` 是独立的 Swift 菜单栏程序（ScreenCaptureKit 纯音频采集），在
+`127.0.0.1:17642` 提供 WebSocket：文本帧 JSON 控制协议 + 二进制帧 16kHz 单声道
+Float32 PCM。浏览器端 `local-collector-client.js` 经 AudioWorklet 把 PCM 重建成
+MediaStream，喂给与麦克风/标签页完全相同的下游链路。
+
+- 采集器只解决采集，无业务 GUI——应用选择、权限引导等 UI 全在 web 端，
+  web 端改版不需要更新采集器。
+- WS 握手校验 Origin（默认只放行 localhost/127.0.0.1/[::1] 任意端口），
+  Origin 缺失即拒绝，防恶意网页连本机端口窃听音频。
+- 应用选择合同是 bundleId（不是 pid），容忍应用重启；连接模型 last-wins；
+  无客户端时立即停止 SCK 采集。
+- 协议 v1 已冻结（见 `native-capture/README.md`），改动需两侧同步并 bump 版本。
+- 浏览器 WebSocket 的 `binaryType` 必须设为 `arraybuffer`（默认 Blob 会导致 PCM 静默丢弃）。
 
 ### 术语表注入：只能走后置文本链路
 

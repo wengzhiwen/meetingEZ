@@ -215,3 +215,9 @@ __marimo__/
 # Local Data
 projects/
 .claude/
+
+# SwiftPM 构建产物（native-capture/）
+.build/
+
+# Playwright MCP 测试产物
+.playwright-mcp/

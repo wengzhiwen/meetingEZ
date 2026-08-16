@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleName</key><string>MeetingEZ Capture</string>
+    <key>CFBundleDisplayName</key><string>MeetingEZ Capture</string>
+    <key>CFBundleExecutable</key><string>meetingez-capture</string>
+    <!-- bundleId 必须保持稳定：TCC 屏幕录制授权按 bundleId + 签名身份归属 -->
+    <key>CFBundleIdentifier</key><string>dev.meetingez.capture</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <!-- 菜单栏常驻，不占 Dock、不抢焦点 -->
+    <key>LSUIElement</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>

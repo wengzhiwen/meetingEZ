@@ -17,6 +17,7 @@
 - 控制台首页：默认先进入控制台，再选择项目模式或快速模式
 - 连接方式：WebRTC + DataChannel
 - 实时会话结构：2 路 `gpt-realtime-translate` session，分别译入第一语言和第二语言；第 0 路的 input transcript 同时作为权威原文
+- 音频输入：系统麦克风、Chrome 标签页音频，以及 macOS 本地采集器（采集其他应用如 Zoom/Teams 或整个系统的音频输出，见 `native-capture/README.md`）
 - 术语校正：realtime session 注入不了术语表，改由定格后的文本链路补——字幕先直接上屏，随后交给 `gpt-5.6-luna` 按项目术语表纠错，返回后原位替换
 - Translation transcript delta 不依赖 `item_id`，按当前流累积，并以 done 事件或短暂停顿完成分段
 - 访问控制：可选 `ACCESS_CODE` 登录页

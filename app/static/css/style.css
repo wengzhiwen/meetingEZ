@@ -1843,3 +1843,26 @@ body.workspace-page {
     background: rgba(239, 68, 68, 0.12);
     border-color: rgba(239, 68, 68, 0.22);
 }
+
+/* ---- 本地采集器（macOS 应用音频）应用列表 ---- */
+.local-app-list {
+    max-height: 180px;
+    overflow-y: auto;
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    border-radius: 6px;
+    padding: 6px 8px;
+    margin-top: 6px;
+}
+
+.local-app-list .local-app-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 0;
+    font-size: 13px;
+}
+
+.local-app-list.disabled {
+    opacity: 0.45;
+    pointer-events: none;
+}

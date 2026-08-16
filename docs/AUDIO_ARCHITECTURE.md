@@ -16,10 +16,15 @@
 
 ### 1. 音频采集
 
-前端支持两种输入：
+前端支持三种输入：
 
 - 麦克风：`navigator.mediaDevices.getUserMedia`
 - 标签页音频：`navigator.mediaDevices.getDisplayMedia`
+- 应用 / 系统音频（macOS 采集器）：本机菜单栏程序 MeetingEZ Capture 用
+  ScreenCaptureKit 采集其他应用或整个系统的音频，经 `ws://127.0.0.1:17642` 下发
+  16kHz 单声道 Float32 PCM；前端 `local-collector-client.js` 用 AudioWorklet 环形缓冲
+  （`collector-pcm-worklet.js`，目标水位 200ms）把 PCM 重建成 MediaStream，汇入同一条
+  转写链路（可叠加本地麦克风混音）。采集器只管采集，应用选择等 UI 全在 web 端。
 
 特点：
 

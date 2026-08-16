@@ -1,4 +1,4 @@
-console.log('app.js loaded, build: 20260815o');
+console.log('app.js loaded, build: 20260816a');
 // MeetingEZ - 基于 OpenAI Realtime API (WebRTC) 的实时转写
 // API Key 由后端从环境变量读取，前端不接触
 
@@ -33,6 +33,12 @@ let currentContextPack = null;
 let mediaStreamExtras = null;  // 标签页+麦克风混合时的额外资源
 let realtimeTranslationTargetLanguages = [];
 
+// ---- 本地采集器（macOS 应用音频）分支状态 ----
+// 客户端实例跨会议复用（WS 连接保持）；pipeline 随会议建立/销毁。
+let localCollector = null;           // window.LocalCollectorClient 实例
+let localCollectorPipeline = null;   // window.CollectorAudioPipeline 实例
+let localCollectorMicStream = null;  // localPlusMic 勾选时的麦克风流
+
 // ---- 本地 ASR（Qwen3-ASR）分支状态 ----
 // 与 OpenAI Realtime 链路互斥：selectedAsrEngine === 'local' 时走本地转写。
 let selectedAsrEngine = 'openai';   // 'openai' | 'local'
@@ -48,6 +54,9 @@ const LOCAL_TRANSLATE_ENABLED_KEY = 'meetingEZ_localTranslateEnabled';
 const LOCAL_TRANSLATE_BASEURL_KEY = 'meetingEZ_localTranslateBaseUrl';
 const LOCAL_TRANSLATE_MODEL_KEY = 'meetingEZ_localTranslateModel';
 const LOCAL_TRANSLATE_APIKEY_KEY = 'meetingEZ_localTranslateApiKey';
+const LOCAL_COLLECTOR_SYSTEM_KEY = 'meetingEZ_localCollectorSystem';
+const LOCAL_COLLECTOR_PLUSMIC_KEY = 'meetingEZ_localCollectorPlusMic';
+const LOCAL_COLLECTOR_TARGETS_KEY = 'meetingEZ_localCollectorTargets';
 
 function getSetting(key, fallback = '') {
     const value = localStorage.getItem(key);
@@ -628,6 +637,7 @@ async function init() {
     await loadWorkspaceContextPack({ silent: true });
     updateControls();
     initializeAutoScroll();
+    initLocalCollectorUi();
 }
 
 function loadSettings() {
@@ -635,14 +645,25 @@ function loadSettings() {
     selectedAudioSource = savedAudioSource;
     const audioSourceMic = document.getElementById('audioSourceMic');
     const audioSourceTab = document.getElementById('audioSourceTab');
+    const audioSourceLocal = document.getElementById('audioSourceLocal');
     if (savedAudioSource === 'tab') {
         audioSourceTab.checked = true;
+    } else if (savedAudioSource === 'local' && audioSourceLocal) {
+        audioSourceLocal.checked = true;
     } else {
         audioSourceMic.checked = true;
     }
     const tabPlusMicEl = document.getElementById('tabPlusMic');
     if (tabPlusMicEl) {
         tabPlusMicEl.checked = localStorage.getItem('meetingEZ_tabPlusMic') === 'true';
+    }
+    const localSystemAudioEl = document.getElementById('localSystemAudio');
+    if (localSystemAudioEl) {
+        localSystemAudioEl.checked = localStorage.getItem(LOCAL_COLLECTOR_SYSTEM_KEY) === 'true';
+    }
+    const localPlusMicEl = document.getElementById('localPlusMic');
+    if (localPlusMicEl) {
+        localPlusMicEl.checked = localStorage.getItem(LOCAL_COLLECTOR_PLUSMIC_KEY) === 'true';
     }
     updateAudioInputVisibility();
 
@@ -908,6 +929,53 @@ function setupEventListeners() {
         localStorage.setItem('meetingEZ_tabPlusMic', String(e.target.checked));
     });
 
+    document.getElementById('audioSourceLocal')?.addEventListener('change', () => {
+        selectedAudioSource = 'local';
+        localStorage.setItem('meetingEZ_audioSource', 'local');
+        updateAudioInputVisibility();
+    });
+
+    document.getElementById('localSystemAudio')?.addEventListener('change', (e) => {
+        localStorage.setItem(LOCAL_COLLECTOR_SYSTEM_KEY, String(e.target.checked));
+        renderLocalAppList();
+    });
+
+    document.getElementById('localPlusMic')?.addEventListener('change', (e) => {
+        localStorage.setItem(LOCAL_COLLECTOR_PLUSMIC_KEY, String(e.target.checked));
+    });
+
+    document.getElementById('localRefreshApps')?.addEventListener('click', async () => {
+        const statusEl = document.getElementById('localAppsStatus');
+        if (statusEl) statusEl.textContent = '刷新中…';
+        try {
+            await refreshLocalCollectorApps();
+            if (statusEl) statusEl.textContent = '';
+        } catch (error) {
+            if (statusEl) statusEl.textContent = error.message || '刷新失败';
+        }
+    });
+
+    document.getElementById('localGrantPermission')?.addEventListener('click', async () => {
+        const statusEl = document.getElementById('localPermissionStatus');
+        if (statusEl) statusEl.textContent = '等待系统授权…';
+        try {
+            const result = await ensureLocalCollectorClient().requestPermission();
+            if (result.granted && result.effective) {
+                if (statusEl) statusEl.textContent = '已授权。';
+            } else if (result.granted) {
+                if (statusEl) statusEl.textContent = '已授权，但需重启采集器（菜单栏 → 重启采集器）后生效。';
+            } else {
+                if (statusEl) statusEl.textContent = '未授权。';
+            }
+        } catch (error) {
+            if (statusEl) statusEl.textContent = error.message || '申请失败';
+        }
+    });
+
+    document.getElementById('localAppList')?.addEventListener('change', () => {
+        persistLocalCollectorTargets();
+    });
+
     initAsrEngineToggle();
 
     if (navigator.mediaDevices) {
@@ -1050,6 +1118,40 @@ async function startMeeting() {
                     throw new Error('用户取消了标签页共享。');
                 }
                 throw error;
+            }
+        } else if (selectedAudioSource === 'local') {
+            // 应用/系统音频：本机采集器（ScreenCaptureKit）→ WS PCM → WebAudio 重建 MediaStream。
+            ensureLocalCollectorClient();
+            await localCollector.ensureConnected(3000);
+            if (!localCollector.permission) {
+                throw new Error('本地采集器缺少「屏幕录制」权限。请在系统设置 → 隐私与安全性 → 屏幕录制中授权 MeetingEZ Capture 后重试。');
+            }
+
+            const useSystemAudio = !!document.getElementById('localSystemAudio')?.checked;
+            const selectedBundleIds = getLocalCollectorSelectedBundleIds();
+            if (!useSystemAudio && selectedBundleIds.length === 0) {
+                throw new Error('请至少勾选一个要采集的应用，或改选"采集整个系统音频"。');
+            }
+
+            const wantMic = !!document.getElementById('localPlusMic')?.checked;
+            let micStream = null;
+            if (wantMic) {
+                micStream = await navigator.mediaDevices.getUserMedia({
+                    audio: buildAudioConstraints({ echoCancellation: false })
+                });
+            }
+
+            const format = await localCollector.start(
+                useSystemAudio ? { mode: 'system' } : { mode: 'apps', bundleIds: selectedBundleIds });
+
+            const pipeline = new window.CollectorAudioPipeline(format);
+            localCollectorPipeline = pipeline;
+            localCollectorMicStream = micStream;
+            localCollector.onAudio = (samples) => pipeline.pushPcm(samples);
+            localCollector.onStopped = handleLocalCollectorStopped;
+            mediaStream = await pipeline.attach();
+            if (micStream) {
+                pipeline.mixInStream(micStream);
             }
         } else {
             mediaStream = await navigator.mediaDevices.getUserMedia({ audio: buildAudioConstraints() });
@@ -1802,6 +1904,9 @@ async function stopMeeting(options = {}) {
         // 本地 ASR 分支的清理（与 Realtime clients 互斥，只有一个在跑）。
         await teardownLocalAsrPipeline();
 
+        // 本地采集器分支的清理（与上面互斥）。WS 连接保留供下次会议复用。
+        await teardownLocalCollector();
+
         realtimeTranslationClients.forEach(client => client.disconnect());
         realtimeTranslationClients = [];
 
@@ -2491,6 +2596,180 @@ function clearTranscript() {
     }
 }
 
+// ---- 本地采集器（macOS 应用音频）UI 与生命周期 ----
+// GUI 全在这里；采集器本体（native-capture/）只有采集与 WebSocket 转发，不因 UI 变更而更新。
+
+function ensureLocalCollectorClient() {
+    if (localCollector) return localCollector;
+    localCollector = new window.LocalCollectorClient({
+        onState: () => {
+            updateLocalCollectorStatusUi();
+            renderLocalAppList();
+        },
+        onApps: () => {
+            renderLocalAppList();
+            updateLocalCollectorStatusUi();
+        }
+    });
+    return localCollector;
+}
+
+function initLocalCollectorUi() {
+    if (selectedAudioSource !== 'local') return;
+    const client = ensureLocalCollectorClient();
+    if (client.state === 'idle' || client.state === 'disconnected') {
+        client.ensureConnected(1500).catch(() => {
+            // 未检测到采集器：状态行由 updateLocalCollectorStatusUi 呈现，不打断页面。
+        });
+    }
+    updateLocalCollectorStatusUi();
+    renderLocalAppList();
+}
+
+async function refreshLocalCollectorApps() {
+    const client = ensureLocalCollectorClient();
+    await client.ensureConnected(3000);
+    await client.listApps();
+}
+
+function updateLocalCollectorStatusUi() {
+    const detailEl = document.getElementById('localCollectorStatusDetail');
+    const statusBox = document.getElementById('localCollectorStatus');
+    const permissionBox = document.getElementById('localPermissionBox');
+    if (!detailEl || !statusBox) return;
+
+    let text = '';
+    let kind = 'info';
+    let showPermissionBox = false;
+
+    if (!localCollector || localCollector.state === 'idle') {
+        text = '：未连接（选中本项或点击开始时自动连接）';
+    } else {
+        switch (localCollector.state) {
+            case 'connecting':
+                text = '：正在连接…';
+                break;
+            case 'disconnected':
+                text = '：未检测到采集器，自动重试中。请先在本机启动 MeetingEZ Capture。';
+                kind = 'error';
+                break;
+            case 'denied':
+                text = '：缺少「屏幕录制」权限。';
+                kind = 'error';
+                showPermissionBox = true;
+                if (localCollector.permission && localCollector.permissionEffective === false) {
+                    text = '：权限已授予，但需重启采集器才能生效（菜单栏 → 重启采集器）。';
+                }
+                break;
+            case 'capturing':
+                text = '：正在采集。';
+                break;
+            case 'ready':
+                text = localCollector.apps && localCollector.apps.length
+                    ? `：已连接，发现 ${localCollector.apps.length} 个应用。`
+                    : '：已连接。';
+                break;
+            default:
+                break;
+        }
+    }
+
+    detailEl.textContent = text;
+    statusBox.className = `status-message ${kind}`;
+    if (permissionBox) permissionBox.hidden = !showPermissionBox;
+}
+
+function renderLocalAppList() {
+    const listEl = document.getElementById('localAppList');
+    if (!listEl) return;
+    const apps = (localCollector && localCollector.apps) || [];
+    const saved = new Set(safeParseLocalTargets());
+    const useSystem = !!document.getElementById('localSystemAudio')?.checked;
+
+    listEl.innerHTML = '';
+    if (apps.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'setting-help';
+        empty.textContent = localCollector
+            ? '（暂无应用列表：未授权或当前无匹配进程，可点"刷新应用列表"）'
+            : '（应用列表将在采集器连接后显示）';
+        listEl.appendChild(empty);
+        return;
+    }
+    for (const app of apps) {
+        const label = document.createElement('label');
+        label.className = 'radio-label local-app-item';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.dataset.bundleId = app.bundleId || '';
+        checkbox.checked = saved.has(app.bundleId);
+        checkbox.disabled = useSystem || isConnected;
+        const span = document.createElement('span');
+        span.textContent = app.name || app.bundleId || `pid ${app.pid}`;
+        label.appendChild(checkbox);
+        label.appendChild(span);
+        listEl.appendChild(label);
+    }
+    listEl.classList.toggle('disabled', useSystem);
+}
+
+function safeParseLocalTargets() {
+    try {
+        const parsed = JSON.parse(getSetting(LOCAL_COLLECTOR_TARGETS_KEY, '[]') || '[]');
+        return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string') : [];
+    } catch (error) {
+        return [];
+    }
+}
+
+function persistLocalCollectorTargets() {
+    const listEl = document.getElementById('localAppList');
+    if (!listEl) return;
+    const targets = Array.from(listEl.querySelectorAll('input[type="checkbox"]:checked'))
+        .map((input) => input.dataset.bundleId)
+        .filter(Boolean);
+    setSetting(LOCAL_COLLECTOR_TARGETS_KEY, JSON.stringify(targets));
+}
+
+function getLocalCollectorSelectedBundleIds() {
+    const listEl = document.getElementById('localAppList');
+    if (!listEl) return [];
+    return Array.from(listEl.querySelectorAll('input[type="checkbox"]:checked'))
+        .map((input) => input.dataset.bundleId)
+        .filter(Boolean);
+}
+
+function handleLocalCollectorStopped(reason, message) {
+    if (localCollectorPipeline) {
+        localCollectorPipeline.suspend();
+    }
+    if (isConnected) {
+        updateAudioStatus('音频源已停止', 'error');
+        showError(`应用音频采集已停止: ${message || reason}`);
+    }
+}
+
+async function teardownLocalCollector() {
+    if (localCollector) {
+        localCollector.onAudio = null;
+        localCollector.onStopped = null;
+        try {
+            await localCollector.stop();
+        } catch (error) {
+            // 采集器可能已断开；服务端断开时本来就会自动停。
+        }
+    }
+    if (localCollectorMicStream) {
+        localCollectorMicStream.getTracks().forEach((track) => track.stop());
+        localCollectorMicStream = null;
+    }
+    if (localCollectorPipeline) {
+        const pipeline = localCollectorPipeline;
+        localCollectorPipeline = null;
+        await pipeline.close();
+    }
+}
+
 // ---- 控制 UI ----
 
 function updateControls() {
@@ -2507,12 +2786,20 @@ function updateControls() {
 function updateAudioInputVisibility() {
     const audioInputContainer = document.getElementById('audioInputContainer');
     const tabAudioOptions = document.getElementById('tabAudioOptions');
+    const localAudioOptions = document.getElementById('localAudioOptions');
     if (selectedAudioSource === 'microphone') {
         audioInputContainer.style.display = 'flex';
         if (tabAudioOptions) tabAudioOptions.style.display = 'none';
+        if (localAudioOptions) localAudioOptions.style.display = 'none';
+    } else if (selectedAudioSource === 'local') {
+        audioInputContainer.style.display = 'none';
+        if (tabAudioOptions) tabAudioOptions.style.display = 'none';
+        if (localAudioOptions) localAudioOptions.style.display = 'block';
+        initLocalCollectorUi();
     } else {
         audioInputContainer.style.display = 'none';
         if (tabAudioOptions) tabAudioOptions.style.display = 'block';
+        if (localAudioOptions) localAudioOptions.style.display = 'none';
     }
 }
 
@@ -2539,6 +2826,7 @@ function updateFontSize() {
 const LOCKABLE_SETTING_IDS = [
     'audioInput', 'primaryLanguage', 'secondaryLanguage', 'fontSize',
     'audioSourceMic', 'audioSourceTab', 'tabPlusMic', 'languageMode', 'workspaceProject',
+    'audioSourceLocal', 'localSystemAudio', 'localPlusMic', 'localRefreshApps', 'localGrantPermission',
     'asrEngineOpenai', 'asrEngineLocal', 'localAsrBaseUrl',
     'localTranslateEnabled', 'localTranslateBaseUrl', 'localTranslateModel', 'localTranslateApiKey',
     'testLocalAsr', 'testLocalTranslate', 'testConnection',
@@ -2549,6 +2837,7 @@ function disableSettings() {
         const el = document.getElementById(id);
         if (el) el.disabled = true;
     });
+    renderLocalAppList();
 }
 
 function enableSettings() {
@@ -2556,6 +2845,7 @@ function enableSettings() {
         const el = document.getElementById(id);
         if (el) el.disabled = false;
     });
+    renderLocalAppList();
 }
 
 function enableSplitView(enabled) {

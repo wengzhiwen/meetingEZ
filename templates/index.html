@@ -127,6 +127,10 @@
                         <input type="radio" name="audioSource" value="tab" id="audioSourceTab">
                         <span>使用标签页音频</span>
                     </label>
+                    <label class="radio-label">
+                        <input type="radio" name="audioSource" value="local" id="audioSourceLocal">
+                        <span>应用 / 系统音频（macOS 采集器）</span>
+                    </label>
                 </div>
             </div>
 
@@ -140,6 +144,40 @@
                         <input type="checkbox" id="tabPlusMic">
                         <span>同时录制本地麦克风</span>
                     </label>
+                </div>
+            </div>
+
+            <div id="localAudioOptions" style="display: none;">
+                <div id="localCollectorStatus" class="status-message info" role="status" aria-live="polite">
+                    <strong>本地音频采集器</strong><span id="localCollectorStatusDetail"></span>
+                </div>
+                <div id="localPermissionBox" hidden>
+                    <div class="setting-help">
+                        需要「屏幕录制」权限（macOS 将本采集器归为屏幕录制，纯音频采集不触碰画面）。
+                    </div>
+                    <div class="setting-input-row">
+                        <button id="localGrantPermission" class="btn btn-small btn-secondary" type="button">申请权限</button>
+                        <span class="setting-test-status" id="localPermissionStatus"></span>
+                    </div>
+                </div>
+                <div class="setting-input-row" id="localAppsRow">
+                    <button id="localRefreshApps" class="btn btn-small btn-secondary" type="button">刷新应用列表</button>
+                    <span class="setting-test-status" id="localAppsStatus"></span>
+                </div>
+                <div id="localAppList" class="local-app-list" role="group" aria-label="要采集的应用"></div>
+                <div class="setting-item" style="margin-top: 6px;">
+                    <label class="radio-label">
+                        <input type="checkbox" id="localSystemAudio">
+                        <span>采集整个系统音频</span>
+                    </label>
+                    <label class="radio-label">
+                        <input type="checkbox" id="localPlusMic">
+                        <span>同时录制本地麦克风</span>
+                    </label>
+                </div>
+                <div class="setting-help">
+                    需在本机运行 MeetingEZ Capture（菜单栏应用，构建见仓库 native-capture/README.md）。
+                    会议 App 的输出里没有自己的声音，需要转写自己时勾选麦克风混音。
                 </div>
             </div>
 
@@ -273,6 +311,7 @@
     <script src="{{ url_for('static', filename='js/realtime-translation.js') }}?v=20260713a"></script>
     <script src="{{ url_for('static', filename='js/local-asr-client.js') }}?v=20260815c"></script>
     <script src="{{ url_for('static', filename='js/local-translate-client.js') }}?v=20260815d"></script>
-    <script type="module" src="{{ url_for('static', filename='js/app.js') }}?v=20260815o"></script>
+    <script src="{{ url_for('static', filename='js/local-collector-client.js') }}?v=20260816a"></script>
+    <script type="module" src="{{ url_for('static', filename='js/app.js') }}?v=20260816a"></script>
 </body>
 </html>
