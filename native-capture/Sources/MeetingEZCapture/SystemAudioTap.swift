@@ -200,6 +200,7 @@ final class SystemAudioTap: NSObject, CaptureSource, SCStreamOutput, SCStreamDel
 
     /// sckQueue 上调用。
     private func teardownLocked(_ done: @escaping () -> Void) {
+        logToFile("teardown begin (stream=\(stream != nil))")
         let stream = self.stream
         self.stream = nil
         self.mode = nil
@@ -212,7 +213,8 @@ final class SystemAudioTap: NSObject, CaptureSource, SCStreamOutput, SCStreamDel
             done()
             return
         }
-        stream.stopCapture { _ in
+        stream.stopCapture { error in
+            logToFile("stopCapture completion (error=\(error.map(String.init(describing:)) ?? "nil"))")
             try? stream.removeStreamOutput(self, type: .audio)
             done()
         }
@@ -285,6 +287,7 @@ final class SystemAudioTap: NSObject, CaptureSource, SCStreamOutput, SCStreamDel
     // ---- SCStreamDelegate ----
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
+        logToFile("didStopWithError: \(error.localizedDescription)")
         sckQueue.async { [self] in
             guard let current = self.stream, current === stream else { return }
 

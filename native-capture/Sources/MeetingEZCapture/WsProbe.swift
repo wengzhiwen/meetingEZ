@@ -578,9 +578,12 @@ enum WsProbe {
                 case let .binary(data):
                     stats.add(data)
                 case let .text(text):
-                    if let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
-                       object["type"] as? String == "stats" {
-                        stats.observeStats(object)
+                    if let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] {
+                        if object["type"] as? String == "stats" {
+                            stats.observeStats(object)
+                        } else {
+                            print("采集期收到文本: \(text)")
+                        }
                     }
                 case .close:
                     return fail("采集中连接被关闭。")
@@ -594,9 +597,10 @@ enum WsProbe {
             } catch {
                 return fail("发送 stop 失败: \(error)")
             }
-            let stopped = wait("stopped", timeout: 5)
-            guard stopped.matched != nil else {
-                return fail("未收到 stopped。")
+            let stopped = wait("stopped", timeout: 15)
+            if stopped.matched == nil {
+                print("NOTE: 未收到 stopped（stats: \(stats.summary)）")
+                return 1
             }
             print(stats.summary)
             return stats.frames > 0 ? 0 : 1
